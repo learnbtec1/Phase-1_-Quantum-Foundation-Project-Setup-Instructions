@@ -1,0 +1,78 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-primary: #06b6d4;
+  --color-background: #030712;
+  --color-foreground: #f9fafb;
+  --color-glass-bg: #0f172a;
+  --color-glass-border: #334155;
+  --color-midnight: #020617;
+  --color-cyan-500: #06b6d4;
+  --color-emerald-500: #10b981;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  direction: rtl;
+  font-family: "Cairo", "Inter", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.glass-nexus {
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(0, 0, 0, 0.8));
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(6, 182, 212, 0.2);
+  border-radius: 1.5rem;
+}
+
+.card-nexus {
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(0, 0, 0, 0.8));
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(6, 182, 212, 0.2);
+  border-radius: 1.5rem;
+  padding: 1.5rem;
+  transition: all 0.2s ease;
+}
+
+.card-nexus:hover {
+  transform: scale(1.02);
+}
+
+.text-gradient {
+  background: linear-gradient(to right, var(--color-cyan-500), var(--color-emerald-500));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+}
+
+/* صفحة التقييم — خلفية شركة احترافية (BTEC) */
+.evaluate-company-bg {
+  position: relative;
+  background: #0c1222;
+}
+
+.evaluate-screen-frame {
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 25px 50px -12px rgba(0, 0, 0, 0.5),
+    0 0 80px -20px rgba(6, 182, 212, 0.12);
+}
