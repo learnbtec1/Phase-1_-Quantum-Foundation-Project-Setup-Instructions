@@ -48,6 +48,7 @@ function VRMModel({
 
   // ── Hum Howl ────────────────────────────────────────────────────────────────
   const humRef = useRef<Howl | null>(null);
+  const humResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     let hum: Howl | null = null;
     const onResume = () => {
@@ -85,11 +86,23 @@ function VRMModel({
       receivedAtRef.current = Date.now();
       const h = humRef.current;
       if (!h) return;
+      if (humResetTimeoutRef.current) {
+        clearTimeout(humResetTimeoutRef.current);
+      }
       h.volume(0.06);
-      setTimeout(() => h.volume(0.02), 600);
+      humResetTimeoutRef.current = setTimeout(() => {
+        h.volume(0.02);
+        humResetTimeoutRef.current = null;
+      }, 600);
     };
     window.addEventListener('chat:received', onReceived);
-    return () => window.removeEventListener('chat:received', onReceived);
+    return () => {
+      window.removeEventListener('chat:received', onReceived);
+      if (humResetTimeoutRef.current) {
+        clearTimeout(humResetTimeoutRef.current);
+        humResetTimeoutRef.current = null;
+      }
+    };
   }, []);
 
   // ── VRM loader ──────────────────────────────────────────────────────────────

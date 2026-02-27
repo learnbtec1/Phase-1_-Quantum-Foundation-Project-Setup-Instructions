@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Html, Sky, Float } from '@react-three/drei';
 import { Wallet, Users, Building2 } from 'lucide-react';
@@ -8,7 +8,6 @@ import * as THREE from 'three';
 
 // Simulation gating: check environment variable (default: disabled)
 const SIMULATION_ENABLED =
-  typeof window !== 'undefined' &&
   process.env.NEXT_PUBLIC_SIMULATION_ENABLED === 'true';
 
 // --- 1. هيكل الغرفة (ثابت لا يتغير) ---
@@ -45,41 +44,38 @@ function RoomShell() {
 // --- 2. الأثاث والموظفون (الجزء المعدل للحركة) ---
 function OfficeFurniture() {
   // مكون فرعي للموظف المتحرك
-  const AnimatedEmployee = ({ user, color }: any) => {
+  const AnimatedEmployee = ({ user, color }: { user: string; color: string }) => {
     const groupRef = useRef<THREE.Group>(null);
     const leftArmRef = useRef<THREE.Mesh>(null);
     const rightArmRef = useRef<THREE.Mesh>(null);
     const headRef = useRef<THREE.Mesh>(null);
-    const [isInteracting, setIsInteracting] = useState(false);
+    const isInteractingRef = useRef(false);
+    const [interacting, setInteracting] = useState(false);
 
-    // حلقة التحريك (تعمل في كل فريم)
+    useEffect(() => {
+      return () => { document.body.style.cursor = 'auto'; };
+    }, []);
+
     useFrame((state) => {
       if (!groupRef.current || !leftArmRef.current || !rightArmRef.current || !headRef.current) return;
       const t = state.clock.getElapsedTime();
 
-      // 1. حركة التنفس (للجسم كاملاً)
-      // يتحرك للأعلى والأسفل ببطء
       groupRef.current.position.y = 0.6 + Math.sin(t * 1.5) * 0.02;
-      
-      // 2. حركة الرأس (يميل ببطء)
       headRef.current.rotation.z = Math.sin(t * 1) * 0.05;
       headRef.current.rotation.x = Math.sin(t * 0.8) * 0.05;
 
-      // 3. حركة الطباعة (للأذرع)
-      // حركة سريعة جداً وعشوائية قليلاً فوق الكيبورد
       leftArmRef.current.position.y = 0.3 + Math.abs(Math.sin(t * 10)) * 0.03;
       leftArmRef.current.position.z = 0.2 + Math.cos(t * 12) * 0.02;
       
       rightArmRef.current.position.y = 0.3 + Math.abs(Math.cos(t * 10)) * 0.03;
       rightArmRef.current.position.z = 0.2 + Math.sin(t * 12) * 0.02;
 
-      // 4. التفاعل عند النقر
-      if (isInteracting) {
-        // دوران سريع عند النقر
+      if (isInteractingRef.current) {
         groupRef.current.rotation.y += 0.2;
         if (groupRef.current.rotation.y > Math.PI * 2) {
           groupRef.current.rotation.y = 0;
-          setIsInteracting(false); // إنهاء التفاعل
+          isInteractingRef.current = false;
+          setInteracting(false);
         }
       }
     });
@@ -88,9 +84,9 @@ function OfficeFurniture() {
       <group 
         ref={groupRef} 
         position={[0, 0.6, -0.6]} 
-        onClick={(e) => { e.stopPropagation(); setIsInteracting(true); }}
-        onPointerOver={() => document.body.style.cursor = 'pointer'}
-        onPointerOut={() => document.body.style.cursor = 'auto'}
+        onClick={(e) => { e.stopPropagation(); isInteractingRef.current = true; setInteracting(true); }}
+        onPointerOver={() => { document.body.style.cursor = 'pointer'; }}
+        onPointerOut={() => { document.body.style.cursor = 'auto'; }}
       >
         {/* الرأس */}
         <mesh ref={headRef} position={[0, 0.4, 0]}>
@@ -115,15 +111,15 @@ function OfficeFurniture() {
 
         {/* بطاقة الاسم (تظهر وتختفي عند التفاعل) */}
         <Html position={[0, 0.8, 0]} center transform sprite>
-            <div className={`${isInteracting ? 'bg-green-500 scale-110' : 'bg-black/80'} text-white px-2 py-0.5 rounded text-[10px] whitespace-nowrap border border-white/20 transition-all select-none`}>
-              {isInteracting ? "Hey there! 👋" : user}
+            <div className={`${interacting ? 'bg-green-500 scale-110' : 'bg-black/80'} text-white px-2 py-0.5 rounded text-[10px] whitespace-nowrap border border-white/20 transition-all select-none`}>
+              {interacting ? "Hey there! 👋" : user}
             </div>
         </Html>
       </group>
     );
   }
 
-  const Desk = ({ x, z, rotate = 0, user = null, color = "#2563eb" }: any) => (
+  const Desk = ({ x, z, rotate = 0, user, color = "#2563eb" }: { x: number; z: number; rotate?: number; user?: string; color?: string }) => (
     <group position={[x, 0, z]} rotation={[0, rotate, 0]}>
       {/* هيكل المكتب الثابت */}
       <mesh position={[0, 0.6, 0]} castShadow><boxGeometry args={[2, 0.1, 1]} /><meshStandardMaterial color="#e2e8f0" /></mesh>
