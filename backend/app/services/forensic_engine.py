@@ -63,7 +63,19 @@ if not api_key or (api_key.strip() == "") or api_key == "your-openai-key-here":
 else:
     client = OpenAI(api_key=api_key)
 
-MODEL = os.getenv("GRADER_MODEL", "gpt-4o")
+# Model must be a valid OpenAI model (this engine uses OpenAI API, not Anthropic).
+# If GRADER_MODEL is set to a Claude model (e.g. claude-sonnet-4-*), fall back to gpt-4o.
+_raw_model = os.getenv("GRADER_MODEL", "gpt-4o").strip()
+if _raw_model.lower().startswith("claude-"):
+    logger.warning(
+        "GRADER_MODEL=%s is an Anthropic model; this engine uses OpenAI. Falling back to gpt-4o.",
+        _raw_model,
+    )
+    MODEL = "gpt-4o"
+else:
+    MODEL = _raw_model or "gpt-4o"
+# Alias exported for the health-check endpoint in main.py
+MODEL_NAME = MODEL
 MAX_TOKENS = int(os.getenv("GRADER_MAX_TOKENS", "2000"))
 HARD_DEADLINE = int(os.getenv("GRADER_HARD_DEADLINE_SEC", "120"))
 REQUEST_TIMEOUT = int(os.getenv("GRADER_REQUEST_TIMEOUT", "60"))
@@ -367,13 +379,22 @@ async def evaluate_one(
             }
         except Exception as e:
             err_msg = str(e).lower()
+            is_api_error = (
+                "404" in err_msg
+                or "model" in err_msg
+                or "not found" in err_msg
+                or "invalid" in err_msg
+                or "429" in err_msg
+                or "rate limit" in err_msg
+                or (RateLimitError is not None and isinstance(e, RateLimitError))
+            )
             if "429" in err_msg or "rate limit" in err_msg or (RateLimitError is not None and isinstance(e, RateLimitError)):
                 logger.warning("تجاوز حد طلبات OpenAI (429). قلّل GRADER_MAX_CONCURRENT أو زِد GRADER_DELAY_SEC في .env")
                 reason = "تجاوز حد طلبات API. جرب لاحقاً أو قلّل عدد المعايير."
             else:
                 reason = f"خطأ فني: {str(e)}"
             logger.exception(f"Error evaluating {code}: {e}")
-            return code, {
+            result = {
                 "band": band,
                 "achieved": False,
                 "reasoning": reason,
@@ -381,8 +402,11 @@ async def evaluate_one(
                 "evidence": [],
                 "evidence_quote": "",
                 "quality": "خطأ",
-                "missing_requirements": [reason]
+                "missing_requirements": [reason],
             }
+            if is_api_error:
+                result["_api_error"] = True
+            return code, result
 
 
 # ========= Streaming Engine =========
@@ -452,6 +476,19 @@ async def forensic_grade_stream(assignment_text: str, student_text: str) -> Asyn
                 logger.warning(f"Job {job_id} hit hard deadline at {len(results)}/{total}")
                 break
 
+        # If API errors occurred (404, invalid model, etc.), return user-friendly error
+        # instead of marking student as "not achieved"
+        api_errors = [r for r in results.values() if r.get("_api_error")]
+        if api_errors:
+            err_reason = api_errors[0].get("reasoning", "خدمة التقييم غير متاحة حالياً")
+            logger.error("API error during grading: %s", err_reason)
+            yield json.dumps({
+                "type": "error",
+                "message": "تقييم غير متاح حالياً. يرجى التحقق من إعدادات GRADER_MODEL و OPENAI_API_KEY والمحاولة لاحقاً.",
+                "detail": err_reason,
+            }, ensure_ascii=False) + "\n"
+            return
+
         # Apply staircase grading
         final_grade = calculate_final_grade_btec(results)
 
@@ -512,9 +549,10 @@ async def forensic_grade(assignment_text: str, student_text: str) -> dict:
         if final_result.get("type") == "error":
             return {
                 "final_grade": "ERROR",
-                "summary": final_result.get("message", "خطأ غير معروف"),
+                "summary": final_result.get("message", "تقييم غير متاح حالياً، يرجى المحاولة لاحقاً."),
                 "criteria": {},
-                "criteria_results": {}
+                "criteria_results": {},
+                "error_detail": final_result.get("detail"),
             }
 
         if final_result.get("type") == "final":
