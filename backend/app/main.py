@@ -14,7 +14,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.endpoints.assessment import router as assessment_router
 from app.api.v1.endpoints.chat import router as chat_router
-from app.api.v1.endpoints.stt import router as stt_router
 from app.api.v1.endpoints.tts_timing import router as tts_timing_router
 
 logger = logging.getLogger(__name__)
@@ -40,7 +39,6 @@ app.add_middleware(
 # Include routers
 app.include_router(assessment_router)
 app.include_router(chat_router, prefix="/api/v1")
-app.include_router(stt_router, prefix="/api/v1")
 app.include_router(tts_timing_router, prefix="/api/v1")
 
 @app.get("/")
@@ -51,9 +49,3 @@ async def health_check():
         "model": "claude-sonnet-4-20250514",
         "system": "Connected to Next.js Frontend"
     }
-
-
-@app.get("/api/health")
-async def api_health():
-    """Health check for frontend /api/health reachability probes."""
-    return {"ok": True, "status": "ok"}
