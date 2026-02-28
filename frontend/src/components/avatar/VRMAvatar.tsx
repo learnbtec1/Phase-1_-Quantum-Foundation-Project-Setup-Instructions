@@ -509,14 +509,20 @@ function VRMModel({
             visemeRef.current = lerpViseme(visemeRef.current, target, delta);
             if (!lipSyncFlagSetRef.current && typeof window !== 'undefined') {
               lipSyncFlagSetRef.current = true;
-              try { (window as unknown as { __lipSyncStarted?: boolean }).__lipSyncStarted = true; } catch {}
+              try {
+                (window as unknown as { __lipSyncStarted?: boolean }).__lipSyncStarted = true;
+                if (process.env.NODE_ENV === 'development') console.debug('[VRMAvatar] __lipSyncStarted = true (timings)');
+              } catch {}
             }
           } else {
             const t = state.clock.elapsedTime - talkStartRef.current;
             visemeRef.current = proceduralViseme(t);
             if (!lipSyncFlagSetRef.current && typeof window !== 'undefined') {
               lipSyncFlagSetRef.current = true;
-              try { (window as unknown as { __lipSyncStarted?: boolean }).__lipSyncStarted = true; } catch {}
+              try {
+                (window as unknown as { __lipSyncStarted?: boolean }).__lipSyncStarted = true;
+                if (process.env.NODE_ENV === 'development') console.debug('[VRMAvatar] __lipSyncStarted = true (procedural)');
+              } catch {}
             }
           }
           em.setValue(BS_AA, visemeRef.current.aa);

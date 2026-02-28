@@ -178,11 +178,6 @@ function BoardroomContent({
       <pointLight position={[3, 3, 2]} color="#4a90e2" intensity={0.25} />
       <CityWindow />
       <Table />
-      {/* Diagnostic: red sphere = Canvas works */}
-      <mesh position={[2, 0, 2]}>
-        <sphereGeometry args={[0.15, 16, 16]} />
-        <meshStandardMaterial color="#e11d48" />
-      </mesh>
       <ChairSilhouette position={[1.4, -0.37, 0.8]} />
       <ChairSilhouette position={[-1.4, -0.37, 0.8]} />
       <ChairSilhouette position={[1.2, -0.37, -0.6]} />
@@ -321,12 +316,6 @@ function SceneManager({
 
       {/* AR surface reticle — only in session */}
       {isPresenting && <ARPlacementManager onPlace={handleARPlace} />}
-
-      {/* Diagnostic: red sphere = Canvas works (remove in prod) */}
-      <mesh position={[2, 0, 2]}>
-        <sphereGeometry args={[0.15, 16, 16]} />
-        <meshStandardMaterial color="#e11d48" />
-      </mesh>
 
       {/* Avatar + panels — always visible; shift to AR placement position */}
       <group position={isPresenting ? arPosition : [0, 0, 0]}>
