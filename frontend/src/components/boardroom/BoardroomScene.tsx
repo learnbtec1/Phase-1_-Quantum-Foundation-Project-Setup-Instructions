@@ -12,6 +12,7 @@ import { XR, useXR, type XRStore, type XRState } from '@react-three/xr';
 import * as THREE from 'three';
 import dynamic from 'next/dynamic';
 import ErrorBoundary from '@/components/ErrorBoundary';
+import type { VRMAvatarRef } from '@/components/avatar/VRMAvatar';
 
 function useIsMobile() {
   return useMemo(() => {
@@ -20,10 +21,7 @@ function useIsMobile() {
   }, []);
 }
 
-const BoardroomAvatar = dynamic(
-  () => import('@/components/avatar/VRMAvatar').then((m) => m.default),
-  { ssr: false }
-);
+import BoardroomAvatar from '@/components/avatar/VRMAvatar';
 const HolographicPanels = dynamic(
   () => import('@/components/boardroom/HolographicPanels').then((m) => m.default),
   { ssr: false }
@@ -56,7 +54,8 @@ function makeFallbackTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
   canvas.width = 2;
   canvas.height = 2;
-  const ctx = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return new THREE.CanvasTexture(canvas);
   ctx.fillStyle = '#0f172a';
   ctx.fillRect(0, 0, 2, 2);
   const tex = new THREE.CanvasTexture(canvas);
@@ -153,7 +152,13 @@ function ChairSilhouette({ position }: { position: [number, number, number] }) {
 
 // ─── Desktop-only scene (no XR) ───────────────────────────────────────────────
 
-function BoardroomContent({ useSimpleFallback = false }: { useSimpleFallback?: boolean }) {
+function BoardroomContent({
+  useSimpleFallback = false,
+  avatarRef,
+}: {
+  useSimpleFallback?: boolean;
+  avatarRef?: React.RefObject<VRMAvatarRef | null>;
+}) {
   const mobile = useIsMobile();
   return (
     <>
@@ -173,6 +178,11 @@ function BoardroomContent({ useSimpleFallback = false }: { useSimpleFallback?: b
       <pointLight position={[3, 3, 2]} color="#4a90e2" intensity={0.25} />
       <CityWindow />
       <Table />
+      {/* Diagnostic: red sphere = Canvas works */}
+      <mesh position={[2, 0, 2]}>
+        <sphereGeometry args={[0.15, 16, 16]} />
+        <meshStandardMaterial color="#e11d48" />
+      </mesh>
       <ChairSilhouette position={[1.4, -0.37, 0.8]} />
       <ChairSilhouette position={[-1.4, -0.37, 0.8]} />
       <ChairSilhouette position={[1.2, -0.37, -0.6]} />
@@ -180,7 +190,7 @@ function BoardroomContent({ useSimpleFallback = false }: { useSimpleFallback?: b
       <BrandingText />
       <HolographicPanels />
       <Suspense fallback={<FallbackAvatar />}>
-        <BoardroomAvatar useSimpleFallback={useSimpleFallback} />
+        <BoardroomAvatar ref={avatarRef as React.RefObject<VRMAvatarRef>} useSimpleFallback={useSimpleFallback} />
       </Suspense>
       <ContactShadows position={[0, -0.82, 0]} opacity={0.45} scale={12} blur={2.5} far={4} />
       <Sparkles count={mobile ? 30 : 80} scale={14} size={1.2} opacity={0.08} color="#4a90e2" />
@@ -197,19 +207,26 @@ function XRSessionEffects() {
 
   useEffect(() => {
     if (isPresenting) {
-      // AR: transparent background so the camera feed shows through
       gl.setClearAlpha(0);
       gl.domElement.style.background = 'transparent';
-    } else {
-      // Desktop: opaque background
-      gl.setClearAlpha(1);
-      gl.domElement.style.background = '';
+      const onEnd = () => {
+        gl.setClearAlpha(1);
+        gl.domElement.style.background = '';
+      };
+      session?.addEventListener('end', onEnd);
+      return () => {
+        session?.removeEventListener('end', onEnd);
+        gl.setClearAlpha(1);
+        gl.domElement.style.background = '';
+      };
     }
+    gl.setClearAlpha(1);
+    gl.domElement.style.background = '';
     return () => {
       gl.setClearAlpha(1);
       gl.domElement.style.background = '';
     };
-  }, [isPresenting, gl]);
+  }, [isPresenting, gl, session]);
 
   return null;
 }
@@ -239,7 +256,13 @@ function WebGLContextEvents() {
 
 // ─── XR-aware scene manager (must live inside <XR>) ───────────────────────────
 
-function SceneManager({ useSimpleFallback = false }: { useSimpleFallback?: boolean }) {
+function SceneManager({
+  useSimpleFallback = false,
+  avatarRef,
+}: {
+  useSimpleFallback?: boolean;
+  avatarRef?: React.RefObject<VRMAvatarRef | null>;
+}) {
   const session = useXR((s: XRState) => s.session);
   const isPresenting = session != null;
   const mobile = useIsMobile();
@@ -299,11 +322,17 @@ function SceneManager({ useSimpleFallback = false }: { useSimpleFallback?: boole
       {/* AR surface reticle — only in session */}
       {isPresenting && <ARPlacementManager onPlace={handleARPlace} />}
 
+      {/* Diagnostic: red sphere = Canvas works (remove in prod) */}
+      <mesh position={[2, 0, 2]}>
+        <sphereGeometry args={[0.15, 16, 16]} />
+        <meshStandardMaterial color="#e11d48" />
+      </mesh>
+
       {/* Avatar + panels — always visible; shift to AR placement position */}
       <group position={isPresenting ? arPosition : [0, 0, 0]}>
         <HolographicPanels />
         <Suspense fallback={<FallbackAvatar />}>
-          <BoardroomAvatar useSimpleFallback={useSimpleFallback} />
+          <BoardroomAvatar ref={avatarRef as React.RefObject<VRMAvatarRef>} useSimpleFallback={useSimpleFallback} />
         </Suspense>
         {isPresenting && (
           <ContactShadows
@@ -344,12 +373,15 @@ export interface BoardroomSceneProps {
   useSimpleAvatarFallback?: boolean;
   /** XRStore — when provided the Canvas gains full WebXR AR support */
   xrStore?: XRStore | null;
+  /** Ref to access avatar speak() */
+  avatarRef?: React.RefObject<VRMAvatarRef | null>;
 }
 
 export default function BoardroomScene({
   canvasKey = 0,
   useSimpleAvatarFallback = false,
   xrStore,
+  avatarRef,
 }: BoardroomSceneProps) {
   return (
     <div className="absolute inset-0 w-full h-full min-h-[300px]">
@@ -375,10 +407,10 @@ export default function BoardroomScene({
         <WebGLContextEvents />
         {xrStore != null ? (
           <XR store={xrStore}>
-            <SceneManager useSimpleFallback={useSimpleAvatarFallback} />
+            <SceneManager useSimpleFallback={useSimpleAvatarFallback} avatarRef={avatarRef} />
           </XR>
         ) : (
-          <BoardroomContent useSimpleFallback={useSimpleAvatarFallback} />
+          <BoardroomContent useSimpleFallback={useSimpleAvatarFallback} avatarRef={avatarRef} />
         )}
       </Canvas>
     </div>
