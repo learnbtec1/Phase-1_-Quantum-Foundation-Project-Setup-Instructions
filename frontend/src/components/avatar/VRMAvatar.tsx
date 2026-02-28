@@ -83,7 +83,7 @@ function useListeningState() {
 function useHeadTracking(
   groupRef: React.RefObject<THREE.Group | null>,
   _listeningRef?: React.RefObject<boolean>,
-  opts?: { waveUntilRef?: React.RefObject<number> }
+  opts?: { waveUntilRef?: React.RefObject<number>; postureLeanRef?: React.RefObject<number>; isTalkingRef?: React.RefObject<boolean> }
 ) {
   useFrame((state) => {
     const g = groupRef.current;
@@ -568,7 +568,7 @@ function VRMModel({
           onLoad?.();
           waveUntilRef.current = Date.now() + WAVE_DURATION * 1000;
           // Find right upper arm from skeleton (VRM humanoid getRawBoneNode may return null for some models)
-          let rightArm: THREE.Bone | null = vrmModel.humanoid?.getRawBoneNode('rightUpperArm' as never) ?? null;
+          let rightArm: THREE.Bone | null = (vrmModel.humanoid?.getRawBoneNode('rightUpperArm' as never) ?? null) as THREE.Bone | null;
           if (!rightArm) {
             vrmModel.scene.traverse((o) => {
               const mesh = o as THREE.SkinnedMesh;
@@ -590,7 +590,7 @@ function VRMModel({
               const clip = new THREE.AnimationClip('waveArm', 1, [track]);
               const mixer = new THREE.AnimationMixer(vrmModel.scene);
               mixerRef.current = mixer;
-              mixer.clipAction(clip).setLoop(THREE.LoopRepeat).play();
+              mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
               console.warn('[VRMAvatar] Wave animation started for bone:', rightArm.name);
             } catch (animErr) {
               console.warn('[VRMAvatar] Wave clip failed:', (animErr as Error).message);
