@@ -10,9 +10,9 @@ export interface WordTiming {
   end_time: number;
 }
 
-const LERP_SPEED = 18;
-const PEAK_WEIGHT = 0.85;
-const REST_WEIGHT = 0.08;
+const LERP_SPEED = 28;
+const PEAK_WEIGHT = 1.0;
+const REST_WEIGHT = 0.02;
 
 /**
  * Map a phoneme-like character to viseme weights.

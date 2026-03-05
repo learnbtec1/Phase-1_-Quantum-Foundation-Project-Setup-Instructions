@@ -35,11 +35,11 @@ export interface AvatarCanvasRef {
 
 // ─── Scene constants ─────────────────────────────────────────────────────────
 const AVATAR_BASE_Y        = -1.0;
-const BREATHE_AMP          = 0.055;
-const BLINK_MIN            = 2.0;   // seconds
-const BLINK_MAX            = 5.0;
-const POSE_BLEND_SPEED     = 5.5;   // lerp factor × delta → ~0.2s to 95%
-const EMOTION_BLEND_SPEED  = 3.5;   // expression lerp speed
+const BREATHE_AMP          = 0.12;  // ↑ visible chest heave (was 0.055)
+const BLINK_MIN            = 2.0;
+const BLINK_MAX            = 4.5;   // blink more often (was 5.0)
+const POSE_BLEND_SPEED     = 6.5;   // ↑ snappier arm transitions (was 5.5)
+const EMOTION_BLEND_SPEED  = 5.5;   // ↑ faster emotion switch (was 3.5)
 const ZOOM_MIN             = 1.2;
 const ZOOM_MAX             = 5.5;
 const ZOOM_SPEED           = 0.18;
@@ -586,8 +586,8 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
 
     // ── 1. Breathing + subtle torso drift ────────────────────────────────
     const breatheY  = Math.sin(t * 0.82) * BREATHE_AMP;
-    const driftX    = Math.sin(t * 0.21 + np) * 0.016;     // gentle lateral
-    const spineSway = Math.sin(t * 0.34 + sp) * 0.016;     // subtle yaw
+    const driftX    = Math.sin(t * 0.21 + np) * 0.030;     // ↑ visible lateral drift (was 0.016)
+    const spineSway = Math.sin(t * 0.34 + sp) * 0.035;     // ↑ visible torso yaw (was 0.016)
     group.position.set(driftX, AVATAR_BASE_Y + breatheY, 0.2);
     group.rotation.y = Math.PI + spineSway;
 
@@ -600,20 +600,18 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
     if (humanoid) {
       try {
         // ── Phase 6: weight-shift target (smooth per-frame) ────────────────
-        const targetHipShift = Math.sin(t * 0.28 + weightShiftPhaseRef.current) * 0.022;
-        hipShiftRef.current  = lerpN(hipShiftRef.current, targetHipShift, delta * 1.5);
+        const targetHipShift = Math.sin(t * 0.28 + weightShiftPhaseRef.current) * 0.055; // ↑ visible sway (was 0.022)
+        hipShiftRef.current  = lerpN(hipShiftRef.current, targetHipShift, delta * 4.0);  // ↑ faster response (was 1.5)
 
-        const spineR     = Math.sin(t * 0.51 + sp) * 0.010;
+        const spineR     = Math.sin(t * 0.51 + sp) * 0.022; // ↑ visible spine roll (was 0.010)
         const listenElapsed = isListeningRef.current ? (Date.now() - listeningStartRef.current) / 1000 : 0;
-        const listenLean = lerpN(0, 0.025, Math.min(1, listenElapsed * 0.5));
+        const listenLean = lerpN(0, 0.060, Math.min(1, listenElapsed * 0.6)); // ↑ lean more (was 0.025)
         const spineBone  = humanoid.getRawBoneNode('spine' as never);
-        if (spineBone) spineBone.rotation.set(spineR * 0.5 + listenLean, spineSway * 0.35, spineR, 'XYZ');
+        if (spineBone) spineBone.rotation.set(spineR * 0.8 + listenLean, spineSway * 0.6, spineR, 'XYZ'); // ↑ multipliers
         const chestBone  = humanoid.getRawBoneNode('chest' as never);
-        // Z: shoulder counterbalance opposite to hip shift (~55% amplitude)
-        if (chestBone) chestBone.rotation.set(breatheY * 1.1 + listenLean * 0.5, 0, -hipShiftRef.current * 0.55, 'XYZ');
-        // Hip lateral tilt — organic sway, ≤1.5° max
+        if (chestBone) chestBone.rotation.set(breatheY * 1.8 + listenLean * 0.8, 0, -hipShiftRef.current * 1.1, 'XYZ'); // ↑ breathing + shoulder (was 1.1, 0.55)
         const hipBone = humanoid.getRawBoneNode('hips' as never);
-        if (hipBone) hipBone.rotation.z = hipShiftRef.current * 1.2;
+        if (hipBone) hipBone.rotation.z = hipShiftRef.current * 2.5; // ↑ hip tilt (was 1.2)
       } catch { /* bone absent */ }
     }
 
@@ -658,11 +656,11 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
           const audioMs = (speechAudioRef.current.currentTime ?? 0) * 1000;
           targetViseme  = timingsToVisemeAt(timings, audioMs);
         } else {
-          // Procedural fallback: variable-frequency sine
+          // Procedural fallback: variable-frequency sine — mouth opens & closes fully
           const et   = talkElapsedRef.current;
-          const modF = 8.0 + Math.sin(et * 2.1) * 2.5;
-          const raw  = Math.max(0, 0.28 + 0.55 * Math.sin(et * modF));
-          targetViseme = { aa: raw, ih: raw * 0.5, ou: raw * 0.3 };
+          const modF = 9.0 + Math.sin(et * 2.1) * 3.5; // ↑ faster syllable rate
+          const raw  = Math.max(0, 0.75 * Math.sin(et * modF)); // ↑ full open-close (was 0.28+0.55, never fully closed)
+          targetViseme = { aa: raw * 0.9, ih: raw * 0.6, ou: raw * 0.4 };
         }
         visemeRef.current = lerpViseme(visemeRef.current, targetViseme, delta);
       } else {
@@ -675,25 +673,27 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       try { em.setValue('ih' as never, visemeRef.current.ih); } catch {}
       try { em.setValue('ou' as never, visemeRef.current.ou); } catch {}
 
-      // ── Phase 5: Micro-expressions overlay (subtle, emotion-driven) ───────
+      // ── Phase 5: Micro-expressions overlay (visible, emotion-driven) ───────
       const em5 = emotionRef.current;
-      // 1. Brow flutter — gentle undulation, boosted on surprised/celebration
-      const browAmp = (em5 === 'surprised' || em5 === 'celebration') ? 0.30 : 0.06;
-      const browV   = (0.5 + 0.5 * Math.sin(t * 0.9)) * browAmp;
+      // 1. Brow raise — clearly visible, boosted on surprised/thinking/celebration
+      const browAmp = (em5 === 'surprised' || em5 === 'celebration') ? 0.55  // ↑ strong surprise
+                    : (em5 === 'thinking'  || em5 === 'sad')          ? 0.35  // ↑ inner brow raise
+                    : 0.20; // ↑ always-visible idle flicker (was 0.06)
+      const browV   = (0.5 + 0.5 * Math.sin(t * 1.3)) * browAmp; // ↑ freq 0.9→1.3
       try { em.setValue('browInnerUp'  as never, browV); } catch {
         try { em.setValue('browUp'     as never, browV); } catch {} }
 
       // 2. Eye squint — on happy / friendly tones
       const squintActive = em5 === 'happy' || em5 === 'friendly' || em5 === 'celebration' || em5 === 'encouraging';
-      const squintV = squintActive ? 0.22 + 0.12 * Math.sin(t * 1.7) : 0;
+      const squintV = squintActive ? 0.40 + 0.18 * Math.sin(t * 1.7) : 0; // ↑ more visible squint (was 0.22+0.12)
       try { em.setValue('cheekSquintLeft'  as never, squintV); } catch {
         try { em.setValue('squintLeft'     as never, squintV); } catch {} }
       try { em.setValue('cheekSquintRight' as never, squintV); } catch {
         try { em.setValue('squintRight'    as never, squintV); } catch {} }
 
       // 3. Half-smile — friendly / encouraging overlay
-      const smileActive = em5 === 'friendly' || em5 === 'encouraging' || em5 === 'happy';
-      const smileV = smileActive ? 0.18 + 0.10 * Math.sin(t * 1.1) : 0;
+      const smileActive = em5 === 'friendly' || em5 === 'encouraging' || em5 === 'happy' || em5 === 'celebration';
+      const smileV = smileActive ? 0.40 + 0.18 * Math.sin(t * 1.1) : 0; // ↑ more visible smile (was 0.18+0.10)
       try { em.setValue('mouthSmileLeft'  as never, smileV); } catch {}
       try { em.setValue('mouthSmileRight' as never, smileV); } catch {}
 
@@ -709,7 +709,7 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       const sac = Math.sin(saccadeRef.current * 14.3) * 0.004;
       const worldTarget = new THREE.Vector3(pointer.x + sac, pointer.y + sac * 0.6, 0.4).unproject(camera);
       // Lagged lerp — natural drift with slight speed variation
-      const lagSpeed = 2.0 + Math.sin(t * 2.9) * 0.35;
+      const lagSpeed = 5.5 + Math.sin(t * 2.9) * 1.2; // ↑ responsive eye tracking (was 2.0+0.35)
       lookTargetRef.current.lerp(worldTarget, Math.min(1, delta * lagSpeed));
       vrmLookAt.lookAt(lookTargetRef.current);
     }
@@ -718,13 +718,13 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
     if (now >= nextMicroRef.current) {
       microTypeRef.current  = Math.random() < 0.5 ? 'tilt' : 'nod';
       microStartRef.current = now;
-      microDurRef.current   = 600 + Math.random() * 700;
-      nextMicroRef.current  = now + 4000 + Math.random() * 5000;
+      microDurRef.current   = 500 + Math.random() * 600;  // ↑ slightly faster (was 600+700)
+      nextMicroRef.current  = now + 2000 + Math.random() * 3000; // ↑ more frequent (was 4000+5000)
     }
 
     if (microTypeRef.current && humanoid) {
       const mProg = Math.min(1, (now - microStartRef.current) / microDurRef.current);
-      const mEnv  = Math.sin(mProg * Math.PI) * 0.055;
+      const mEnv  = Math.sin(mProg * Math.PI) * 0.14; // ↑ clearly visible head tilt/nod (was 0.055)
       try {
         const neckBone = humanoid.getRawBoneNode('neck' as never);
         if (neckBone) {
