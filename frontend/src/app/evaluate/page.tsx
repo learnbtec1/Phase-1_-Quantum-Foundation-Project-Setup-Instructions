@@ -28,12 +28,11 @@ const SUGGESTIONS = [
   { label: '✨ ما هو NEXUS؟', text: 'ما هو نظام NEXUS وكيف يعمل؟' },
 ];
 
-// يحلل استجابة LLM ويستخرج الحركة والتعبير
-const handleLLMResponse = (response: string): string => {
-  const { dialogue, emotion, action } = parseVeronaResponse(response);
-  if (action) dispatchGestureFromActionText(action);
-  if (emotion && emotion !== 'neutral') dispatchEmotion(emotion);
-  return dialogue || response;
+// Emotion → student-performance result mapping for Phase 7
+const EMOTION_TO_PERF: Record<string, string> = {
+  celebration: 'correct', excited: 'correct', happy: 'correct',
+  encouraging: 'partial', friendly: 'partial',
+  thinking: 'incorrect', sad: 'incorrect', empathy: 'incorrect', neutral: 'partial',
 };
 
 export default function EvaluatePage() {
@@ -43,15 +42,34 @@ export default function EvaluatePage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sttRef = useRef<{ start: (...a: any[]) => void; stop: () => void } | null>(null);
+
+  // Barge-in: stop TTS when student starts speaking
+  useEffect(() => {
+    const onSpeechStart = () => {
+      import('@/ai/io/tts').then(({ stopTTS }) => stopTTS()).catch(() => {});
+    };
+    window.addEventListener('stt:speechstart', onSpeechStart);
+    return () => window.removeEventListener('stt:speechstart', onSpeechStart);
+  }, []);
 
   useEffect(() => {
     const el = messagesContainerRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
-  const sendMessage = async (overrideText?: string) => {
+  const sendMessage = useCallback(async (overrideText?: string) => {
     const text = (overrideText ?? inputText).trim();
     if (!text || isLoading) return;
+
+    // Stop mic if listening when the user sends a message
+    if (isListening) {
+      sttRef.current?.stop();
+      setIsListening(false);
+      window.dispatchEvent(new CustomEvent('avatar:listening', { detail: { active: false } }));
+    }
 
     setMessages((prev) => [...prev, { role: 'user', content: text }]);
     setInputText('');
@@ -64,12 +82,24 @@ export default function EvaluatePage() {
         body: JSON.stringify({ message: text }),
       });
       const data = await res.json();
-      const reply =
-        res.ok && data.reply
-          ? handleLLMResponse(data.reply)
-          : 'عذراً، حدث خطأ. حاول مرة أخرى.';
+      let detectedEmotion = 'neutral';
+      const reply = (() => {
+        if (res.ok && data.reply) {
+          const { dialogue, emotion, action } = parseVeronaResponse(data.reply);
+          if (action) dispatchGestureFromActionText(action);
+          if (emotion && emotion !== 'neutral') {
+            dispatchEmotion(emotion);
+            detectedEmotion = emotion;
+          }
+          return dialogue || data.reply;
+        }
+        return 'عذراً، حدث خطأ. حاول مرة أخرى.';
+      })();
       setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
       avatarRef.current?.speak(reply ?? '');
+      // Phase 7: dispatch student performance based on avatar's emotional reaction
+      const perfResult = EMOTION_TO_PERF[detectedEmotion] ?? 'partial';
+      window.dispatchEvent(new CustomEvent('student:performance', { detail: { result: perfResult } }));
     } catch {
       setMessages((prev) => [
         ...prev,
@@ -78,7 +108,29 @@ export default function EvaluatePage() {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [inputText, isLoading, isListening]);
+
+  const toggleMic = useCallback(async () => {
+    if (isListening) {
+      sttRef.current?.stop();
+      sttRef.current = null;
+      setIsListening(false);
+      window.dispatchEvent(new CustomEvent('avatar:listening', { detail: { active: false } }));
+    } else {
+      const { createSTT } = await import('@/ai/io/stt');
+      const stt = createSTT();
+      if (!stt.isSupported()) return;
+      stt.start((result) => {
+        setInputText(result.transcript);
+        if (result.isFinal && result.transcript.trim()) {
+          sendMessage(result.transcript.trim());
+        }
+      });
+      sttRef.current = stt;
+      setIsListening(true);
+      window.dispatchEvent(new CustomEvent('avatar:listening', { detail: { active: true } }));
+    }
+  }, [isListening, sendMessage]);
 
   return (
     <div className="relative flex flex-col min-h-screen evaluate-company-bg">
@@ -193,6 +245,20 @@ export default function EvaluatePage() {
             className="flex-1 bg-slate-700/80 border border-slate-600 rounded-lg px-4 py-2.5 text-gray-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 text-sm min-w-0 transition"
             disabled={isLoading}
           />
+          {/* Phase 1: Microphone button — activates STT */}
+          <button
+            type="button"
+            onClick={toggleMic}
+            disabled={isLoading}
+            title={isListening ? 'إيقاف الميكروفون' : 'تحدث (ميكروفون)'}
+            className={`shrink-0 w-10 h-10 flex items-center justify-center rounded-lg border transition ${
+              isListening
+                ? 'bg-violet-600 border-violet-400 text-white shadow-lg shadow-violet-900/50 animate-pulse'
+                : 'bg-slate-700/80 border-slate-600 text-slate-300 hover:bg-slate-600 hover:text-white'
+            } disabled:opacity-40 disabled:cursor-not-allowed`}
+          >
+            {isListening ? '🎙️' : '🎤'}
+          </button>
           <button
             type="button"
             onClick={() => sendMessage()}

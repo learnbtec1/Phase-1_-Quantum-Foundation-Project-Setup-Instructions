@@ -388,7 +388,8 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
   const saccadeRef     = useRef(0);    // micro-saccade phase accumulator
 
   // ── Listening state (Phase 1: STT) ───────────────────────────────────────
-  const isListeningRef = useRef(false);
+  const isListeningRef      = useRef(false);
+  const listeningStartRef   = useRef(0); // Date.now() when listening began
 
   // ── Micro-gestures (Poisson process ~every 4–9 s) ─────────────────────────
   const nextMicroRef    = useRef(Date.now() + 5000 + Math.random() * 4000);
@@ -479,7 +480,7 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
 
       import('@/ai/io/tts')
         .then(({ speakWithTTS }) =>
-          speakWithTTS(text, { onStart, onEnd }).then((ok) => {
+          speakWithTTS(text, { onStart, onEnd, emotion: emotionRef.current }).then((ok) => {
             if (!ok) fallbackSpeak(text, onStart, onEnd);
           }),
         )
@@ -528,6 +529,7 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       isListeningRef.current = active;
       // When entering listening: snap look forward (attentive posture)
       if (active) {
+        listeningStartRef.current = Date.now();
         lookTargetRef.current.set(0, 1.05, 3.0);
       }
     };
@@ -602,7 +604,8 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
         hipShiftRef.current  = lerpN(hipShiftRef.current, targetHipShift, delta * 1.5);
 
         const spineR     = Math.sin(t * 0.51 + sp) * 0.010;
-        const listenLean = isListeningRef.current ? lerpN(0, 0.025, Math.min(1, t * 0.5)) : 0;
+        const listenElapsed = isListeningRef.current ? (Date.now() - listeningStartRef.current) / 1000 : 0;
+        const listenLean = lerpN(0, 0.025, Math.min(1, listenElapsed * 0.5));
         const spineBone  = humanoid.getRawBoneNode('spine' as never);
         if (spineBone) spineBone.rotation.set(spineR * 0.5 + listenLean, spineSway * 0.35, spineR, 'XYZ');
         const chestBone  = humanoid.getRawBoneNode('chest' as never);
