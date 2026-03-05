@@ -42,9 +42,21 @@ const ACTION_GESTURE_MAP: Array<{ pattern: RegExp; gesture: Partial<GestureDescr
   { pattern: /يومئ|nod|يهز/i,                gesture: { type: 'beat',     intensity: 0.5 } },
 ];
 
+// ─── Phase 9: Motor memory — per-gesture cooldown windows ───────────────────────
+
+const GESTURE_COOLDOWN_MS: Record<string, number> = {
+  wave:     15_000,
+  point:     8_000,
+  openHand:  6_000,
+  beat:      5_000,
+};
+
 // ─── GestureEngine ────────────────────────────────────────────────────────────
 
 export class GestureEngine {
+  /** Phase 9: Motor memory — tracks last-played time per gesture type. */
+  private _recentGestures = new Map<string, number>();
+
   /**
    * Parse an action-line string and dispatch the best-matching gesture event.
    * Optionally provide the current emotion tag to scale intensity.
@@ -62,12 +74,12 @@ export class GestureEngine {
       if (pattern.test(actionText)) {
         const emotionHint = emotion ? EMOTION_GESTURE_HINTS[emotion] : undefined;
         const merged: GestureDescriptor = {
-          type: gesture.type ?? 'openHand',
-          side: gesture.side ?? 'right',
+          type:      gesture.type      ?? 'openHand',
+          side:      gesture.side      ?? 'right',
           intensity: Math.min(1.5, (gesture.intensity ?? 0.8) * (emotionHint?.intensity ?? 1.0)),
-          duration: gesture.duration ?? emotionHint?.duration ?? 2.0,
+          duration:  gesture.duration  ?? emotionHint?.duration ?? 2.0,
         };
-        this._dispatch(merged);
+        this._dispatch(merged, 200);   // Phase 3: 200ms pre-roll
         return;
       }
     }
@@ -76,11 +88,11 @@ export class GestureEngine {
     if (emotion && EMOTION_GESTURE_HINTS[emotion]) {
       const hint = EMOTION_GESTURE_HINTS[emotion];
       this._dispatch({
-        type: hint.type ?? 'openHand',
-        side: 'right',
+        type:      hint.type      ?? 'openHand',
+        side:      'right',
         intensity: hint.intensity ?? 0.8,
-        duration: hint.duration ?? 2.0,
-      });
+        duration:  hint.duration  ?? 2.0,
+      }, 200);   // Phase 3: 200ms pre-roll
       return;
     }
 
@@ -116,16 +128,28 @@ export class GestureEngine {
     this._dispatch({ type: 'openHand', side: 'right', intensity: 0.7, duration: 1.8 });
   }
 
-  private _dispatch(g: GestureDescriptor): void {
+  private _dispatch(g: GestureDescriptor, prerollMs = 0): void {
     if (typeof window === 'undefined') return;
+
+    // Phase 9: Motor memory — enforce cooldown, fade intensity on repeated gestures
+    const cooldown    = GESTURE_COOLDOWN_MS[g.type] ?? 5_000;
+    const lastPlayed  = this._recentGestures.get(g.type) ?? 0;
+    const elapsed     = Date.now() - lastPlayed;
+    if (elapsed < cooldown * 0.3) return;   // hard block — too soon
+    const intensityScale = elapsed < cooldown
+      ? (elapsed / cooldown) * 0.6 + 0.4   // 40%→100% during cooldown window
+      : 1.0;
+    this._recentGestures.set(g.type, Date.now());
+
     window.dispatchEvent(
       new CustomEvent('avatar:gesture', {
         detail: {
           type:      g.type,
-          side:      g.side     ?? 'right',
-          intensity: g.intensity ?? 0.8,
+          side:      g.side      ?? 'right',
+          intensity: Math.min(1.5, (g.intensity ?? 0.8) * intensityScale),
           duration:  g.duration  ?? 2.0,
           variance:  Math.random(),
+          preroll:   prerollMs,
         },
       }),
     );

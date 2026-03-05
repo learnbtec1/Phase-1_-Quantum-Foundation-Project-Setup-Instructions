@@ -7,9 +7,23 @@ import type { WordTiming } from '@/ai/lipsync/timing';
 export type { WordTiming };
 
 export interface SpeakOptions {
+  emotion?:  string;   // Phase 8: maps to TTS speed for prosody
   onStart?: () => void;
-  onEnd?: () => void;
+  onEnd?:   () => void;
 }
+
+// Phase 8: Emotion → speech-rate mapping (Kokoro `speed` param)
+const EMOTION_SPEED: Record<string, number> = {
+  celebration: 1.10,
+  excited:     1.10,
+  happy:       1.05,
+  encouraging: 1.02,
+  friendly:    0.98,
+  neutral:     0.97,
+  thinking:    0.90,
+  sad:         0.88,
+  empathy:     0.92,
+};
 
 let currentAudio: HTMLAudioElement | null = null;
 let currentUrl: string | null = null;
@@ -50,7 +64,10 @@ export async function speakWithTTS(
     const res = await fetch('/api/tts-with-timing', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({
+        text,
+        speed: EMOTION_SPEED[options?.emotion ?? ''] ?? 0.97,
+      }),
     });
 
     if (!res.ok) return false;

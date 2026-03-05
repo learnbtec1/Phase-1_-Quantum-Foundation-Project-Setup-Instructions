@@ -21,8 +21,9 @@ const EMOTION_PALETTE: Record<string, { bg: string; glow: string }> = {
   normal:           { bg: 'radial-gradient(circle, #cbd5e1, #475569)', glow: '#94a3b8' },
 };
 
-const IDLE_PALETTE = { bg: 'radial-gradient(circle, #ffaa00, #ff5500)', glow: '#ffaa00' };
-const SPEAK_PALETTE = { bg: 'radial-gradient(circle, #86efac, #0ea5e9)', glow: '#38bdf8' };
+const IDLE_PALETTE   = { bg: 'radial-gradient(circle, #ffaa00, #ff5500)', glow: '#ffaa00' };
+const SPEAK_PALETTE  = { bg: 'radial-gradient(circle, #86efac, #0ea5e9)', glow: '#38bdf8' };
+const LISTEN_PALETTE = { bg: 'radial-gradient(circle, #c4b5fd, #7c3aed)', glow: '#a78bfa' };
 
 // ── Arabic emotion labels shown in the orb ────────────────────────────────────
 const EMOTION_LABEL: Record<string, string> = {
@@ -38,6 +39,7 @@ type Props = {
 
 const DrHamzaOrb: React.FC<Props> = ({ label = 'د. حمزة' }) => {
   const [isSpeaking, setIsSpeaking]   = useState(false);
+  const [isListening, setIsListening] = useState(false);
   const [isHovering, setIsHovering]   = useState(false);
   const [emotion, setEmotion]         = useState<string>('normal');
   const [pulseScale, setPulseScale]   = useState(1);
@@ -65,21 +67,26 @@ const DrHamzaOrb: React.FC<Props> = ({ label = 'د. حمزة' }) => {
 
   // ── Subscribe to avatar event bus ─────────────────────────────────────────
   useEffect(() => {
-    const onStart = () => setIsSpeaking(true);
-    const onEnd   = () => setIsSpeaking(false);
+    const onStart    = () => setIsSpeaking(true);
+    const onEnd      = () => setIsSpeaking(false);
     const onEmot  = (e: Event) => {
       const detail = (e as CustomEvent<{ emotion?: string } | string>).detail;
       const name   = typeof detail === 'string' ? detail : detail?.emotion ?? 'normal';
       setEmotion(name);
     };
+    const onListen = (e: Event) => {
+      setIsListening((e as CustomEvent<{ active?: boolean }>).detail?.active ?? false);
+    };
 
     window.addEventListener('avatar:speak:start', onStart);
     window.addEventListener('avatar:speak:end',   onEnd);
     window.addEventListener('avatar:emotion',     onEmot);
+    window.addEventListener('avatar:listening',   onListen);
     return () => {
       window.removeEventListener('avatar:speak:start', onStart);
       window.removeEventListener('avatar:speak:end',   onEnd);
       window.removeEventListener('avatar:emotion',     onEmot);
+      window.removeEventListener('avatar:listening',   onListen);
     };
   }, []);
 
@@ -91,9 +98,11 @@ const DrHamzaOrb: React.FC<Props> = ({ label = 'د. حمزة' }) => {
     window.dispatchEvent(new CustomEvent('avatar:emotion', { detail: { emotion: 'friendly' } }));
   }, []);
 
-  const palette = isSpeaking
-    ? SPEAK_PALETTE
-    : (EMOTION_PALETTE[emotion] ?? IDLE_PALETTE);
+  const palette = isListening
+    ? LISTEN_PALETTE
+    : isSpeaking
+      ? SPEAK_PALETTE
+      : (EMOTION_PALETTE[emotion] ?? IDLE_PALETTE);
 
   const orbScale = (isHovering ? 1.08 : 1) * pulseScale;
 
@@ -157,10 +166,10 @@ const DrHamzaOrb: React.FC<Props> = ({ label = 'د. حمزة' }) => {
         }}
       >
         <span style={{ fontSize: 22 }}>
-          {isSpeaking ? '🎙️' : '🧑‍🏫'}
+          {isListening ? '🎧' : isSpeaking ? '🎙️' : '🧑‍🏫'}
         </span>
         <span>
-          {isSpeaking ? 'يتحدث…' : (EMOTION_LABEL[emotion] ?? label)}
+          {isListening ? 'يستمع…' : isSpeaking ? 'يتحدث…' : (EMOTION_LABEL[emotion] ?? label)}
         </span>
       </div>
     </div>

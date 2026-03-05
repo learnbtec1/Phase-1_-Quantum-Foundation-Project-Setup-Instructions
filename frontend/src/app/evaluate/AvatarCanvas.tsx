@@ -24,6 +24,9 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRM, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import styles from './AvatarCanvas.module.css';
+import type { WordTiming } from '@/ai/lipsync/timing';
+import { timingsToVisemeAt, lerpViseme } from '@/ai/lipsync/timing';
+import type { VisemeWeights } from '@/ai/lipsync/viseme';
 
 // ─── Public interface ────────────────────────────────────────────────────────
 export interface AvatarCanvasRef {
@@ -58,6 +61,77 @@ interface ActiveGesture {
   startMs:    number;
   durationMs: number;
   variance:   number;   // 0–1, randomized each dispatch
+}
+
+// ─── Phase 4: finger bone names ───────────────────────────────────────────────
+const FINGER_BONES = {
+  right: {
+    thumb:  ['rightThumbProximal', 'rightThumbIntermediate', 'rightThumbDistal'],
+    index:  ['rightIndexProximal', 'rightIndexIntermediate', 'rightIndexDistal'],
+    middle: ['rightMiddleProximal','rightMiddleIntermediate','rightMiddleDistal'],
+    ring:   ['rightRingProximal',  'rightRingIntermediate',  'rightRingDistal' ],
+    little: ['rightLittleProximal','rightLittleIntermediate','rightLittleDistal'],
+  },
+  left: {
+    thumb:  ['leftThumbProximal', 'leftThumbIntermediate', 'leftThumbDistal'],
+    index:  ['leftIndexProximal', 'leftIndexIntermediate', 'leftIndexDistal'],
+    middle: ['leftMiddleProximal','leftMiddleIntermediate','leftMiddleDistal'],
+    ring:   ['leftRingProximal',  'leftRingIntermediate',  'leftRingDistal' ],
+    little: ['leftLittleProximal','leftLittleIntermediate','leftLittleDistal'],
+  },
+} as const;
+
+type FingerName = keyof typeof FINGER_BONES.right;
+type HandSide   = 'left' | 'right';
+
+/**
+ * Apply a curl value (0 = open, 1 = fully curled) to all phalanges of a finger.
+ * thumb curls slightly differently (Y-axis rotation).
+ */
+function setFingerCurl(
+  humanoid: NonNullable<VRM['humanoid']>,
+  side: HandSide,
+  finger: FingerName,
+  curl: number,
+): void {
+  const bones = FINGER_BONES[side][finger];
+  for (const name of bones) {
+    try {
+      const bone = humanoid.getRawBoneNode(name as never);
+      if (!bone) continue;
+      if (finger === 'thumb') {
+        bone.rotation.set(0, curl * 0.6, curl * 0.5, 'XYZ');
+      } else {
+        bone.rotation.set(curl * 1.4, 0, 0, 'XYZ');
+      }
+    } catch { /* bone absent */ }
+  }
+}
+
+/**
+ * Apply a finger shape to one or both hands:
+ *   'open'  — fingers extended (open palm, wave, greet)
+ *   'point' — index extended, others curled (point gesture)
+ *   'fist'  — all curled (holding / emphasis)
+ *   'relax' — gentle idle curl (natural resting hand)
+ */
+function applyFingerShape(
+  humanoid: NonNullable<VRM['humanoid']>,
+  side: HandSide,
+  shape: 'open' | 'point' | 'fist' | 'relax',
+  blend: number,   // 0→no change, 1→full shape
+): void {
+  const shapes: Record<FingerName, number> = (() => {
+    switch (shape) {
+      case 'open':  return { thumb: 0.0, index: 0.0, middle: 0.0, ring: 0.0, little: 0.0 };
+      case 'point': return { thumb: 0.8, index: 0.0, middle: 0.7, ring: 0.8, little: 0.8 };
+      case 'fist':  return { thumb: 0.9, index: 1.0, middle: 1.0, ring: 1.0, little: 1.0 };
+      case 'relax': return { thumb: 0.1, index: 0.2, middle: 0.25,ring: 0.28,little: 0.30 };
+    }
+  })();
+  for (const [finger, targetCurl] of Object.entries(shapes) as Array<[FingerName, number]>) {
+    setFingerCurl(humanoid, side, finger, targetCurl * blend);
+  }
 }
 
 // ─── Emotion blend weights ────────────────────────────────────────────────────
@@ -282,6 +356,11 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
   const talkElapsedRef  = useRef(0);
   const lipSmoothRef    = useRef(0);    // low-pass smoothed jaw value
 
+  // ── Phase 2: phoneme lip-sync from word timings ───────────────────────────
+  const wordTimingsRef   = useRef<WordTiming[]>([]);
+  const speechAudioRef   = useRef<HTMLAudioElement | null>(null);
+  const visemeRef        = useRef<VisemeWeights>({ aa: 0, ih: 0, ou: 0 });
+
   // ── Emotion blending ──────────────────────────────────────────────────────
   const emotionRef = useRef<string>('neutral');
   const emotionCW  = useRef<Record<ExprKey, number>>({
@@ -296,7 +375,9 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
 
   // ── Per-instance noise (prevents two avatars moving identically) ──────────
   const noisePhase    = useRef(Math.random() * Math.PI * 2);
-  const spinePhase    = useRef(Math.random() * Math.PI * 2);
+  const spinePhase          = useRef(Math.random() * Math.PI * 2);
+  const weightShiftPhaseRef = useRef(Math.random() * Math.PI * 2);
+  const hipShiftRef         = useRef(0);   // smoothed hip lateral offset (rad)
 
   // ── Blink ─────────────────────────────────────────────────────────────────
   const nextBlinkRef  = useRef(Date.now() + 3000);
@@ -305,6 +386,9 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
   // ── Head LookAt with organic lag ──────────────────────────────────────────
   const lookTargetRef  = useRef(new THREE.Vector3(0, 1.0, 3.0));
   const saccadeRef     = useRef(0);    // micro-saccade phase accumulator
+
+  // ── Listening state (Phase 1: STT) ───────────────────────────────────────
+  const isListeningRef = useRef(false);
 
   // ── Micro-gestures (Poisson process ~every 4–9 s) ─────────────────────────
   const nextMicroRef    = useRef(Date.now() + 5000 + Math.random() * 4000);
@@ -410,12 +494,13 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
     const onGesture = (e: Event) => {
       const d = (e as CustomEvent).detail as {
         type?: string; side?: string; duration?: number; intensity?: number; variance?: number;
+        preroll?: number;  // Phase 3: ms to back-date the startMs for pre-roll
       };
       if (!d?.type) return;
       gestureRef.current = {
         type:       (d.type as ActiveGesture['type']),
         side:       ((d.side ?? 'right') as ActiveGesture['side']),
-        startMs:    Date.now(),
+        startMs:    Date.now() - (d.preroll ?? 0),   // Phase 3: pre-roll
         durationMs: (d.duration ?? 2) * 1000,
         variance:   d.variance ?? Math.random(),
       };
@@ -426,18 +511,61 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       if (em) emotionRef.current = em;
     };
     const onSpeakStart = () => { isTalkingRef.current = true;  talkElapsedRef.current = 0; };
-    const onSpeakEnd   = () => { isTalkingRef.current = false; emotionRef.current = 'neutral'; };
+    const onSpeakEnd   = () => {
+      isTalkingRef.current = false;
+      emotionRef.current = 'neutral';
+      wordTimingsRef.current = [];
+      speechAudioRef.current = null;
+    };
+    // Phase 2: capture word timings + audio element from TTS
+    const onSpeak = (e: Event) => {
+      const d = (e as CustomEvent<{ timings?: WordTiming[]; audio?: HTMLAudioElement }>).detail;
+      if (d?.timings?.length) wordTimingsRef.current = d.timings;
+      if (d?.audio)           speechAudioRef.current = d.audio;
+    };
+    const onListening  = (e: Event) => {
+      const active = (e as CustomEvent<{ active?: boolean }>).detail?.active ?? false;
+      isListeningRef.current = active;
+      // When entering listening: snap look forward (attentive posture)
+      if (active) {
+        lookTargetRef.current.set(0, 1.05, 3.0);
+      }
+    };
 
-    window.addEventListener('avatar:gesture',     onGesture);
-    window.addEventListener('avatar:emotion',     onEmotion);
-    window.addEventListener('avatar:speak:start', onSpeakStart);
-    window.addEventListener('avatar:speak:end',   onSpeakEnd);
+    // ── Phase 7: Student performance reactions ────────────────────────────
+    const onStudentPerformance = (e: Event) => {
+      const d = (e as CustomEvent<{ result?: string; score?: number }>).detail ?? {};
+      if (d.result === 'correct') {
+        emotionRef.current = 'celebration';
+        window.dispatchEvent(new CustomEvent('avatar:gesture', {
+          detail: { type: 'wave', duration: 1800, preroll: 0 },
+        }));
+      } else if (d.result === 'incorrect') {
+        emotionRef.current = 'thinking';
+      } else if (d.result === 'partial') {
+        emotionRef.current = 'encouraging';
+        window.dispatchEvent(new CustomEvent('avatar:gesture', {
+          detail: { type: 'openHand', duration: 1400, preroll: 0 },
+        }));
+      }
+    };
+
+    window.addEventListener('avatar:gesture',      onGesture);
+    window.addEventListener('avatar:emotion',      onEmotion);
+    window.addEventListener('avatar:speak',        onSpeak);
+    window.addEventListener('avatar:speak:start',  onSpeakStart);
+    window.addEventListener('avatar:speak:end',    onSpeakEnd);
+    window.addEventListener('avatar:listening',    onListening);
+    window.addEventListener('student:performance', onStudentPerformance);
 
     return () => {
-      window.removeEventListener('avatar:gesture',     onGesture);
-      window.removeEventListener('avatar:emotion',     onEmotion);
-      window.removeEventListener('avatar:speak:start', onSpeakStart);
-      window.removeEventListener('avatar:speak:end',   onSpeakEnd);
+      window.removeEventListener('avatar:gesture',      onGesture);
+      window.removeEventListener('avatar:emotion',      onEmotion);
+      window.removeEventListener('avatar:speak',        onSpeak);
+      window.removeEventListener('avatar:speak:start',  onSpeakStart);
+      window.removeEventListener('avatar:speak:end',    onSpeakEnd);
+      window.removeEventListener('avatar:listening',    onListening);
+      window.removeEventListener('student:performance', onStudentPerformance);
     };
   }, []);
 
@@ -469,11 +597,20 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
     // ── 2. Spine + chest micro-motion ─────────────────────────────────────
     if (humanoid) {
       try {
-        const spineR = Math.sin(t * 0.51 + sp) * 0.010;
-        const spineBone = humanoid.getRawBoneNode('spine' as never);
-        if (spineBone) spineBone.rotation.set(spineR * 0.5, spineSway * 0.35, spineR, 'XYZ');
-        const chestBone = humanoid.getRawBoneNode('chest' as never);
-        if (chestBone) chestBone.rotation.set(breatheY * 1.1, 0, 0, 'XYZ');
+        // ── Phase 6: weight-shift target (smooth per-frame) ────────────────
+        const targetHipShift = Math.sin(t * 0.28 + weightShiftPhaseRef.current) * 0.022;
+        hipShiftRef.current  = lerpN(hipShiftRef.current, targetHipShift, delta * 1.5);
+
+        const spineR     = Math.sin(t * 0.51 + sp) * 0.010;
+        const listenLean = isListeningRef.current ? lerpN(0, 0.025, Math.min(1, t * 0.5)) : 0;
+        const spineBone  = humanoid.getRawBoneNode('spine' as never);
+        if (spineBone) spineBone.rotation.set(spineR * 0.5 + listenLean, spineSway * 0.35, spineR, 'XYZ');
+        const chestBone  = humanoid.getRawBoneNode('chest' as never);
+        // Z: shoulder counterbalance opposite to hip shift (~55% amplitude)
+        if (chestBone) chestBone.rotation.set(breatheY * 1.1 + listenLean * 0.5, 0, -hipShiftRef.current * 0.55, 'XYZ');
+        // Hip lateral tilt — organic sway, ≤1.5° max
+        const hipBone = humanoid.getRawBoneNode('hips' as never);
+        if (hipBone) hipBone.rotation.z = hipShiftRef.current * 1.2;
       } catch { /* bone absent */ }
     }
 
@@ -509,17 +646,53 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
         try { em.setValue(key as never, cw[key]); } catch {}
       }
 
-      // Lip-sync: variable-frequency, low-pass smoothed
+      // ── Phase 2: Phoneme lip-sync — word timings first, procedural fallback ──
       if (isTalkingRef.current) {
         talkElapsedRef.current += delta;
-        const et     = talkElapsedRef.current;
-        const modF   = 8.0 + Math.sin(et * 2.1) * 2.5;   // varies syllable rate
-        const rawJaw = Math.max(0, 0.28 + 0.55 * Math.sin(et * modF));
-        lipSmoothRef.current = lerpN(lipSmoothRef.current, rawJaw, 0.42);
+        const timings = wordTimingsRef.current;
+        let targetViseme: VisemeWeights;
+        if (timings.length > 0 && speechAudioRef.current) {
+          const audioMs = (speechAudioRef.current.currentTime ?? 0) * 1000;
+          targetViseme  = timingsToVisemeAt(timings, audioMs);
+        } else {
+          // Procedural fallback: variable-frequency sine
+          const et   = talkElapsedRef.current;
+          const modF = 8.0 + Math.sin(et * 2.1) * 2.5;
+          const raw  = Math.max(0, 0.28 + 0.55 * Math.sin(et * modF));
+          targetViseme = { aa: raw, ih: raw * 0.5, ou: raw * 0.3 };
+        }
+        visemeRef.current = lerpViseme(visemeRef.current, targetViseme, delta);
       } else {
-        lipSmoothRef.current = lerpN(lipSmoothRef.current, 0, 0.28);
+        visemeRef.current = lerpViseme(visemeRef.current, { aa: 0, ih: 0, ou: 0 }, delta);
       }
-      try { em.setValue('aa' as never, lipSmoothRef.current); } catch {}
+      // Keep lipSmoothRef in sync for backwards compat
+      lipSmoothRef.current = visemeRef.current.aa;
+
+      try { em.setValue('aa' as never, visemeRef.current.aa); } catch {}
+      try { em.setValue('ih' as never, visemeRef.current.ih); } catch {}
+      try { em.setValue('ou' as never, visemeRef.current.ou); } catch {}
+
+      // ── Phase 5: Micro-expressions overlay (subtle, emotion-driven) ───────
+      const em5 = emotionRef.current;
+      // 1. Brow flutter — gentle undulation, boosted on surprised/celebration
+      const browAmp = (em5 === 'surprised' || em5 === 'celebration') ? 0.30 : 0.06;
+      const browV   = (0.5 + 0.5 * Math.sin(t * 0.9)) * browAmp;
+      try { em.setValue('browInnerUp'  as never, browV); } catch {
+        try { em.setValue('browUp'     as never, browV); } catch {} }
+
+      // 2. Eye squint — on happy / friendly tones
+      const squintActive = em5 === 'happy' || em5 === 'friendly' || em5 === 'celebration' || em5 === 'encouraging';
+      const squintV = squintActive ? 0.22 + 0.12 * Math.sin(t * 1.7) : 0;
+      try { em.setValue('cheekSquintLeft'  as never, squintV); } catch {
+        try { em.setValue('squintLeft'     as never, squintV); } catch {} }
+      try { em.setValue('cheekSquintRight' as never, squintV); } catch {
+        try { em.setValue('squintRight'    as never, squintV); } catch {} }
+
+      // 3. Half-smile — friendly / encouraging overlay
+      const smileActive = em5 === 'friendly' || em5 === 'encouraging' || em5 === 'happy';
+      const smileV = smileActive ? 0.18 + 0.10 * Math.sin(t * 1.1) : 0;
+      try { em.setValue('mouthSmileLeft'  as never, smileV); } catch {}
+      try { em.setValue('mouthSmileRight' as never, smileV); } catch {}
 
       em.update();
     }
@@ -585,6 +758,32 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
         Math.min(1, delta * POSE_BLEND_SPEED),
       );
       applyArmPose(humanoid, renderedPoseRef.current);
+
+      // ── Phase 4: Finger shapes per gesture type ────────────────────────
+      const activeFinger = gestureRef.current;
+      const fingerProgress = activeFinger
+        ? Math.min(1, (now - activeFinger.startMs) / activeFinger.durationMs)
+        : 0;
+      const fingerEnv = activeFinger
+        ? Math.sin(Math.min(1, fingerProgress) * Math.PI)
+        : 0;
+
+      if (activeFinger?.type === 'point') {
+        // Index extended, rest curled
+        if (activeFinger.side !== 'left')  applyFingerShape(humanoid, 'right', 'point', fingerEnv);
+        if (activeFinger.side !== 'right') applyFingerShape(humanoid, 'left',  'point', fingerEnv);
+      } else if (activeFinger?.type === 'openHand') {
+        // All fingers extended
+        if (activeFinger.side !== 'left')  applyFingerShape(humanoid, 'right', 'open', fingerEnv);
+        if (activeFinger.side !== 'right') applyFingerShape(humanoid, 'left',  'open', fingerEnv);
+      } else if (activeFinger?.type === 'wave') {
+        // Open hand during wave
+        applyFingerShape(humanoid, 'right', 'open', fingerEnv);
+      } else {
+        // Idle: natural relaxed curl
+        applyFingerShape(humanoid, 'right', 'relax', 1);
+        applyFingerShape(humanoid, 'left',  'relax', 1);
+      }
     }
 
     // ── 7. VRM internal update ────────────────────────────────────────────
