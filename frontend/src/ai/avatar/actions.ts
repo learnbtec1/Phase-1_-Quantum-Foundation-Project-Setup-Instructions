@@ -25,7 +25,7 @@ export function waveArm(side: GestureSide = 'right', intensity = 1, duration = 2
   if (typeof window === 'undefined') return;
   window.dispatchEvent(
     new CustomEvent('avatar:gesture', {
-      detail: { type: 'wave', side, duration, intensity },
+      detail: { type: 'wave', side, duration, intensity, variance: Math.random() },
     })
   );
 }
@@ -37,7 +37,7 @@ export function pointFinger(side: GestureSide = 'right', intensity = 1, duration
   if (typeof window === 'undefined') return;
   window.dispatchEvent(
     new CustomEvent('avatar:gesture', {
-      detail: { type: 'point', side, duration, intensity },
+      detail: { type: 'point', side, duration, intensity, variance: Math.random() },
     })
   );
 }
@@ -49,7 +49,7 @@ export function openHand(side: GestureSide = 'both', intensity = 0.9, duration =
   if (typeof window === 'undefined') return;
   window.dispatchEvent(
     new CustomEvent('avatar:gesture', {
-      detail: { type: 'openHand', side, duration, intensity },
+      detail: { type: 'openHand', side, duration, intensity, variance: Math.random() },
     })
   );
 }
@@ -61,7 +61,7 @@ export function beatGesture(side: GestureSide = 'both', intensity = 0.7, duratio
   if (typeof window === 'undefined') return;
   window.dispatchEvent(
     new CustomEvent('avatar:gesture', {
-      detail: { type: 'beat', side, duration, intensity },
+      detail: { type: 'beat', side, duration, intensity, variance: Math.random() },
     })
   );
 }

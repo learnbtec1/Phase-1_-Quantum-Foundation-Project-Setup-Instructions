@@ -125,6 +125,7 @@ export class GestureEngine {
           side:      g.side     ?? 'right',
           intensity: g.intensity ?? 0.8,
           duration:  g.duration  ?? 2.0,
+          variance:  Math.random(),
         },
       }),
     );

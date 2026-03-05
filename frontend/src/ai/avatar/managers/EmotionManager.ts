@@ -76,6 +76,35 @@ export const EMOTION_ANIMATION_MAP = {
   goodbye:    { animation: 'Goodbye',   expression: 'neutral'  },
 } as const;
 
+// ── Emotion → VRM expression preset weights (for smooth blending) ────────────
+const EMOTION_EXPR_WEIGHTS: Record<string, Partial<Record<VRMExpressionPresetName, number>>> = {
+  normal:           { [VRMExpressionPresetName.Neutral]:   0.25 },
+  neutral:          { [VRMExpressionPresetName.Neutral]:   0.25 },
+  happy:            { [VRMExpressionPresetName.Happy]:     0.85 },
+  excited:          { [VRMExpressionPresetName.Happy]:     1.00 },
+  angry:            { [VRMExpressionPresetName.Angry]:     0.90 },
+  sad:              { [VRMExpressionPresetName.Sad]:       0.80 },
+  surprised:        { [VRMExpressionPresetName.Surprised]: 0.90 },
+  blush:            { [VRMExpressionPresetName.Happy]:     0.60 },
+  sleepy:           { [VRMExpressionPresetName.Relaxed]:   0.70 },
+  thinking:         { [VRMExpressionPresetName.Neutral]:   0.20, [VRMExpressionPresetName.Relaxed]: 0.30 },
+  relax:            { [VRMExpressionPresetName.Relaxed]:   0.60 },
+  goodbye:          { [VRMExpressionPresetName.Happy]:     0.50 },
+  celebration:      { [VRMExpressionPresetName.Happy]:     1.00 },
+  encouraging:      { [VRMExpressionPresetName.Happy]:     0.70 },
+  strictEvaluation: { [VRMExpressionPresetName.Angry]:     0.50, [VRMExpressionPresetName.Neutral]: 0.20 },
+  friendly:         { [VRMExpressionPresetName.Happy]:     0.65 },
+};
+
+const ALL_EXPR_PRESETS = [
+  VRMExpressionPresetName.Angry,
+  VRMExpressionPresetName.Happy,
+  VRMExpressionPresetName.Sad,
+  VRMExpressionPresetName.Surprised,
+  VRMExpressionPresetName.Relaxed,
+  VRMExpressionPresetName.Neutral,
+] as const;
+
 export class EmotionManager {
   private _vrm: VRM | null = null;
   /** External mixer shared with VRMAvatar — avoids double-mixer conflict */
@@ -85,6 +114,14 @@ export class EmotionManager {
   private _clipCache: Map<string, THREE.AnimationClip> = new Map();
   private _loader: GLTFLoader;
   private _isLoading = false;
+
+  /** Smooth expression blending: target weights and current interpolated weights */
+  private _exprTarget:  Partial<Record<VRMExpressionPresetName, number>> = {};
+  private _exprCurrent: Map<VRMExpressionPresetName, number> = new Map(
+    ALL_EXPR_PRESETS.map(p => [p, 0] as [VRMExpressionPresetName, number])
+  );
+  /** Blend speed: controls how fast expressions change (higher = faster) */
+  private _blendSpeed = 4.5;
 
   constructor(vrm?: VRM, mixer?: THREE.AnimationMixer) {
     this._loader = new GLTFLoader();
@@ -105,63 +142,56 @@ export class EmotionManager {
 
   /**
    * Apply one of the 11 emotions.
-   * Sets face expression and plays the VRMA body animation.
+   * Sets TARGET expression weights (smoothly blended in update()) and plays VRMA body animation.
    */
   setEmotion(emotion: string) {
     const cfg = EMOTION_CONFIG[emotion] ?? EMOTION_CONFIG['normal'];
     this._currentEmotion = emotion;
 
-    // ── face expression ───────────────────────────────────────────────────
-    this._applyFaceExpression(cfg.expression, cfg.expressionIntensity);
+    // ── face expression: set target (blended in update loop) ────────────────
+    this._exprTarget = EMOTION_EXPR_WEIGHTS[emotion] ?? EMOTION_EXPR_WEIGHTS['neutral'] ?? {};
 
-    // ── body animation ────────────────────────────────────────────────────
-    // One-shot only — do NOT loop body animations (would override procedural gestures)
+    // ── body animation ────────────────────────────────────────────────────────
     this._playVRMA(cfg.vrmaUrl, false, () => {
-      // After one-shot finishes: reset face to neutral gradually
-      setTimeout(() => this._applyFaceExpression(VRMExpressionPresetName.Neutral, 0.15), 800);
+      // After one-shot finishes: fade back to neutral target
+      this._exprTarget = EMOTION_EXPR_WEIGHTS['neutral'] ?? {};
     });
   }
 
   /**
    * Must be called every frame (delta in seconds).
-   * NOTE: Only call this if using EmotionManager's own internal mixer.
-   * If you passed an external mixer in setVRM(), update that mixer externally.
+   * Blends face expressions smoothly toward the current emotion target.
    */
   update(delta: number) {
     this._mixer?.update(delta);
+    this._blendExpressions(delta);
   }
 
-  /** Fade current face expressions back to neutral over `durationMs` ms. */
-  resetToNeutral(durationMs = 500) {
+  private _blendExpressions(delta: number) {
     if (!this._vrm?.expressionManager) return;
-    const mgr = this._vrm.expressionManager;
-    const presets = [
-      VRMExpressionPresetName.Angry,
-      VRMExpressionPresetName.Happy,
-      VRMExpressionPresetName.Sad,
-      VRMExpressionPresetName.Surprised,
-      VRMExpressionPresetName.Relaxed,
-    ] as const;
-    presets.forEach(p => mgr.setValue(p, 0));
-    mgr.setValue(VRMExpressionPresetName.Neutral, 0.2);
+    const mgr    = this._vrm.expressionManager;
+    const factor = Math.min(1, delta * this._blendSpeed);
+
+    for (const preset of ALL_EXPR_PRESETS) {
+      const target  = this._exprTarget[preset] ?? 0;
+      const current = this._exprCurrent.get(preset) ?? 0;
+      const next    = current + (target - current) * factor;
+      this._exprCurrent.set(preset, next);
+      mgr.setValue(preset, next);
+    }
+  }
+
+  /** Fade face expressions back to neutral using the smooth blend system. */
+  resetToNeutral(_durationMs = 500) {
+    this._exprTarget = EMOTION_EXPR_WEIGHTS['neutral'] ?? {};
   }
 
   // ── private ───────────────────────────────────────────────────────────────
 
+  /** @deprecated — use setEmotion() + update(delta) for smooth blending */
   private _applyFaceExpression(preset: VRMExpressionPresetName, intensity: number) {
-    if (!this._vrm?.expressionManager) return;
-    const mgr = this._vrm.expressionManager;
-    // Clear all presets first
-    const ALL = [
-      VRMExpressionPresetName.Angry,
-      VRMExpressionPresetName.Happy,
-      VRMExpressionPresetName.Sad,
-      VRMExpressionPresetName.Surprised,
-      VRMExpressionPresetName.Relaxed,
-      VRMExpressionPresetName.Neutral,
-    ] as const;
-    ALL.forEach(p => mgr.setValue(p, p === VRMExpressionPresetName.Neutral ? 0.1 : 0));
-    mgr.setValue(preset, intensity);
+    // Set target and let the blend loop handle the transition
+    this._exprTarget = { [preset]: intensity };
   }
 
   private async _playVRMA(url: string, loop: boolean, onFinished?: () => void) {
