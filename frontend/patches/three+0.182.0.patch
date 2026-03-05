@@ -1,0 +1,12 @@
+diff --git a/node_modules/three/build/three.module.js b/node_modules/three/build/three.module.js
+index 08dd840..4b93a61 100644
+--- a/node_modules/three/build/three.module.js
++++ b/node_modules/three/build/three.module.js
+@@ -17689,6 +17689,7 @@ class WebGLRenderer {
+ 
+ 				parameters.uniforms = programCache.getUniforms( material );
+ 
++				if ( typeof material.onBuild === 'function' ) material.onBuild( object, parameters, _this );
+ 				material.onBeforeCompile( parameters, _this );
+ 
+ 				program = programCache.acquireProgram( parameters, programCacheKey );

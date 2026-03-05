@@ -1,0 +1,55 @@
+[http://localhost:3011/student] Failed to load resource: the server responded with a status of 500 (Internal Server Error)
+
+[PAGE ERROR at http://localhost:3011/student] Module build failed (from ./node_modules/next/dist/build/webpack/loaders/next-swc-loader.js):
+Error:   × Expected ',', got 'if'
+     ╭─[e:\Phase 1_ Quantum Foundation Project Setup Instructions\frontend\src\components\avatar\VRMAvatar.tsx:735:1]
+ 732 │             }
+ 733 │           }
+ 734 │     // Only attempt load once
+ 735 │     if (!vrmRef.current && !loadingInProgress) {
+     ·     ──
+ 736 │       attemptLoadVRM(VRM_URLs_FALLBACK).then(() => {});
+ 737 │     }
+ 738 │     
+     ╰────
+
+
+Caused by:
+    Syntax Error
+ModuleBuildError: Module build failed (from ./node_modules/next/dist/build/webpack/loaders/next-swc-loader.js):
+Error:   × Expected ',', got 'if'
+     ╭─[e:\Phase 1_ Quantum Foundation Project Setup Instructions\frontend\src\components\avatar\VRMAvatar.tsx:735:1]
+ 732 │             }
+ 733 │           }
+ 734 │     // Only attempt load once
+ 735 │     if (!vrmRef.current && !loadingInProgress) {
+     ·     ──
+ 736 │       attemptLoadVRM(VRM_URLs_FALLBACK).then(() => {});
+ 737 │     }
+ 738 │     
+     ╰────
+
+
+Caused by:
+    Syntax Error
+    at processResult (file://e:\Phase 1_ Quantum Foundation Project Setup Instructions\frontend\node_modules\next\dist\compiled\webpack\bundle5.js:29:407096)
+    at <unknown> (file://e:\Phase 1_ Quantum Foundation Project Setup Instructions\frontend\node_modules\next\dist\compiled\webpack\bundle5.js:29:408891)
+    at <unknown> (file://e:\Phase 1_ Quantum Foundation Project Setup Instructions\frontend\node_modules\next\dist\compiled\loader-runner\LoaderRunner.js:1:8645)
+    at <unknown> (file://e:\Phase 1_ Quantum Foundation Project Setup Instructions\frontend\node_modules\next\dist\compiled\loader-runner\LoaderRunner.js:1:5019)
+    at r.callback (file://e:\Phase 1_ Quantum Foundation Project Setup Instructions\frontend\node_modules\next\dist\compiled\loader-runner\LoaderRunner.js:1:4039)
+
+[http://localhost:3011/student] ./src/components/avatar/VRMAvatar.tsx
+Error:   × Expected ',', got 'if'
+     ╭─[e:\Phase 1_ Quantum Foundation Project Setup Instructions\frontend\src\components\avatar\VRMAvatar.tsx:735:1]
+ 732 │             }
+ 733 │           }
+ 734 │     // Only attempt load once
+ 735 │     if (!vrmRef.current && !loadingInProgress) {
+     ·     ──
+ 736 │       attemptLoadVRM(VRM_URLs_FALLBACK).then(() => {});
+ 737 │     }
+ 738 │     
+     ╰────
+
+Caused by:
+    Syntax Error

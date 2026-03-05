@@ -1,0 +1,84 @@
+# Page snapshot
+
+```yaml
+- generic:
+  - generic [active]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - navigation [ref=e6]:
+            - button "previous" [disabled] [ref=e7]:
+              - img "previous" [ref=e8]
+            - generic [ref=e10]:
+              - generic [ref=e11]: 1/
+              - text: "1"
+            - button "next" [disabled] [ref=e12]:
+              - img "next" [ref=e13]
+          - img
+        - generic [ref=e15]:
+          - generic [ref=e16]:
+            - img [ref=e17]
+            - generic "Latest available version is detected (16.1.6)." [ref=e19]: Next.js 16.1.6
+            - generic [ref=e20]: Turbopack
+          - img
+      - dialog "Build Error" [ref=e22]:
+        - generic [ref=e25]:
+          - generic [ref=e26]:
+            - generic [ref=e27]:
+              - generic [ref=e29]: Build Error
+              - generic [ref=e30]:
+                - button "Copy Error Info" [ref=e31] [cursor=pointer]:
+                  - img [ref=e32]
+                - button "No related documentation found" [disabled] [ref=e34]:
+                  - img [ref=e35]
+                - button "Attach Node.js inspector" [ref=e37] [cursor=pointer]:
+                  - img [ref=e38]
+            - generic [ref=e47]: Export toArabicWord doesn't exist in target module
+          - generic [ref=e49]:
+            - generic [ref=e51]:
+              - img [ref=e53]
+              - generic [ref=e57]: ./src/lib/numbersToArabicWords.ts (5:1)
+              - button "Open in editor" [ref=e58] [cursor=pointer]:
+                - img [ref=e60]
+            - generic [ref=e63]:
+              - generic [ref=e64]: Export
+              - text: toArabicWord
+              - generic [ref=e65]: doesn't exist in target module
+              - generic [ref=e66]: 3 |
+              - generic [ref=e67]: "* Prevents numbers from being spoken in English when using Arabic TTS."
+              - generic [ref=e68]: 4 |
+              - generic [ref=e69]: "*/"
+              - text: ">"
+              - generic [ref=e70]: 5 |
+              - text: import
+              - generic [ref=e71]: "{ toArabicWord }"
+              - text: from 'number-to-arabic-words';
+              - generic [ref=e72]: "|"
+              - text: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+              - generic [ref=e73]: 6 |
+              - generic [ref=e74]: 7 |
+              - text: "const EASTERN_TO_WESTERN: Record<string,"
+              - generic [ref=e75]: string
+              - text: "> ="
+              - generic [ref=e76]: "{"
+              - generic [ref=e77]: 8 |
+              - text: "'٠': '0', '١': '1', '٢': '2', '٣': '3', '٤': '4',"
+              - generic [ref=e78]: The export
+              - text: toArabicWord
+              - generic [ref=e79]: was not found in module
+              - generic [ref=e80]: "[project]/node_modules/number-to-arabic-words/dist/index.js [app-client] (ecmascript)"
+              - generic [ref=e81]: .
+              - generic [ref=e82]: The module has no exports at all.
+              - generic [ref=e83]: "All exports of the module are statically known (It doesn't have dynamic exports). So it's known statically that the requested export doesn't exist. Import trace: Client Component Browser: ./src/lib/numbersToArabicWords.ts [Client Component Browser] ./src/components/avatar/VRMAvatar.tsx [Client Component Browser] ./src/components/boardroom/BoardroomScene.tsx [Client Component Browser] ./src/app/evaluate/page.tsx [Client Component Browser] ./src/app/evaluate/page.tsx [Server Component]"
+        - generic [ref=e84]: "1"
+        - generic [ref=e85]: "2"
+    - generic [ref=e90] [cursor=pointer]:
+      - button "Open Next.js Dev Tools" [ref=e91]:
+        - img [ref=e92]
+      - button "Open issues overlay" [ref=e96]:
+        - generic [ref=e97]:
+          - generic [ref=e98]: "0"
+          - generic [ref=e99]: "1"
+        - generic [ref=e100]: Issue
+  - alert [ref=e101]
+```

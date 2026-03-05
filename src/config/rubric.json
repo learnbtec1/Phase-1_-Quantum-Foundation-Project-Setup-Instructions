@@ -1,0 +1,28 @@
+{
+  "rubricId": "BTEC_STRICT_U1",
+  "version": "1.0",
+  "title": "BTEC Strict Evaluation Rubric",
+  "criteria": [
+    {
+      "code": "P1",
+      "level": "Pass",
+      "description": "Explain core business concepts with clear terminology.",
+      "keywords": ["business", "stakeholder", "analysis"],
+      "allowPartialCredit": true
+    },
+    {
+      "code": "M1",
+      "level": "Merit",
+      "description": "Analyze impact using structured frameworks (e.g., PESTLE/SWOT).",
+      "keywords": ["pestle", "swot", "impact", "evaluation"],
+      "allowPartialCredit": false
+    },
+    {
+      "code": "D1",
+      "level": "Distinction",
+      "description": "Provide justified recommendations with risk and strategy discussion.",
+      "keywords": ["strategy", "risk", "recommendation", "justification"],
+      "allowPartialCredit": false
+    }
+  ]
+}

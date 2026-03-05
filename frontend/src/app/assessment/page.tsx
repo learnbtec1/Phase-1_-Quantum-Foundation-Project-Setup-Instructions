@@ -1,0 +1,461 @@
+'use client';
+
+import { useState, useEffect, useMemo } from 'react';
+import type { ReactNode } from 'react';
+import { Upload, FileText, Search, ShieldAlert, ChevronDown, Layers, BookOpen, GraduationCap, Trash2 } from 'lucide-react';
+import mammoth from 'mammoth';
+import JSZip from 'jszip';
+
+// --- Interfaces ---
+interface Criterion {
+  code: string;
+  verdict: 'Achieved' | 'Not Achieved';
+  reasons: string[];
+  evidence: { quote: string; start: number; end: number }[];
+  recommendations: string[];
+}
+
+interface EvaluationResult {
+  success: boolean;
+  data: {
+    summary: { totalCriteria: number; achievedCount: number; achievedPercent: number };
+    criteria: Criterion[];
+    final_grade?: string;
+  };
+  report: string;
+}
+
+interface PlagiarismResult {
+  similarity: number;
+  ai: { likelihood: number; signals: string[]; report: string };
+  sources: string[];
+}
+
+// --- 1. البيانات الأكاديمية ---
+interface AcademicData {
+  [className: string]: {
+    [sectionName: string]: string[];
+  };
+}
+
+const ACADEMIC_DATA: AcademicData = {
+  'الصف العاشر': {
+    'الفصل الأول': ['1. الغرض من إنشاء شركة', '2. مؤسسات الأعمال', '3. التنبؤ', '4. خطة التسويق'],
+    'الفصل الثاني': ['وحدة 15: إنشاء شركة صغيرة', 'وحدة 16: ضمن فريق', 'وحدة 17: إدارة الشؤون المالية', 'وحدة 19: الترويج البصري'],
+    'الفصل الثالث': ['وحدة 11: الشركات عبر الإنترنت', 'وحدة 13: أخلاقيات الأعمال', 'وحدة 28: إدارة الشركة', 'وحدة 5: الموظفون'],
+  },
+  'أول ثانوي': {
+    'الفصل الأول': ['حملة إطلاق منتج جديد'],
+    'الفصل الثاني': ['استكشاف الأعمال 2', 'التمويل - الجزء 1'],
+    'الفصل الثالث': ['إدارة الفعاليات', 'التمويل - الجزء 2'],
+  },
+  'الثاني ثانوي (توجيهي)': {
+    'الفصل الأول': ['اتخاذ قرارات الأعمال', 'الموارد البشرية - الجزء 1'],
+    'الفصل الثاني': ['مبادئ إدارة الأعمال', 'خدمة العملاء', 'الموارد البشرية - الجزء 2'],
+    'الفصل الثالث': ['أخلاقيات الأعمال'],
+  },
+};
+
+// --- المكون الرئيسي (يجب أن يكون Default Export) ---
+export default function AssessmentPage() {
+  // State
+  const [selectedClass, setSelectedClass] = useState('');
+  const [selectedSection, setSelectedSection] = useState('');
+  const [selectedSubject, setSelectedSubject] = useState('');
+
+  const [studentAnswer, setStudentAnswer] = useState('');
+  const [assignmentContext, setAssignmentContext] = useState('');
+  const [filesCount, setFilesCount] = useState(0);
+
+  const [loading, setLoading] = useState(false);
+  const [plagiarismLoading, setPlagiarismLoading] = useState(false);
+  const [result, setResult] = useState<EvaluationResult | null>(null);
+  const [plagiarismResult, setPlagiarismResult] = useState<PlagiarismResult | null>(null);
+  const [showPlagModal, setShowPlagModal] = useState(false);
+
+  const getErrorMessage = (error: unknown) => {
+    if (error instanceof Error) return error.message;
+    return 'حدث خطأ غير متوقع.';
+  };
+
+  // Derived Data
+  const availableSections = useMemo<string[]>(
+    () => selectedClass ? Object.keys(ACADEMIC_DATA[selectedClass] || {}) : [],
+    [selectedClass]
+  );
+  const availableSubjects = useMemo<string[]>(
+    () => (selectedClass && selectedSection) ? ACADEMIC_DATA[selectedClass][selectedSection] || [] : [],
+    [selectedClass, selectedSection]
+  );
+
+  const dropdownFields: {
+    label: string;
+    icon: ReactNode;
+    val: string;
+    set: (value: string) => void;
+    opts: string[];
+    dis?: boolean;
+  }[] = [
+      { label: "الصف الدراسي", icon: <GraduationCap />, val: selectedClass, set: setSelectedClass, opts: Object.keys(ACADEMIC_DATA) },
+      { label: "الفصل الدراسي", icon: <BookOpen />, val: selectedSection, set: setSelectedSection, opts: availableSections, dis: !selectedClass },
+      { label: "المادة التعليمية", icon: <Layers />, val: selectedSubject, set: setSelectedSubject, opts: availableSubjects, dis: !selectedSection }
+    ];
+
+  // --- PDF/Docx Extraction ---
+  useEffect(() => {
+    const loadPdf = async () => {
+      if ((window as any).pdfjsLib) return;
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+      script.onload = () => { (window as any).pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; };
+      document.head.appendChild(script);
+    };
+    loadPdf();
+  }, []);
+
+  const extractPdfText = async (file: File) => {
+    const pdf = await (window as any).pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+    let text = '';
+    for (let i = 1; i <= pdf.numPages; i++) text += (await (await pdf.getPage(i)).getTextContent()).items.map((item: any) => item.str).join(' ') + '\n';
+    return text;
+  };
+
+  const extractDocxText = async (file: File) => (await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() })).value;
+
+  // دالة البوربوينت المحسنة (DOMParser)
+  const extractPptxText = async (file: File) => {
+    if (file.name.endsWith('.ppt')) {
+      return "⚠️ تنبيه: صيغة .ppt القديمة غير مدعومة. يرجى تحويلها إلى .pptx.";
+    }
+    try {
+      const zip = await JSZip.loadAsync(file);
+      let fullText = "";
+      const slideFiles = Object.keys(zip.files).filter(n => n.startsWith("ppt/slides/slide") && n.endsWith(".xml"));
+
+      if (slideFiles.length === 0) return "⚠️ لا توجد شرائح نصية.";
+
+      slideFiles.sort((a, b) => {
+        const numA = parseInt(a.match(/slide(\d+)\.xml/)?.[1] || "0");
+        const numB = parseInt(b.match(/slide(\d+)\.xml/)?.[1] || "0");
+        return numA - numB;
+      });
+
+      const parser = new DOMParser();
+      for (const fileName of slideFiles) {
+        const slideNum = fileName.match(/slide(\d+)/)?.[1] || "?";
+        const xmlString = await zip.files[fileName].async("string");
+        const xmlDoc = parser.parseFromString(xmlString, "text/xml");
+        const textNodes = xmlDoc.getElementsByTagName("a:t");
+
+        let slideContent = "";
+        for (let i = 0; i < textNodes.length; i++) slideContent += (textNodes[i].textContent || "") + " ";
+
+        if (slideContent.trim()) fullText += `\n--- [Slide ${slideNum}] ---\n${slideContent.trim()}\n`;
+      }
+      return fullText.trim() || "⚠️ الشرائح فارغة.";
+    } catch (e) {
+      return "خطأ في قراءة ملف الباوربوينت.";
+    }
+  };
+
+  const handleFileUpload = async (files: File[], isStudent: boolean) => {
+    let combined = isStudent ? (studentAnswer || "") : "";
+    let count = 0;
+
+    for (const file of files) {
+      try {
+        let txt = "";
+        const ext = file.name.split('.').pop()?.toLowerCase();
+
+        if (ext === 'pdf') txt = await extractPdfText(file);
+        else if (ext === 'docx' || ext === 'doc') txt = await extractDocxText(file);
+        else if (ext === 'pptx' || ext === 'ppt') txt = await extractPptxText(file);
+        else continue;
+
+        if (isStudent) {
+          combined += `\n\n--- FILE START: ${file.name} ---\n${txt}\n--- FILE END ---\n`;
+          count++;
+        } else {
+          setAssignmentContext(txt);
+        }
+      } catch (e) {
+        alert(`Error parsing ${file.name}`);
+      }
+    }
+
+    if (isStudent) {
+      setStudentAnswer(combined);
+      setFilesCount(prev => prev + count);
+    }
+  };
+
+  // --- Reset Function ---
+  const handleReset = () => {
+    if (confirm("هل أنت متأكد؟ سيتم مسح البيانات للبدء من جديد.")) {
+      setStudentAnswer("");
+      setFilesCount(0);
+      setResult(null);
+      setPlagiarismResult(null);
+    }
+  };
+
+  // --- API Calls ---
+  const handleEvaluate = async () => {
+    if (!selectedSubject || !studentAnswer || !assignmentContext) { alert("يرجى تعبئة البيانات ورفع الملفات."); return; }
+    setLoading(true); setResult(null);
+    try {
+      const assignmentBrief = `${selectedSubject}\n${assignmentContext}`;
+      const res = await fetch('/api/evaluate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          student_text: studentAnswer, // Fixed field name
+          assignment_text: assignmentBrief,
+          unit_id: '14'
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || data.error || "Evaluation failed");
+      setResult(data);
+    } catch (e: unknown) { alert(getErrorMessage(e)); } finally { setLoading(false); }
+  };
+
+  const handleCheckPlagiarism = async () => {
+    if (!studentAnswer) return;
+    setPlagiarismLoading(true); setShowPlagModal(true);
+    try {
+      const res = await fetch('/api/plagiarism', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: studentAnswer })
+      });
+      setPlagiarismResult(await res.json());
+    } catch (e: unknown) { alert(getErrorMessage(e)); setShowPlagModal(false); } finally { setPlagiarismLoading(false); }
+  };
+
+  const isEvaluationError = result?.data?.final_grade === 'ERROR';
+
+  // --- UI Render ---
+  return (
+    <div className="min-h-screen bg-[#0f172a] text-white font-sans overflow-x-hidden selection:bg-purple-500 selection:text-white" dir="rtl">
+
+      {/* Background Effects */}
+      <div className="fixed top-0 left-0 w-full h-full overflow-hidden -z-10 pointer-events-none">
+        <div className="absolute top-[-10%] left-[-10%] w-[500px] h-[500px] bg-purple-600/20 rounded-full blur-[100px] animate-pulse"></div>
+        <div className="absolute bottom-[-10%] right-[-10%] w-[600px] h-[600px] bg-blue-600/20 rounded-full blur-[120px] animate-pulse delay-1000"></div>
+      </div>
+
+      <div className="max-w-7xl mx-auto p-8 relative z-10">
+
+        {/* Header */}
+        <header className="mb-12 text-center transform hover:scale-105 transition duration-500 cursor-default">
+          <h1 className="text-6xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-purple-400 to-pink-400 drop-shadow-[0_0_15px_rgba(168,85,247,0.5)]">
+            نظام التقييم الذكي
+          </h1>
+          <p className="text-gray-400 mt-4 text-lg tracking-wide">تحليل جنائي • كشف استلال • تقارير BTEC</p>
+        </header>
+
+        {/* 1. Dropdowns Section */}
+        <section className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
+          {dropdownFields.map((field, idx) => (
+            <div key={idx} className="relative group">
+              <div className="absolute -inset-0.5 bg-gradient-to-r from-blue-500 to-purple-600 rounded-2xl blur opacity-20 group-hover:opacity-60 transition duration-500"></div>
+              <div className="relative bg-gray-900/80 backdrop-blur-xl border border-white/10 p-6 rounded-2xl shadow-2xl transform transition duration-300 group-hover:-translate-y-2">
+                <div className="flex items-center gap-3 mb-3 text-blue-300">
+                  {field.icon}
+                  <span className="font-bold">{field.label}</span>
+                </div>
+                <div className="relative">
+                  <select
+                    value={field.val}
+                    onChange={e => { field.set(e.target.value); if (idx === 0) { setSelectedSection(''); setSelectedSubject(''); } if (idx === 1) setSelectedSubject(''); }}
+                    disabled={field.dis}
+                    aria-label={field.label}
+                    title={field.label}
+                    className="w-full appearance-none bg-black/20 border border-gray-600 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                  >
+                    <option value="">اختر {field.label}...</option>
+                    {field.opts.map((o) => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                  <ChevronDown className="absolute left-4 top-3.5 text-gray-400 pointer-events-none w-5 h-5" />
+                </div>
+              </div>
+            </div>
+          ))}
+        </section>
+
+        {/* 2. Upload Section */}
+        <section className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-12">
+
+          {/* Assignment Upload */}
+          <div className="group relative">
+            <div className="absolute inset-0 bg-gradient-to-r from-cyan-500 to-blue-500 rounded-2xl blur opacity-20 group-hover:opacity-40 transition duration-500"></div>
+            <div className="relative h-full bg-gray-800/60 backdrop-blur-md border border-white/10 rounded-2xl p-8 flex flex-col items-center justify-center text-center transition duration-300 group-hover:transform group-hover:scale-[1.02]">
+              <div className="w-16 h-16 bg-blue-500/20 rounded-full flex items-center justify-center mb-4 group-hover:animate-bounce">
+                <FileText className="w-8 h-8 text-blue-400" />
+              </div>
+              <h3 className="text-xl font-bold mb-2">ملف الواجب (Assignment Brief)</h3>
+              <p className="text-gray-400 text-sm mb-6">يجب أن يحتوي على جدول المعايير (P1, M1..)</p>
+
+              <label className="cursor-pointer bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white px-8 py-3 rounded-full font-bold shadow-lg shadow-blue-500/30 transition-all transform hover:scale-105 active:scale-95">
+                <span>اختر ملف</span>
+                <input type="file" className="hidden" accept=".pdf,.docx,.doc" onChange={e => e.target.files && handleFileUpload(Array.from(e.target.files), false)} />
+              </label>
+              {assignmentContext && <div className="mt-4 flex items-center gap-2 text-green-400 bg-green-900/20 px-4 py-1 rounded-full text-sm">✓ تم الرفع</div>}
+            </div>
+          </div>
+
+          {/* Student Upload */}
+          <div className="group relative">
+            <div className="absolute inset-0 bg-gradient-to-r from-purple-500 to-pink-500 rounded-2xl blur opacity-20 group-hover:opacity-40 transition duration-500"></div>
+            <div className="relative h-full bg-gray-800/60 backdrop-blur-md border border-white/10 rounded-2xl p-8 flex flex-col items-center justify-center text-center transition duration-300 group-hover:transform group-hover:scale-[1.02]">
+              <div className="w-16 h-16 bg-purple-500/20 rounded-full flex items-center justify-center mb-4 group-hover:animate-bounce">
+                <Upload className="w-8 h-8 text-purple-400" />
+              </div>
+              <h3 className="text-xl font-bold mb-2">حل الطالب</h3>
+              <p className="text-gray-400 text-sm mb-6">يدعم ملفات متعددة (PDF, PPTX, DOCX)</p>
+
+              <label className="cursor-pointer bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white px-8 py-3 rounded-full font-bold shadow-lg shadow-purple-500/30 transition-all transform hover:scale-105 active:scale-95">
+                <span>رفع الملفات</span>
+                <input type="file" className="hidden" multiple accept=".pdf,.docx,.doc,.pptx,.ppt" onChange={e => e.target.files && handleFileUpload(Array.from(e.target.files), true)} />
+              </label>
+              {filesCount > 0 && <div className="mt-4 flex items-center gap-2 text-green-400 bg-green-900/20 px-4 py-1 rounded-full text-sm">✓ تم دمج {filesCount} ملفات</div>}
+            </div>
+          </div>
+        </section>
+
+        {/* 3. Action Buttons */}
+        <div className="flex justify-center gap-6 mb-16">
+          <button
+            type="button"
+            onClick={handleReset}
+            disabled={filesCount === 0}
+            className="relative group px-6 py-4 rounded-2xl bg-red-900/20 border border-red-500/30 overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed transition-all hover:border-red-400 hover:bg-red-900/40"
+          >
+            <div className="relative flex items-center gap-2 text-red-400 font-bold">
+              <Trash2 />
+              <span>طالب جديد</span>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleEvaluate}
+            disabled={loading}
+            className="relative group px-10 py-4 rounded-2xl bg-gray-800 border border-green-500/30 overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed transition-all hover:border-green-400 hover:shadow-[0_0_30px_rgba(34,197,94,0.3)]"
+          >
+            <div className="absolute inset-0 bg-green-600/10 group-hover:bg-green-600/20 transition"></div>
+            <div className="relative flex items-center gap-3 text-green-400 font-bold text-lg">
+              {loading ? <div className="w-6 h-6 border-2 border-green-400 border-t-transparent rounded-full animate-spin"></div> : <FileText />}
+              <span>{loading ? "جاري التحليل..." : "بدء التقييم الشامل"}</span>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleCheckPlagiarism}
+            disabled={plagiarismLoading}
+            className="relative group px-10 py-4 rounded-2xl bg-gray-800 border border-purple-500/30 overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed transition-all hover:border-purple-400 hover:shadow-[0_0_30px_rgba(168,85,247,0.3)]"
+          >
+            <div className="absolute inset-0 bg-purple-600/10 group-hover:bg-purple-600/20 transition"></div>
+            <div className="relative flex items-center gap-3 text-purple-400 font-bold text-lg">
+              {plagiarismLoading ? <div className="w-6 h-6 border-2 border-purple-400 border-t-transparent rounded-full animate-spin"></div> : <Search />}
+              <span>{plagiarismLoading ? "جاري الفحص..." : "فحص البصمة الرقمية"}</span>
+            </div>
+          </button>
+        </div>
+
+        {/* 4. Results Section */}
+        {result && result.success && (
+          <div className="space-y-8 animate-fade-in-up">
+            {isEvaluationError && (
+              <div className="bg-amber-900/20 border border-amber-500/40 rounded-2xl p-5">
+                <h3 className="text-amber-300 font-bold mb-2">تنبيه: تعذر إكمال التقييم الذكي</h3>
+                <p className="text-amber-100 text-sm leading-relaxed">{result.report || 'الخادم لم يُرجع تفاصيل كافية. يرجى التحقق من إعدادات API ثم إعادة المحاولة.'}</p>
+              </div>
+            )}
+
+            <div className="relative bg-gray-900/80 backdrop-blur-xl border border-white/10 rounded-3xl p-8 shadow-2xl overflow-hidden">
+              <div className="absolute top-0 right-0 w-64 h-64 bg-green-500/10 rounded-full blur-[80px]"></div>
+              <div className="relative z-10 flex flex-wrap justify-between items-center gap-8">
+                <div>
+                  <h2 className="text-3xl font-bold text-white mb-2">النتيجة النهائية</h2>
+                  <div className={`text-6xl font-extrabold ${result.data.final_grade === 'REFER (FAIL)' ? 'text-red-500 drop-shadow-[0_0_10px_rgba(239,68,68,0.5)]' : result.data.final_grade === 'ERROR' ? 'text-amber-400 drop-shadow-[0_0_10px_rgba(251,191,36,0.5)]' : 'text-green-400 drop-shadow-[0_0_10px_rgba(74,222,128,0.5)]'}`}>
+                    {result.data.final_grade || "PENDING"}
+                  </div>
+                  {result.data.final_grade === 'REFER (FAIL)' && (
+                    <p className="text-red-300 mt-2 max-w-xl text-sm border-r-2 border-red-500 pr-2">{result.report}</p>
+                  )}
+                </div>
+
+                <div className="flex gap-8 text-center">
+                  <div className="bg-gray-800/50 p-4 rounded-2xl border border-white/5">
+                    <div className="text-gray-400 text-sm mb-1">المعايير</div>
+                    <div className="text-3xl font-bold text-white">{result.data.summary.achievedCount} <span className="text-gray-500 text-lg">/ {result.data.summary.totalCriteria}</span></div>
+                  </div>
+                  <div className="bg-gray-800/50 p-4 rounded-2xl border border-white/5">
+                    <div className="text-gray-400 text-sm mb-1">النسبة</div>
+                    <div className="text-3xl font-bold text-blue-400">{result.data.summary.achievedPercent}%</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-6">
+              {result.data.criteria.map((crit, idx) => (
+                <div key={idx} className="bg-gray-800/40 backdrop-blur border border-white/5 rounded-2xl p-6 hover:bg-gray-800/60 transition duration-300">
+                  <div className="flex justify-between items-center mb-4 pb-4 border-b border-white/5">
+                    <div className="flex items-center gap-3">
+                      <span className="bg-blue-600/20 text-blue-300 px-3 py-1 rounded-lg font-mono font-bold border border-blue-500/30">{crit.code}</span>
+                      <h3 className="text-lg font-bold text-gray-200">نتائج المعيار</h3>
+                    </div>
+                    <span className={`px-4 py-1 rounded-full font-bold text-sm ${crit.verdict === 'Achieved' ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'}`}>
+                      {crit.verdict === 'Achieved' ? 'مستوفى' : 'غير مستوفى'}
+                    </span>
+                  </div>
+
+                  <div className="grid md:grid-cols-2 gap-6">
+                    <div>
+                      <h4 className="text-blue-400 font-bold mb-2 text-sm">الملاحظات والتحليل:</h4>
+                      <ul className="space-y-2">
+                        {crit.reasons.map((r, i) => <li key={i} className="text-gray-300 text-sm flex gap-2"><span className="text-blue-500 mt-1">•</span>{r}</li>)}
+                      </ul>
+                    </div>
+                    {crit.evidence.length > 0 && (
+                      <div className="bg-black/30 p-4 rounded-xl border border-white/5">
+                        <h4 className="text-yellow-500 font-bold mb-2 text-sm">الدليل المقتبس:</h4>
+                        {crit.evidence.map((ev, i) => <p key={i} className="text-gray-400 text-sm italic border-r-2 border-yellow-500 pr-3">"{ev.quote}"</p>)}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Plagiarism Modal */}
+        {showPlagModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setShowPlagModal(false)}></div>
+            <div className="relative bg-gray-900 border border-gray-600 w-full max-w-3xl rounded-3xl p-8 shadow-2xl transform transition-all scale-100">
+              <button type="button" onClick={() => setShowPlagModal(false)} className="absolute top-4 left-4 text-gray-400 hover:text-white">✕</button>
+              <h2 className="text-2xl font-bold text-purple-400 mb-8 flex items-center gap-3"><ShieldAlert className="w-8 h-8" /> تقرير البصمة الرقمية</h2>
+              {plagiarismLoading ? (
+                <div className="text-center py-12"><div className="w-16 h-16 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div><p className="text-gray-400">جاري مسح البصمة الرقمية...</p></div>
+              ) : plagiarismResult && (
+                <div className="space-y-8">
+                  <div className="grid grid-cols-2 gap-6">
+                    <div className="bg-gray-800/50 p-6 rounded-2xl text-center border border-purple-500/20"><div className="text-gray-400 mb-2">احتمالية AI</div><div className={`text-5xl font-bold ${plagiarismResult.ai.likelihood > 50 ? 'text-red-500' : 'text-green-500'}`}>{plagiarismResult.ai.likelihood}%</div></div>
+                    <div className="bg-gray-800/50 p-6 rounded-2xl text-center border border-blue-500/20"><div className="text-gray-400 mb-2">التشابه</div><div className="text-5xl font-bold text-blue-400">{plagiarismResult.similarity}%</div></div>
+                  </div>
+                  <div className="bg-purple-900/10 p-6 rounded-2xl border border-purple-500/20"><h3 className="font-bold text-purple-300 mb-2">تقرير الأسلوب:</h3><p className="text-gray-300 leading-relaxed">{plagiarismResult.ai.report}</p></div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

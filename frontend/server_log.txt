@@ -1,0 +1,37 @@
+
+> nexus-platform-v3@3.0.0 dev
+> next dev -p 3011 --webpack -p 3011
+
+⨯ Failed to start server
+Error: listen EADDRINUSE: address already in use :::3011
+    at <unknown> (Error: listen EADDRINUSE: address already in use :::3011)
+    at new Promise (<anonymous>) {
+  code: 'EADDRINUSE',
+  errno: -4091,
+  syscall: 'listen',
+  address: '::',
+  port: 3011
+}
+[?25h
+
+e:\Phase 1_ Quantum Foundation Project Setup Instructions\frontend>Internal Server Error
+e:\Phase 1_ Quantum Foundation Project Setup Instructions\frontend>SUCCESS: The process "node.exe" with PID 59200 has been terminated.
+SUCCESS: The process "node.exe" with PID 63920 has been terminated.
+SUCCESS: The process "node.exe" with PID 50880 has been terminated.
+SUCCESS: The process "node.exe" with PID 61228 has been terminated.
+SUCCESS: The process "node.exe" with PID 7036 has been terminated.
+SUCCESS: The process "node.exe" with PID 21540 has been terminated.
+SUCCESS: The process "node.exe" with PID 39540 has been terminated.
+SUCCESS: The process "node.exe" with PID 54428 has been terminated.
+SUCCESS: The process "node.exe" with PID 47520 has been terminated.
+SUCCESS: The process "node.exe" with PID 33224 has been terminated.
+SUCCESS: The process "node.exe" with PID 38040 has been terminated.
+SUCCESS: The process "node.exe" with PID 57236 has been terminated.
+SUCCESS: The process "node.exe" with PID 35268 has been terminated.
+SUCCESS: The process "node.exe" with PID 25556 has been terminated.
+SUCCESS: The process "node.exe" with PID 53108 has been terminated.
+SUCCESS: The process "node.exe" with PID 57624 has been terminated.
+"killed" 
+done
+
+e:\Phase 1_ Quantum Foundation Project Setup Instructions\frontend>

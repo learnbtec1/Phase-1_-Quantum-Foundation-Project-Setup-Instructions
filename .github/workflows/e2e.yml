@@ -1,0 +1,19 @@
+name: E2E
+on: [push, pull_request]
+jobs:
+  e2e:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install deps
+        run: |
+          cd frontend
+          npm ci
+          npm run playwright:install
+      - name: Dev E2E (Chromium)
+        run: |
+          cd frontend
+          npx playwright test

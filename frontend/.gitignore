@@ -1,0 +1,16 @@
+# File: frontend/.gitignore
+# Node
+node_modules/
+.next/
+out/
+
+# Env
+.env
+.env.local
+.env.production
+.env.development
+!.env.example
+backend/.env
+
+# Misc
+.DS_Store

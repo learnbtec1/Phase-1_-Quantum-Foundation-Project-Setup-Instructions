@@ -1,0 +1,25 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Start Backend",
+      "type": "shell",
+      "command": "python",
+      "args": ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--reload"],
+      "options": {
+        "cwd": "${workspaceFolder}/backend",
+        "env": {
+          "PYTHONPATH": "."
+        }
+      },
+      "problemMatcher": []
+    }
+  ]
+} 
+
+To run this task from the "Run Task" menu, follow these steps:
+1. Open the Command Palette (Ctrl + Shift + P or Cmd + Shift + P on Mac).
+2. Type "Run Task" and select it from the dropdown.
+3. Choose "Start Backend" from the list of available tasks.
+
+This will execute the task without needing to type the command in the terminal again.

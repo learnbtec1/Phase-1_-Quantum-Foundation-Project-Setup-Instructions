@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(npm)",
+      "Shell(node)",
+      "Shell(powershell)",
+      "Read(**/*)",
+      "Write(src/**/*)",
+      "Write(tests/**/*)",
+      "Write(scripts/**/*)",
+      "Write(playwright.config.ts)",
+      "Write(package.json)",
+      "Write(next.config.*)",
+      "Write(tsconfig.json)",
+      "Write(.cursor/**/*)"
+    ],
+    "deny": [
+      "Shell(rm)",
+      "Shell(rmdir)",
+      "Write(**/.env*)",
+      "Write(.git/**/*)",
+      "Write(backend/**/*.env*)",
+      "Write(public/**/*.key)",
+      "Write(secrets/**/*)"
+    ]
+  }
+}

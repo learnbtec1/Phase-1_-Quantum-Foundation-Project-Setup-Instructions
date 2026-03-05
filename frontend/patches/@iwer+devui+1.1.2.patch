@@ -1,0 +1,18 @@
+diff --git a/node_modules/@iwer/devui/lib/scene.js b/node_modules/@iwer/devui/lib/scene.js
+index 018ea87..5a1060f 100644
+--- a/node_modules/@iwer/devui/lib/scene.js
++++ b/node_modules/@iwer/devui/lib/scene.js
+@@ -36,10 +36,9 @@ export class InputLayer {
+         this.cameraRig.quaternion.fromArray(xrDevice.quaternion.quat);
+         this.cameraRig.add(this.camera);
+         this.camera.position.x -= xrDevice.ipd / 2;
+-        const spaceOriginIndicator = new Mesh(new RingGeometry(0.25, 0.27, 32), new MeshBasicMaterial({
+-            color: 0xffffff,
+-            side: FrontSide,
+-        }));
++        const _mat = new MeshBasicMaterial({ color: 0xffffff, side: FrontSide });
++        if (typeof _mat.onBuild !== 'function') _mat.onBuild = function() {};
++        const spaceOriginIndicator = new Mesh(new RingGeometry(0.25, 0.27, 32), _mat);
+         spaceOriginIndicator.rotateX(-Math.PI / 2);
+         this.scene.add(spaceOriginIndicator);
+         // Create a renderer

@@ -45,22 +45,32 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
     comparisonText: '',
     studentName: ''
   });
+  const [mounted, setMounted] = useState(false);
 
+  // Load from localStorage after mount (client-only)
   useEffect(() => {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      try {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
         const parsed = JSON.parse(stored);
         setProgress(prev => ({ ...prev, ...parsed }));
-      } catch {
-        // ignore corrupt stored data
       }
+    } catch {
+      // localStorage unavailable or data corrupt — ignore
+    } finally {
+      setMounted(true);
     }
   }, []);
 
+  // Save to localStorage whenever progress changes, but only after initial load
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(progress));
-  }, [progress]);
+    if (!mounted) return;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(progress));
+    } catch {
+      // localStorage unavailable — ignore
+    }
+  }, [progress, mounted]);
 
   const startUnit = (unitId: string) => {
     setProgress(prev => ({ ...prev, currentUnit: unitId }));
@@ -152,7 +162,11 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
       studentName: ''
     };
     setProgress(initial);
-    localStorage.removeItem(STORAGE_KEY);
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // localStorage unavailable — ignore
+    }
   };
 
   return (

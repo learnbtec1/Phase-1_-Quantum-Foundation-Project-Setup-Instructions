@@ -1,0 +1,458 @@
+# -*- coding: utf-8 -*-
+"""
+Forensic Engine — Neural–Logic Fusion v3.2 (Enhanced Robustness)
+---------------------------------------------------------------------
+- Level 3 integration: Algorithm is the only judge; AI extracts evidence only.
+- Full Arabic support (numbers, plurals, dual forms, verbs, context signals).
+- Advanced quantitative requirement extraction (multi-target).
+- Strict BTEC grading cascade (P→M→D).
+- Stable streaming engine with heartbeat, retries, caching.
+- Improved error handling and fallback criteria extraction.
+"""
+
+from __future__ import annotations
+import os
+import re
+import json
+import asyncio
+import time
+import hashlib
+import logging
+from typing import Dict, List, Any, AsyncGenerator, Optional, Tuple
+from datetime import datetime, timedelta
+
+from dotenv import load_dotenv
+from openai import AsyncOpenAI, OpenAIError
+
+# استيراد الخوارزميات المساعدة
+from app.services.quantitative_requirements import extract_quantitative_requirements_advanced
+from app.services.criteria_extractor import extract_criteria_with_descriptions
+
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - forensic-grader - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("forensic.v3")
+
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise RuntimeError("❌ OPENAI_API_KEY غير موجود في ملف .env")
+
+# استخدام AsyncOpenAI الحديث (يدعم النسخة v1.0+)
+client = AsyncOpenAI(api_key=api_key)
+
+MODEL = os.getenv("GRADER_MODEL", "gpt-4o")
+MAX_TOKENS = int(os.getenv("GRADER_MAX_TOKENS", "1500"))
+HARD_DEADLINE = int(os.getenv("GRADER_HARD_DEADLINE_SEC", "90"))
+REQUEST_TIMEOUT = int(os.getenv("GRADER_REQUEST_TIMEOUT", "40"))
+MAX_CONCURRENT = int(os.getenv("GRADER_MAX_CONCURRENT", "5"))
+CACHE_TTL = int(os.getenv("GRADER_CACHE_TTL", "86400"))
+
+semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+
+
+# ========= كاش داخلي ==========
+class Cache:
+    def __init__(self, ttl: int):
+        self.ttl = ttl
+        self.data: Dict[str, Tuple[Any, datetime]] = {}
+
+    def key(self, *parts) -> str:
+        return hashlib.sha256(":".join(map(str, parts)).encode()).hexdigest()
+
+    def get(self, k: str):
+        if k in self.data:
+            value, expiry = self.data[k]
+            if datetime.now() < expiry:
+                return value
+            del self.data[k]
+        return None
+
+    def set(self, k: str, v: Any):
+        self.data[k] = (v, datetime.now() + timedelta(seconds=self.ttl))
+
+
+cache = Cache(CACHE_TTL)
+
+
+# ========= أدوات كشف اللغة ==========
+AR_RANGE = re.compile(r"[\u0600-\u06FF]")
+
+def is_arabic_text(s: str) -> bool:
+    return bool(s and AR_RANGE.search(s))
+
+def normalize_ar_numbers(s: str) -> str:
+    return s.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
+
+
+# ========= تنظيف النص ==========
+def clean_text(text: str) -> str:
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text).strip()[:90000]
+
+
+# ========= fallback عدّ عربي عند فشل AI ==========
+def fallback_counts_ar(student_text: str, quant_targets: Dict[str, int]) -> Dict[str, int]:
+    """
+    عد احتياطي يعتمد على:
+    - تطبيع الأرقام الهندية → 0-9
+    - اكتشاف التثنية العربية (شركتان/شركتين = 2)
+    - أي رقم صريح قبل كلمة هدف
+    - جمع بلا رقم + صيغة تحليليّة
+    """
+    from app.services.quantitative_requirements import _TARGET_SYNONYMS
+    txt = normalize_ar_numbers(student_text or "")
+    counts: Dict[str, int] = {}
+
+    # (1) تثنية عربية مباشرة
+    dual_words = {
+        "businesses": [r"شركتان", r"شركتين"],
+        "examples":   [r"مثالان", r"مثالين"],
+        "methods":    [r"طريقتان", r"طريقتين"],
+        "factors":    [r"عاملان", r"عاملين"],
+    }
+    for tgt, forms in dual_words.items():
+        for patt in forms:
+            if re.search(rf"(?<!\w){patt}(?!\w)", txt):
+                counts[tgt] = max(counts.get(tgt, 0), 2)
+
+    # (2) رقم قبل الهدف: "3 شركات"
+    for tgt, pats in _TARGET_SYNONYMS.items():
+        for m in re.finditer(r"(\d+)\s+(.{0,40})", txt):
+            num = int(m.group(1))
+            tail = m.group(2)
+            if any(re.search(p, tail, flags=re.IGNORECASE) for p in pats):
+                counts[tgt] = max(counts.get(tgt, 0), num)
+
+    # (3) جمع بلا رقم ⇒ 2 إن وجد فعل تحليلي
+    analytic = [r"اذكر", r"حدد", r"استعرض", r"ناقش", r"حلل", r"بين", r"وضح"]
+    for tgt, pats in _TARGET_SYNONYMS.items():
+        plural_hits = sum(len(re.findall(p, txt, flags=re.IGNORECASE)) for p in pats)
+        has_verb = any(re.search(v, txt) for v in analytic)
+        if plural_hits >= 2 and has_verb:
+            counts[tgt] = max(counts.get(tgt, 0), 2)
+
+    return counts
+
+# ========= منطق الدرجة النهائية (BTEC Cascade) مع التحقق من الاكتمال ==========
+def calculate_final_grade(results: Dict[str, Dict], total_expected: int = None) -> str:
+    """
+    حساب الدرجة وفق منطق BTEC الصحيح مع التحقق من اكتمال جميع المعايير.
+    - يدعم التوافقية مع المسارات القديمة إذا لم يتم تمرير total_expected
+    """
+    if total_expected is None:
+        total_expected = len(results)
+
+    if len(results) < total_expected:
+        return "INCOMPLETE (EVALUATION IN PROGRESS)"
+
+    p_codes = [c for c in results if c.upper().startswith("P")]
+    if p_codes and not all(results[c].get("achieved", False) for c in p_codes):
+        return "REFER (FAIL)"
+
+    m_codes = [c for c in results if c.upper().startswith("M")]
+    if m_codes and not all(results[c].get("achieved", False) for c in m_codes):
+        return "PASS"
+
+    d_codes = [c for c in results if c.upper().startswith("D")]
+    if d_codes and not all(results[c].get("achieved", False) for c in d_codes):
+        return "MERIT"
+
+    if d_codes:
+        return "DISTINCTION"
+    if m_codes:
+        return "MERIT"
+    return "PASS"
+
+
+# ========= Prompts عربية/إنجليزية (Level 3: AI Extractor فقط) ==========
+LEVEL3_SYSTEM_PROMPT_AR = (
+    "أنت محلل لغوي دقيق في سياق تقييم BTEC. لا تملك صلاحية الحكم achieved/fail.\n"
+    "مهمتك فقط: (1) استخراج الأعداد التي قدمها الطالب لكل هدف (targets) المذكورة،\n"
+    "(2) تقديم اقتباسات نصية مباشرة كأدلة، (3) تقييم جودة الشرح المفاهيمية بإيجاز.\n"
+    "أعد JSON حصراً بهذا الشكل:\n"
+    "{\n  \"student_counts\": {\"examples\": 0, \"businesses\": 0},\n"
+    "  \"evidence\": [\"اقتباس مباشر...\", \"...\"],\n"
+    "  \"quality\": \"تحليل مفاهيمي مختصر\"\n}\n"
+)
+
+LEVEL3_SYSTEM_PROMPT_EN = (
+    "You are a linguistic extractor for BTEC marking. You are NOT allowed to decide achieved/fail.\n"
+    "Your tasks: (1) extract student counts per target, (2) provide direct evidence quotes, "
+    "(3) provide short conceptual quality notes.\n"
+    "Return JSON only:\n"
+    "{\n  \"student_counts\": {\"examples\": 0, \"businesses\": 0},\n"
+    "  \"evidence\": [\"direct quote...\", \"...\"],\n"
+    "  \"quality\": \"brief conceptual analysis\"\n}\n"
+)
+
+
+# ========= المستوى الثالث: AI = Extractor / Algorithm = Judge ==========
+async def evaluate_one(
+    code: str,
+    desc: str,
+    assignment: str,
+    student: str,
+    adv_constraints: Dict[str, Any]
+) -> Tuple[str, Dict]:
+    """
+    - الذكاء الاصطناعي مستخرج فقط (counts + evidence + quality).
+    - الحكم النهائي (achieved) يتم حسابه خوارزميًا من required/provided.
+    """
+    cache_key = cache.key("v3.2", code, student, json.dumps(adv_constraints, ensure_ascii=False))
+    cached = cache.get(cache_key)
+    if cached:
+        return code, cached
+
+    quant_targets: Dict[str, int] = adv_constraints.get("by_target", {}) or {}
+    required_general: int = int(adv_constraints.get("general", 0) or 0)
+
+    lang_is_ar = is_arabic_text(assignment) or is_arabic_text(student)
+    prompt_base = LEVEL3_SYSTEM_PROMPT_AR if lang_is_ar else LEVEL3_SYSTEM_PROMPT_EN
+
+    system_msg = (
+        prompt_base
+        + ("\nالأهداف الرقمية المطلوبة (targets→required):\n" if lang_is_ar else "\nTargets and required counts (targets→required):\n")
+        + json.dumps(quant_targets, ensure_ascii=False)
+    )
+
+    user_msg = (
+        (f"🎯 المعيار: {code}: {desc}\n\n📘 نص الواجب:\n{assignment[:18000]}\n\n📝 إجابة الطالب:\n{student}")
+        if lang_is_ar else
+        (f"🎯 Criterion: {code}: {desc}\n\n📘 Assignment text:\n{assignment[:18000]}\n\n📝 Student answer:\n{student}")
+    )
+
+    ai_out: Optional[Dict[str, Any]] = None
+    for attempt in range(2):
+        try:
+            async with semaphore:
+                resp = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=MODEL,
+                        temperature=0,
+                        response_format={"type": "json_object"},
+                        messages=[
+                            {"role": "system", "content": system_msg},
+                            {"role": "user", "content": user_msg},
+                        ],
+                        max_tokens=MAX_TOKENS,
+                    ),
+                    timeout=REQUEST_TIMEOUT,
+                )
+            content = resp.choices[0].message.content
+            ai_out = json.loads(content)
+            break
+        except asyncio.TimeoutError:
+            logger.warning(f"⏰ مهلة الطلب تجاوزت للمعيار {code}")
+        except (OpenAIError, json.JSONDecodeError) as e:
+            logger.error(f"❌ خطأ OpenAI/JSON للمعيار {code}: {e}")
+        except Exception:
+            logger.exception(f"❌ خطأ غير متوقع أثناء AI extract للمعيار {code}")
+        await asyncio.sleep(0.6)
+
+    if ai_out is None:
+        # فشل استخراج AI — نتيجة قابلة للتعامل معها
+        fallback = {
+            "achieved": False,
+            "required": required_general,
+            "provided": 0,
+            "student_counts": {},
+            "evidence": [],
+            "quality": "",
+            "missing_requirements": ["system-failure"],
+        }
+        cache.set(cache_key, fallback)
+        return code, fallback
+
+    # ======= تنقية مخرجات AI =======
+    raw_counts = ai_out.get("student_counts", {}) or {}
+    student_counts: Dict[str, int] = {}
+    for k, v in raw_counts.items():
+        try:
+            student_counts[k] = int(v)
+        except Exception:
+            # تجاهل غير الرقمية
+            continue
+
+    evidence = ai_out.get("evidence", []) or []
+    if not isinstance(evidence, list):
+        evidence = [str(evidence)]
+    quality = str(ai_out.get("quality", "") or "")
+
+    # ======= عدّ احتياطي عربي إن لزم =======
+    if (not student_counts) or all(int(v or 0) == 0 for v in student_counts.values()):
+        fb = fallback_counts_ar(student, quant_targets)
+        for k, v in fb.items():
+            if int(student_counts.get(k, 0) or 0) < int(v or 0):
+                student_counts[k] = int(v)
+
+    # ======= الحكم الخوارزمي (required vs provided) =======
+    provided = 0
+    for tgt in (quant_targets.keys() or []):
+        provided = max(provided, int(student_counts.get(tgt, 0) or 0))
+
+    required = int(required_general)
+    achieved = bool(provided >= required) if required > 0 else True
+
+    missing: List[str] = []
+    if required > 0 and provided < required:
+        missing.append(f"required {required}, provided {provided}")
+
+    result = {
+        "achieved": achieved,
+        "required": required,
+        "provided": provided,
+        "student_counts": student_counts,
+        "evidence": evidence,
+        "quality": quality,
+        "missing_requirements": missing,
+    }
+
+    cache.set(cache_key, result)
+    return code, result
+
+# ========= المحرك المتدفق Streaming Engine (مُحسّن) ==========
+async def forensic_grade_stream(assignment_text: str, student_text: str) -> AsyncGenerator[str, None]:
+    start_time = time.monotonic()
+    job_id = f"job_{int(start_time)}"
+
+    logger.info(f"Starting forensic_grade_stream with job_id: {job_id}")
+
+    yield json.dumps({
+        "type": "start",
+        "job_id": job_id,
+        "message": "🔍 المحرك (Level 3 — Arabic+English) بدأ التشريح..."
+    }, ensure_ascii=False) + "\n"
+
+    try:
+        a_clean = await asyncio.to_thread(clean_text, assignment_text)
+        s_clean = await asyncio.to_thread(clean_text, student_text)
+
+        logger.info("Assignment and student texts cleaned successfully.")
+
+        # ======= استخراج المعايير (مع fallback مرن) =======
+        criteria_map = await asyncio.to_thread(extract_criteria_with_descriptions, a_clean)
+        if not criteria_map:
+            # إذا لم نجد معايير، نستخدم regex بسيط كآخر أمل
+            logger.warning("No criteria found via extractor, falling back to simple regex.")
+            simple_codes = re.findall(r'\b[PMD]\d+\b', a_clean)
+            if simple_codes:
+                criteria_map = {code: f"معيار {code}" for code in simple_codes}
+            else:
+                # لا معايير على الإطلاق → نرسل خطاء وننهي
+                logger.error("No criteria could be extracted from assignment.")
+                yield json.dumps({
+                    "type": "error",
+                    "message": "لم يتم العثور على معايير في نص الواجب."
+                }, ensure_ascii=False) + "\n"
+                return
+
+        logger.info(f"Extracted criteria: {list(criteria_map.keys())}")
+
+        # ======= استخراج المتطلبات الكمية =======
+        adv_constraints = await asyncio.to_thread(extract_quantitative_requirements_advanced, a_clean)
+        logger.info(f"Advanced Numeric Constraints: {adv_constraints}")
+
+        total = len(criteria_map)
+        yield json.dumps({
+            "type": "info",
+            "total": total,
+            "criteria": list(criteria_map.keys())
+        }, ensure_ascii=False) + "\n"
+
+        # إعداد المهام المتوازية
+        tasks = {
+            asyncio.create_task(
+                evaluate_one(code, desc, a_clean, s_clean, adv_constraints)
+            ): code
+            for code, desc in criteria_map.items()
+        }
+        pending = set(tasks.keys())
+        results: Dict[str, Dict] = {}
+
+        deadline = time.monotonic() + HARD_DEADLINE
+        last_ping = time.monotonic()
+
+        # ======= حلقة التنفيذ المتوازي =======
+        while pending and time.monotonic() < deadline:
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=3.0,
+                return_when=asyncio.FIRST_COMPLETED
+            )
+
+            if done:
+                for task in done:
+                    code = tasks[task]
+                    try:
+                        _, res = await task
+                        results[code] = res
+                        yield json.dumps({
+                            "type": "criterion",
+                            "code": code,
+                            "data": res
+                        }, ensure_ascii=False) + "\n"
+                    except Exception as e:
+                        logger.error(f"Error processing criterion {code}: {e}")
+                        # نرسل خطأ جزئي لكننا نكمل
+                        yield json.dumps({
+                            "type": "error",
+                            "message": f"فشل في تقييم {code}: {str(e)}"
+                        }, ensure_ascii=False) + "\n"
+
+            else:
+                # heartbeat كل 5 ثوانٍ
+                if time.monotonic() - last_ping > 5:
+                    yield json.dumps({
+                        "type": "ping",
+                        "timestamp": time.time()
+                    }, ensure_ascii=False) + "\n"
+                    last_ping = time.monotonic()
+
+        # ======= تجاوز المهلة =======
+        if pending:
+            logger.warning(f"⏰ Execution timeout: {len(pending)} criteria not completed.")
+            for t in pending:
+                t.cancel()
+
+        # ======= حساب الدرجة النهائية =======
+        final_grade = calculate_final_grade(results, total)
+
+        yield json.dumps({
+            "type": "complete",
+            "final_grade": final_grade,
+            "execution_time": round(time.monotonic() - start_time, 2),
+            "processed": len(results),
+            "total": total,
+            "partial": len(results) < total
+        }, ensure_ascii=False) + "\n"
+
+        logger.info(f"Job {job_id} completed with final_grade: {final_grade}")
+
+    except Exception as e:
+        logger.exception("❌ Unexpected error in forensic_grade_stream")
+        yield json.dumps({
+            "type": "error",
+            "message": f"حدث خطأ فني غير متوقع: {str(e)}"
+        }, ensure_ascii=False) + "\n"
+
+async def forensic_grade(assignment_text: str, student_text: str) -> dict:
+    """
+    Wrapper function for compatibility with existing endpoints.
+    Calls the streaming forensic_grade_stream function and aggregates results.
+    """
+    logger.info("Starting forensic_grade with assignment_text: %s, student_text: %s", assignment_text[:100], student_text[:100])
+    results = []
+    try:
+        async for result in forensic_grade_stream(assignment_text, student_text):
+            logger.debug("Received partial result: %s", result)
+            results.append(result)
+        final_result = json.loads(results[-1]) if results else {}
+        logger.info("Final result: %s", final_result)
+        return final_result
+    except Exception as e:
+        logger.error("Error in forensic_grade: %s", str(e))
+        raise

@@ -1,6 +1,9 @@
 'use client';
 
 import React, { useRef, useState, useEffect } from 'react';
+import styles from './Chat.module.css';
+import { inferResponsePlan, parseVeronaResponse } from '@/ai/avatar/brain';
+import { reactToUserInput, dispatchGestureFromActionText, dispatchEmotion, applyVeronaResponse } from '@/ai/avatar/actions';
 
 export interface Message {
   id: string;
@@ -20,17 +23,42 @@ export default function Chat() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
+  // Ensure event payloads align with VRMAvatar.tsx
+  const detectAndDispatchCommand = (text: string): boolean => {
+    const t = text.trim().toLowerCase();
+    if (/^(تحرك|امشي|walk|move)/.test(t)) {
+      window.dispatchEvent(new CustomEvent('avatar:walk', { detail: { isWalking: true } }));
+      return true;
+    }
+    if (/^(توقف|وقف|قف|stop|halt)/.test(t)) {
+      window.dispatchEvent(new CustomEvent('avatar:stop', { detail: { isWalking: false } }));
+      return true;
+    }
+    if (/^(لوّح|لوح|wave)/.test(t)) {
+      window.dispatchEvent(new CustomEvent('avatar:gesture', { detail: { type: 'wave', side: 'right', duration: 3, intensity: 1 } }));
+      return true;
+    }
+    return false;
+  };
+
   const sendMessage = async () => {
     const text = inputText.trim();
     if (!text || isLoading) return;
+
+    setInputText('');
+
+    if (typeof window !== 'undefined' && detectAndDispatchCommand(text)) return;
 
     setMessages((prev) => [
       ...prev,
       { id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, role: 'user', content: text },
     ]);
-    setInputText('');
     setIsLoading(true);
-    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('chat:sent'));
+    // رد فعل جسدي فوري قبل انتظار الـ API
+    if (typeof window !== 'undefined') {
+      reactToUserInput(text);
+      window.dispatchEvent(new CustomEvent('chat:sent'));
+    }
 
     try {
       const res = await fetch('/api/chat', {
@@ -50,7 +78,25 @@ export default function Chat() {
         window.dispatchEvent(new CustomEvent('chat:received'));
         if (!spokenAssistantIdsRef.current.has(assistantMessage.id)) {
           spokenAssistantIdsRef.current.add(assistantMessage.id);
-          window.dispatchEvent(new CustomEvent('avatar:speak', { detail: reply }));
+          // فصل الحوار النظيف عن الحركات والمشاعر المضمَّنة
+          const { dialogue: cleanDialogue, emotion: parsedEmotion, action: parsedAction } = parseVeronaResponse(reply);
+          const speakText = cleanDialogue || reply;
+          // تنفيذ وسوم Verona (حركات + مشاعر) أولاً
+          applyVeronaResponse(parsedAction, parsedEmotion);
+          // إن لم يكن هناك وسوم، استنتج من النص النظيف
+          if (!parsedAction) {
+            const plan = inferResponsePlan(speakText);
+            dispatchEmotion(plan.tone);
+            if (plan.gestures[0]) {
+              const g = plan.gestures[0];
+              window.dispatchEvent(new CustomEvent('avatar:gesture', {
+                detail: { type: g.type === 'emphasis' ? 'beat' : g.type, side: g.hand === 'L' ? 'left' : g.hand === 'both' ? 'both' : 'right', duration: 1.5, intensity: g.strength },
+              }));
+            }
+          }
+          // إرسال الحوار النظيف فقط إلى الأفاتار
+          console.log('%c[V30] 📢 dispatching avatar:speak', 'color:yellow;font-weight:bold', '| emotion:', parsedEmotion, '| text:', speakText.slice(0, 80));
+          window.dispatchEvent(new CustomEvent('avatar:speak', { detail: speakText }));
         }
       }
     } catch {
@@ -111,11 +157,7 @@ export default function Chat() {
           )}
         </div>
         <div
-          className="flex-shrink-0 flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 bg-slate-800/70 backdrop-blur-md shadow-xl glass"
-          style={{
-            minHeight: '2.5cm',
-            paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))',
-          }}
+          className={`flex-shrink-0 flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 bg-slate-800/70 backdrop-blur-md shadow-xl glass ${styles.chatInputRow}`}
         >
           <input
             type="text"

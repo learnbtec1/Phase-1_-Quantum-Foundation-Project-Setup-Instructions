@@ -1,0 +1,4 @@
+.chatInputRow {
+  min-height: 2.5cm;
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}

@@ -5,15 +5,17 @@ import { useFrame, useThree } from '@react-three/fiber';
 import { Float } from '@react-three/drei';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { VRM, VRMLoaderPlugin } from '@pixiv/three-vrm';
+import { VRM, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { Howl } from 'howler';
 import { speakWithTTS, type WordTiming } from '@/ai/io/tts';
-import { inferResponsePlan } from '@/ai/avatar/brain';
+import { inferResponsePlan, parseVeronaResponse } from '@/ai/avatar/brain';
+import { dispatchGestureFromActionText } from '@/ai/avatar/actions';
 import { EMOTION_BLENDSHAPES } from '@/ai/avatar/state';
 import { proceduralViseme, decayViseme, type VisemeWeights } from '@/ai/lipsync/viseme';
 import { timingsToVisemeAt, lerpViseme } from '@/ai/lipsync/timing';
-
-const VRM_URL = '/models/Furina.vrm';
+import { EmotionManager } from '@/ai/avatar/managers/EmotionManager';
+import { PhonemeManager } from '@/ai/avatar/managers/PhonemeManager';
+const VRM_URL = '/models/teach.vrm';
 const HUM_URL = '/audio/voices/furina/hum.mp3';
 const HUM_URL_ALT = '/audio/ambience/boardroom.mp3';
 
@@ -31,7 +33,7 @@ const USER_SENT_ACK_DURATION = 0.6;
 const USER_SENT_ACK_INTENSITY = 0.08; // كان 0.2 — خفّفنا حركة الرأس عند إرسال الرسالة
 const BLINK_INTERVAL_MIN = 2.2;
 const BLINK_INTERVAL_MAX = 4.5;
-const AVATAR_BASE_Y = -0.93;
+const AVATAR_BASE_Y = -0.5;
 const IDLE_SWAY_AMOUNT = 0.04; // كان 0.1 — خفّفنا التمايل الخفيف
 const BREATHE_AMPLITUDE = 0.11;
 const WAVE_DURATION = 4;
@@ -102,25 +104,125 @@ function eulerToQuatArray(euler: THREE.Euler): [number, number, number, number] 
 
 const ARM_BONE_NAMES = ['leftUpperArm', 'leftLowerArm', 'leftHand', 'rightUpperArm', 'rightLowerArm', 'rightHand'] as const;
 
-/** VRM 0.x / VRChat / Mixamo / GI-Assets skeleton bone name patterns */
+/**
+ * ─── أنماط تحديد العظام ───────────────────────────────────────────────────────
+ * يدعم الأفاتار أسماء العظام بثلاث لغات:
+ *  ① العربية  : الذراع الأيمن، الساعد الأيسر، اليد اليمنى... إلخ
+ *  ② الإنجليزية: RightArm, LeftForeArm, Hips... (Mixamo / Avaturn / Unity)
+ *  ③ اليابانية : 右腕، 左ひじ、右足... (VRChat / VRM 0.x)
+ *
+ * المسار الأساسي: إذا توفّر الـ humanoid API في VRM يُستخدم مباشرةً.
+ * المسار الاحتياطي: المطابقة بالنمط على عظام الهيكل العظمي.
+ */
+
+// الأذرع والأيدي — Arms & Hands
 const SKELETON_ARM_PATTERNS: Record<string, RegExp> = {
-  rightUpperArm: /J_Bip_R_UpperArm|RightUpperArm|Right Arm|rightUpperArm|mixamorigRightArm|RightArm|R_UpperArm|右腕|右腕上/i,
-  rightLowerArm: /J_Bip_R_LowerArm|RightLowerArm|Right Forearm|rightLowerArm|mixamorigRightForeArm|RightForeArm|R_LowerArm|右ひじ|右前腕/i,
-  rightHand: /J_Bip_R_Hand|RightHand|Right Hand|rightHand|mixamorigRightHand|R_Hand|右手/i,
-  leftUpperArm: /J_Bip_L_UpperArm|LeftUpperArm|Left Arm|leftUpperArm|mixamorigLeftArm|LeftArm|L_UpperArm|左腕|左腕上/i,
-  leftLowerArm: /J_Bip_L_LowerArm|LeftLowerArm|Left Forearm|leftLowerArm|mixamorigLeftForeArm|LeftForeArm|L_LowerArm|左ひじ|左前腕/i,
-  leftHand: /J_Bip_L_Hand|LeftHand|Left Hand|leftHand|mixamorigLeftHand|L_Hand|左手/i,
+  // الذراع الأيمن العلوي (العضد الأيمن)
+  rightUpperArm: /J_Bip_R_UpperArm|RightUpperArm|Right Arm|rightUpperArm|mixamorigRightArm|RightArm|R_UpperArm|ذراع_يمين|الذراع_الأيمن|عضد_يمين|ذراع يمين|الذراع الأيمن|العضد_الأيمن|右腕|右腕上/i,
+  // الساعد الأيمن (ذراع أيمن سفلي)
+  rightLowerArm: /J_Bip_R_LowerArm|RightLowerArm|Right Forearm|rightLowerArm|mixamorigRightForeArm|RightForeArm|R_LowerArm|ساعد_يمين|الساعد_الأيمن|ساعد يمين|الساعد الأيمن|右ひじ|右前腕/i,
+  // اليد اليمنى
+  rightHand: /J_Bip_R_Hand|RightHand|Right Hand|rightHand|mixamorigRightHand|R_Hand|يد_يمين|اليد_اليمنى|يد يمين|اليد اليمنى|右手/i,
+  // الذراع الأيسر العلوي (العضد الأيسر)
+  leftUpperArm: /J_Bip_L_UpperArm|LeftUpperArm|Left Arm|leftUpperArm|mixamorigLeftArm|LeftArm|L_UpperArm|ذراع_يسار|الذراع_الأيسر|عضد_يسار|ذراع يسار|الذراع الأيسر|العضد_الأيسر|左腕|左腕上/i,
+  // الساعد الأيسر
+  leftLowerArm: /J_Bip_L_LowerArm|LeftLowerArm|Left Forearm|leftLowerArm|mixamorigLeftForeArm|LeftForeArm|L_LowerArm|ساعد_يسار|الساعد_الأيسر|ساعد يسار|الساعد الأيسر|左ひじ|左前腕/i,
+  // اليد اليسرى
+  leftHand: /J_Bip_L_Hand|LeftHand|Left Hand|leftHand|mixamorigLeftHand|L_Hand|يد_يسار|اليد_اليسرى|يد يسار|اليد اليسرى|左手/i,
 };
 
 const LEG_BONE_NAMES = ['leftUpperLeg', 'leftLowerLeg', 'leftFoot', 'rightUpperLeg', 'rightLowerLeg', 'rightFoot'] as const;
 
+// الأرجل والقدمان — Legs & Feet
 const SKELETON_LEG_PATTERNS: Record<string, RegExp> = {
-  rightUpperLeg: /J_Bip_R_UpperLeg|RightUpperLeg|Right Thigh|rightUpperLeg|mixamorigRightUpLeg|RightUpLeg|R_UpperLeg|右足上|右腿|右太腿|右足D|右CF_1/i,
-  rightLowerLeg: /J_Bip_R_LowerLeg|RightLowerLeg|Right Shin|rightLowerLeg|mixamorigRightLeg|RightLeg|R_LowerLeg|右ひざ|右膝|右下腿|右足E|右CF_2/i,
-  rightFoot: /J_Bip_R_Foot|RightFoot|rightFoot|mixamorigRightFoot|R_Foot|右足首|右足先|右足捩|右CF_3/i,
-  leftUpperLeg: /J_Bip_L_UpperLeg|LeftUpperLeg|Left Thigh|leftUpperLeg|mixamorigLeftUpLeg|LeftUpLeg|L_UpperLeg|左足上|左腿|左太腿|左足D|左CF_1/i,
-  leftLowerLeg: /J_Bip_L_LowerLeg|LeftLowerLeg|Left Shin|leftLowerLeg|mixamorigLeftLeg|LeftLeg|L_LowerLeg|左ひざ|左膝|左下腿|左足E|左CF_2/i,
-  leftFoot: /J_Bip_L_Foot|LeftFoot|leftFoot|mixamorigLeftFoot|L_Foot|左足首|左足先|左足捩|左CF_3/i,
+  // الفخذ الأيمن (الساق العليا اليمنى)
+  rightUpperLeg: /J_Bip_R_UpperLeg|RightUpperLeg|Right Thigh|rightUpperLeg|mixamorigRightUpLeg|RightUpLeg|R_UpperLeg|فخذ_يمين|الفخذ_الأيمن|فخذ يمين|الفخذ الأيمن|右足上|右腿|右太腿|右足D|右CF_1/i,
+  // الساق الأيمن (الساق السفلى اليمنى)
+  rightLowerLeg: /J_Bip_R_LowerLeg|RightLowerLeg|Right Shin|rightLowerLeg|mixamorigRightLeg|RightLeg|R_LowerLeg|ساق_يمين|الساق_الأيمن|ساق يمين|الساق الأيمن|右ひざ|右膝|右下腿|右足E|右CF_2/i,
+  // القدم اليمنى
+  rightFoot: /J_Bip_R_Foot|RightFoot|rightFoot|mixamorigRightFoot|R_Foot|قدم_يمين|القدم_اليمنى|قدم يمين|القدم اليمنى|右足首|右足先|右足捩|右CF_3/i,
+  // الفخذ الأيسر
+  leftUpperLeg: /J_Bip_L_UpperLeg|LeftUpperLeg|Left Thigh|leftUpperLeg|mixamorigLeftUpLeg|LeftUpLeg|L_UpperLeg|فخذ_يسار|الفخذ_الأيسر|فخذ يسار|الفخذ الأيسر|左足上|左腿|左太腿|左足D|左CF_1/i,
+  // الساق الأيسر
+  leftLowerLeg: /J_Bip_L_LowerLeg|LeftLowerLeg|Left Shin|leftLowerLeg|mixamorigLeftLeg|LeftLeg|L_LowerLeg|ساق_يسار|الساق_الأيسر|ساق يسار|الساق الأيسر|左ひざ|左膝|左下腿|左足E|左CF_2/i,
+  // القدم اليسرى
+  leftFoot: /J_Bip_L_Foot|LeftFoot|leftFoot|mixamorigLeftFoot|L_Foot|قدم_يسار|القدم_اليسرى|قدم يسار|القدم اليسرى|左足首|左足先|左足捩|左CF_3/i,
+};
+
+// الجذع والرأس — Trunk & Head (مستخدم في الـ humanoid lookup)
+const SKELETON_TRUNK_PATTERNS: Record<string, RegExp> = {
+  // الوركان (نقطة المنشأ للهيكل العظمي)
+  hips: /J_Bip_C_Hips|Hips|hips|mixamorigHips|حوض|الوركان|الحوض|腰/i,
+  // العمود الفقري
+  spine: /J_Bip_C_Spine|Spine$|spine$|mixamorigSpine$|Spine1?$|عمود_فقري|العمود_الفقري|فقرات|脊椎|脊柱/i,
+  // الصدر
+  chest: /J_Bip_C_Chest|Spine1|chest|mixamorigSpine1|صدر|الصدر|القفص_الصدري|胸/i,
+  // الرقبة
+  neck: /J_Bip_C_Neck|Neck|neck|mixamorigNeck|رقبة|الرقبة|العنق|عنق|首/i,
+  // الرأس
+  head: /J_Bip_C_Head|Head|head|mixamorigHead|رأس|الرأس|頭/i,
+  // الكتف الأيمن
+  rightShoulder: /J_Bip_R_Shoulder|RightShoulder|Right Shoulder|mixamorigRightShoulder|كتف_يمين|الكتف_الأيمن|كتف يمين|右肩/i,
+  // الكتف الأيسر
+  leftShoulder: /J_Bip_L_Shoulder|LeftShoulder|Left Shoulder|mixamorigLeftShoulder|كتف_يسار|الكتف_الأيسر|كتف يسار|左肩/i,
+};
+
+/** الأسماء العربية لعظام VRM humanoid — للطباعة في الكونسول */
+const VRM_BONE_LABELS_AR: Record<string, string> = {
+  hips: 'الوركان (Hips)',
+  spine: 'العمود الفقري (Spine)',
+  chest: 'الصدر (Chest)',
+  upperChest: 'أعلى الصدر (UpperChest)',
+  neck: 'الرقبة (Neck)',
+  head: 'الرأس (Head)',
+  leftShoulder: 'الكتف الأيسر',
+  rightShoulder: 'الكتف الأيمن',
+  leftUpperArm: 'الذراع الأيسر العلوي (العضد)',
+  leftLowerArm: 'الساعد الأيسر',
+  leftHand: 'اليد اليسرى',
+  rightUpperArm: 'الذراع الأيمن العلوي (العضد)',
+  rightLowerArm: 'الساعد الأيمن',
+  rightHand: 'اليد اليمنى',
+  leftUpperLeg: 'الفخذ الأيسر',
+  leftLowerLeg: 'الساق الأيسر',
+  leftFoot: 'القدم اليسرى',
+  leftToes: 'أصابع القدم اليسرى',
+  rightUpperLeg: 'الفخذ الأيمن',
+  rightLowerLeg: 'الساق الأيمن',
+  rightFoot: 'القدم اليمنى',
+  rightToes: 'أصابع القدم اليمنى',
+  // الأصابع — اليد اليسرى
+  leftThumbProximal: 'إبهام يسار — قاعدة',
+  leftThumbIntermediate: 'إبهام يسار — وسط',
+  leftThumbDistal: 'إبهام يسار — طرف',
+  leftIndexProximal: 'سبابة يسار — قاعدة',
+  leftIndexIntermediate: 'سبابة يسار — وسط',
+  leftIndexDistal: 'سبابة يسار — طرف',
+  leftMiddleProximal: 'وسطى يسار — قاعدة',
+  leftMiddleIntermediate: 'وسطى يسار — وسط',
+  leftMiddleDistal: 'وسطى يسار — طرف',
+  leftRingProximal: 'بنصر يسار — قاعدة',
+  leftRingIntermediate: 'بنصر يسار — وسط',
+  leftRingDistal: 'بنصر يسار — طرف',
+  leftLittleProximal: 'خنصر يسار — قاعدة',
+  leftLittleIntermediate: 'خنصر يسار — وسط',
+  leftLittleDistal: 'خنصر يسار — طرف',
+  // الأصابع — اليد اليمنى
+  rightThumbProximal: 'إبهام يمين — قاعدة',
+  rightThumbIntermediate: 'إبهام يمين — وسط',
+  rightThumbDistal: 'إبهام يمين — طرف',
+  rightIndexProximal: 'سبابة يمين — قاعدة',
+  rightIndexIntermediate: 'سبابة يمين — وسط',
+  rightIndexDistal: 'سبابة يمين — طرف',
+  rightMiddleProximal: 'وسطى يمين — قاعدة',
+  rightMiddleIntermediate: 'وسطى يمين — وسط',
+  rightMiddleDistal: 'وسطى يمين — طرف',
+  rightRingProximal: 'بنصر يمين — قاعدة',
+  rightRingIntermediate: 'بنصر يمين — وسط',
+  rightRingDistal: 'بنصر يمين — طرف',
+  rightLittleProximal: 'خنصر يمين — قاعدة',
+  rightLittleIntermediate: 'خنصر يمين — وسط',
+  rightLittleDistal: 'خنصر يمين — طرف',
 };
 
 // ─── Extended gesture state ──────────────────────────────────────────────────
@@ -216,28 +318,48 @@ function useArmPose(
     if (!v?.scene) return;
 
     if (availableBonesRef.current.size === 0 || skeletonBoneMapRef.current.size === 0) {
-      const allPatterns = { ...SKELETON_ARM_PATTERNS, ...SKELETON_LEG_PATTERNS };
-      v.scene.traverse((o) => {
-        const mesh = o as THREE.SkinnedMesh;
-        if (mesh.skeleton) {
-          mesh.skeleton.bones.forEach((bone) => {
-            for (const [vrName, pattern] of Object.entries(allPatterns)) {
-              if (pattern.test(bone.name) && !skeletonBoneMapRef.current.has(vrName)) {
-                skeletonBoneMapRef.current.set(vrName, bone);
-                availableBonesRef.current.add(vrName);
-              }
-            }
-          });
+      // ── المسار الأساسي: استخدام VRM humanoid API مباشرةً ─────────────────
+      // هذا المسار هو الأفضل لأن VRM يحتوي على خريطة عظام humanoid جاهزة
+      const humanoidBoneNames = [...ARM_BONE_NAMES, ...LEG_BONE_NAMES] as string[];
+      let humanoidFound = 0;
+      humanoidBoneNames.forEach((name) => {
+        const node = humanoid?.getRawBoneNode(name as never) ?? humanoid?.getNormalizedBoneNode(name as never);
+        if (node) {
+          skeletonBoneMapRef.current.set(name, node as THREE.Bone);
+          availableBonesRef.current.add(name);
+          humanoidFound++;
         }
       });
-      if (skeletonBoneMapRef.current.size === 0) {
-        [...ARM_BONE_NAMES, ...LEG_BONE_NAMES].forEach((name) => {
-          const node = humanoid?.getRawBoneNode(name as never) ?? humanoid?.getNormalizedBoneNode(name as never);
-          if (node) availableBonesRef.current.add(name);
+
+      if (humanoidFound > 0 && process.env.NODE_ENV === 'development') {
+        const report = [...skeletonBoneMapRef.current.entries()]
+          .map(([k, b]) => `  ${VRM_BONE_LABELS_AR[k] ?? k}  →  ${b.name}`)
+          .join('\n');
+        console.debug('%c[أفاتار] ✅ عظام humanoid محمّلة:', 'color:#4fc3f7;font-weight:bold', `\n${report}`);
+      }
+
+      // ── المسار الاحتياطي: مطابقة الأنماط على الهيكل العظمي ──────────────
+      // يستخدم عندما لا تتوفر بيانات humanoid (نماذج VRoid/MMD/مخصصة)
+      if (humanoidFound < ARM_BONE_NAMES.length) {
+        const allPatterns = { ...SKELETON_ARM_PATTERNS, ...SKELETON_LEG_PATTERNS, ...SKELETON_TRUNK_PATTERNS };
+        v.scene.traverse((o) => {
+          const mesh = o as THREE.SkinnedMesh;
+          if (mesh.skeleton) {
+            mesh.skeleton.bones.forEach((bone) => {
+              for (const [vrName, pattern] of Object.entries(allPatterns)) {
+                if (pattern.test(bone.name) && !skeletonBoneMapRef.current.has(vrName)) {
+                  skeletonBoneMapRef.current.set(vrName, bone);
+                  availableBonesRef.current.add(vrName);
+                }
+              }
+            });
+          }
         });
-      } else {
-        if (process.env.NODE_ENV === 'development') {
-          console.debug('[VRMAvatar] Using skeleton bones:', [...skeletonBoneMapRef.current.entries()].map(([k, b]) => `${k}->${b.name}`).join(', '));
+        if (process.env.NODE_ENV === 'development' && skeletonBoneMapRef.current.size > 0) {
+          const report = [...skeletonBoneMapRef.current.entries()]
+            .map(([k, b]) => `  ${VRM_BONE_LABELS_AR[k] ?? k}  →  "${b.name}"`)
+            .join('\n');
+          console.debug('%c[أفاتار] ⚙️ عظام مُكتشفة بنمط المطابقة:', 'color:#ffb74d;font-weight:bold', `\n${report}`);
         }
       }
     }
@@ -248,7 +370,7 @@ function useArmPose(
     const waveElapsed = isWaving ? (waveUntilRef.current - now) / 1000 : 0;
     const waveProgress = isWaving ? 1 - waveElapsed / WAVE_DURATION : 0;
     // NOTE: alwaysWave drives idle greeting animation; extended gestures override it.
-    const alwaysWave = true;
+    const alwaysWave = false;
 
     // Check extended gesture (expires automatically)
     const gs = gestureStateRef?.current;
@@ -357,7 +479,7 @@ function useArmPose(
         }
       }
     }
-  }, -1);
+  }, 1);
 }
 
 function useProceduralBlink(vrmRef: React.RefObject<VRM | null>) {
@@ -420,13 +542,29 @@ export interface VRMAvatarRef {
   speak: (text: string) => void;
 }
 
-function fallbackSpeakWebSpeech(text: string): boolean {
+function fallbackSpeakWebSpeech(
+  text: string,
+  onStart?: () => void,
+  onEnd?: () => void
+): boolean {
   if (typeof window === 'undefined' || !window.speechSynthesis) return false;
   try {
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'ar-SA';
-    u.rate = 0.95;
+    u.rate = 0.9;
+    u.onstart = () => {
+      onStart?.();
+      window.dispatchEvent(new CustomEvent('avatar:speak:start'));
+    };
+    u.onend = () => {
+      onEnd?.();
+      window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+    };
+    u.onerror = () => {
+      onEnd?.();
+      window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+    };
     window.speechSynthesis.speak(u);
     return true;
   } catch {
@@ -471,13 +609,42 @@ function VRMModel({
   // ── Extended gesture state ─────────────────────────────────────────────────
   const gestureStateRef = useRef<GestureState | null>(null);
 
+  // ── V29 Managers (r3f-vrm + AIMascotKit + svelte-vrm-live) ────────────────
+  const emotionManagerRef = useRef<EmotionManager | null>(null);
+  const phonemeManagerRef = useRef<PhonemeManager | null>(null);
+  // ── V30 diagnostic frame counter ─────────────────────────────────────────
+  const frameCounterRef = useRef(0);
+
+  // ── Internal walk state — responds to avatar:walk / avatar:stop events ──
+  const internalWalkRef = useRef<{ isWalking: boolean; walkPhase: number }>({ isWalking: false, walkPhase: 0 });
+  const activeWalkRef = walkStateRef ?? internalWalkRef;
+
+  useEffect(() => {
+    const onWalk = (e: Event) => {
+      const isWalking = (e as CustomEvent<{ isWalking?: boolean }>).detail?.isWalking ?? true;
+      console.log('%c[V30] 📨 avatar:walk received', 'color:cyan', '| isWalking:', isWalking, '| activeWalkRef:', activeWalkRef.current);
+      const cur = activeWalkRef.current ?? { isWalking: false, walkPhase: 0 };
+      activeWalkRef.current = { ...cur, isWalking };
+    };
+    const onStop = () => {
+      const cur = activeWalkRef.current;
+      if (cur) cur.isWalking = false;
+    };
+    window.addEventListener('avatar:walk', onWalk);
+    window.addEventListener('avatar:stop', onStop);
+    return () => {
+      window.removeEventListener('avatar:walk', onWalk);
+      window.removeEventListener('avatar:stop', onStop);
+    };
+  }, [activeWalkRef]);
+
   const listeningRef = useListeningState();
   useHeadTracking(groupRef, listeningRef, {
     waveUntilRef,
     postureLeanRef,
     isTalkingRef,
   });
-  useArmPose(vrmRef, waveUntilRef, gestureStateRef, walkStateRef);
+  useArmPose(vrmRef, waveUntilRef, gestureStateRef, activeWalkRef);
   useProceduralBlink(vrmRef);
 
   useEffect(() => {
@@ -501,7 +668,52 @@ function VRMModel({
     };
   }, []);
 
-  // ── avatar:gesture event listener ──────────────────────────────────────────
+  // ── avatar:emotion — set emotion state directly ─────────────────────────
+  useEffect(() => {
+    const onEmotion = (e: Event) => {
+      const em = (e as CustomEvent<{ emotion?: string }>).detail?.emotion;
+      console.log('%c[V30] 📨 avatar:emotion received', 'color:cyan', '| emotion:', em, '| EmotionManager:', emotionManagerRef.current ? '✅ ready' : '❌ NULL');
+      if (em) {
+        emotionRef.current = em;
+        if (em !== 'neutral') postureLeanRef.current = 0.02;
+        emotionManagerRef.current?.setEmotion(em);
+      }
+    };
+    window.addEventListener('avatar:emotion', onEmotion);
+    return () => window.removeEventListener('avatar:emotion', onEmotion);
+  }, []);
+
+  // ── avatar:userreact — immediate physical reaction to incoming user message ─
+  useEffect(() => {
+    const onUserReact = (e: Event) => {
+      const type = (e as CustomEvent<{ type?: string }>).detail?.type;
+      switch (type) {
+        case 'greeting':
+          waveUntilRef.current = Date.now() + 2200;
+          emotionRef.current = 'friendly';
+          break;
+        case 'praise':
+          gestureStateRef.current = { active: true, type: 'beat', side: 'both', startMs: Date.now(), durationMs: 1400, intensity: 0.5 };
+          emotionRef.current = 'encouraging';
+          break;
+        case 'farewell':
+          waveUntilRef.current = Date.now() + 2500;
+          emotionRef.current = 'friendly';
+          break;
+        case 'question':
+          emotionRef.current = 'thinking';
+          postureLeanRef.current = 0.04;
+          break;
+        case 'listening':
+          postureLeanRef.current = 0.03;
+          break;
+      }
+    };
+    window.addEventListener('avatar:userreact', onUserReact);
+    return () => window.removeEventListener('avatar:userreact', onUserReact);
+  }, []);
+
+  // ── avatar:gesture/headturn event listener ────────────────────────────────
   useEffect(() => {
     const onGesture = (e: Event) => {
       const d = (e as CustomEvent<{ type?: string; side?: string; duration?: number; intensity?: number }>).detail;
@@ -529,8 +741,32 @@ function VRMModel({
         console.debug(`[VRMAvatar] Gesture triggered: ${type} (${side}) ${duration}s`);
       }
     };
+    // Head turn event: rotate head (yaw) for a short duration
+    let headTurnTimeout: NodeJS.Timeout | null = null;
+    const onHeadTurn = (e: Event) => {
+      const d = (e as CustomEvent<{ direction?: string; angle?: number; duration?: number }>).detail;
+      const angle = typeof d.angle === 'number' ? d.angle : 0.5;
+      const duration = typeof d.duration === 'number' ? d.duration : 1.2;
+      // Save original lookAt target
+      const originalTarget = lookAtTargetRef.current.clone();
+      // Turn head to the right (positive yaw)
+      lookAtTargetRef.current.x += d.direction === 'left' ? -angle : angle;
+      // Restore after duration
+      if (headTurnTimeout) clearTimeout(headTurnTimeout);
+      headTurnTimeout = setTimeout(() => {
+        lookAtTargetRef.current.copy(originalTarget);
+      }, duration * 1000);
+      if (process.env.NODE_ENV === 'development') {
+        console.debug(`[VRMAvatar] Head turn: ${d.direction} angle=${angle} duration=${duration}s`);
+      }
+    };
     window.addEventListener('avatar:gesture', onGesture);
-    return () => window.removeEventListener('avatar:gesture', onGesture);
+    window.addEventListener('avatar:headturn', onHeadTurn);
+    return () => {
+      window.removeEventListener('avatar:gesture', onGesture);
+      window.removeEventListener('avatar:headturn', onHeadTurn);
+      if (headTurnTimeout) clearTimeout(headTurnTimeout);
+    };
   }, []);
 
   // ── VRM loader ──────────────────────────────────────────────────────────────
@@ -550,85 +786,83 @@ function VRMModel({
       (gltf) => {
         if (cancelled) return;
         setTimeout(() => { console.warn = origWarn; }, 0);
+
+        // ── STEP 1: Validate VRM data ───────────────────────────────────────
+        const vrmModel = gltf.userData.vrm as VRM;
+        if (!vrmModel?.scene) {
+          console.warn('[VRMAvatar] No VRM data in gltf.userData.vrm — file may not be a valid VRM');
+          onError?.('Invalid VRM — no scene');
+          return;
+        }
+
+        // ── STEP 2: Optimise geometry (each call isolated, never fatal) ─────
+        try { VRMUtils.removeUnnecessaryVertices(vrmModel.scene); } catch (e) { console.warn('[VRM] removeUnnecessaryVertices failed (ok):', e); }
+        try { VRMUtils.combineSkeletons(vrmModel.scene); } catch (e) { console.warn('[VRM] combineSkeletons failed (ok):', e); }
+        // ⚠️ rotateVRM0 مُزال عن قصد:
+        // teach.vrm — VRM 0.0, 25 blendshapes, 137 bones, موجّه نحو الكاميرا.
+        // استدعاء rotateVRM0 يضيف 180° على محور Y → الأفاتار يولّي ظهره للكاميرا → غير مرئي.
+        // rotateVRM0 مخصص فقط لنماذج VRoid Studio القديمة التي تصدر بـ -Z أمام.
+
+        // ── STEP 3: Configure scene meshes ──────────────────────────────────
+        // كل meshes الأفاتار في teach.vrm هي SkinnedMesh → نتركها جميعاً مرئية
+        // نخفي فقط Mesh الثابت التي اسمها يحتوي على كلمات بيئية (أثاث، منصة، أرضية)
+        const ENV_NAMES = /floor|stage|desk|chair|table|wall|ceiling|prop|room|env|ground|platform/i;
+        let meshCount = 0, skinnedCount = 0;
+        vrmModel.scene.traverse((o) => {
+          o.frustumCulled = false;
+          const sm = o as THREE.SkinnedMesh;
+          if ((o as THREE.Mesh).isMesh) {
+            meshCount++;
+            (o as THREE.Mesh).frustumCulled = false;
+            if (sm.isSkinnedMesh) {
+              skinnedCount++;
+              // تأكد أن الـ SkinnedMesh مرئية دائماً
+              (o as THREE.Mesh).visible = true;
+            } else if (ENV_NAMES.test(o.name)) {
+              // أخفِ فقط المحيط الثابت بالاسم (أثاث، منصة...)
+              (o as THREE.Mesh).visible = false;
+            }
+          }
+        });
+        console.log(`%c[VRM] ✅ SCENE READY  meshCount=${meshCount}  skinnedMeshes=${skinnedCount}`, 'color:lime;font-weight:bold');
+
+        // ── STEP 4: تسليم الـ VRM لـ React — الأفاتار يظهر من هنا ──────────
+        // (Expose VRM to React — avatar renders from this point)
+        if (process.env.NODE_ENV === 'development') {
+          // طباعة جميع عظام الـ humanoid بالعربية للتأكد من التحميل الصحيح
+          const hb = vrmModel.humanoid;
+          if (hb) {
+            const boneReport = Object.keys(VRM_BONE_LABELS_AR)
+              .map(bName => {
+                const node = hb.getRawBoneNode(bName as never);
+                return node ? `  ✅ ${VRM_BONE_LABELS_AR[bName]} → "${node.name}"` : null;
+              })
+              .filter(Boolean)
+              .join('\n');
+            console.log('%c[أفاتار] 🦴 خريطة العظام الكاملة:', 'color:#a5d6a7;font-weight:bold', `\n${boneReport}`);
+          }
+        }
+        vrmRef.current = vrmModel;
+        setVrm(vrmModel);
+        onLoad?.();
+
+        // ── STEP 5: Init animation managers (non-fatal — avatar already visible) ─
         try {
-          const vrmModel = gltf.userData.vrm as VRM;
-          if (!vrmModel?.scene) { onError?.('Invalid VRM data'); return; }
-          vrmModel.scene.traverse((o) => {
-            if ((o as THREE.Mesh).isMesh) {
-              const m = (o as THREE.Mesh).material;
-              const mats = Array.isArray(m) ? m : [m];
-              mats.forEach((mat) => {
-                if (mat && (mat as THREE.MeshStandardMaterial).envMapIntensity !== undefined)
-                  (mat as THREE.MeshStandardMaterial).envMapIntensity = 1;
-              });
-            }
-          });
-          vrmRef.current = vrmModel;
-          setVrm(vrmModel);
-          onLoad?.();
+          mixerRef.current = new THREE.AnimationMixer(vrmModel.scene);
+          emotionManagerRef.current = new EmotionManager(vrmModel, mixerRef.current);
+          phonemeManagerRef.current = new PhonemeManager(vrmModel);
           waveUntilRef.current = Date.now() + WAVE_DURATION * 1000;
-          // Find right upper arm from skeleton (VRM humanoid getRawBoneNode may return null for some models)
-          let rightArm: THREE.Bone | null = (vrmModel.humanoid?.getRawBoneNode('rightUpperArm' as never) ?? null) as THREE.Bone | null;
-          if (!rightArm) {
-            vrmModel.scene.traverse((o) => {
-              const mesh = o as THREE.SkinnedMesh;
-              if (mesh.skeleton && !rightArm) {
-                const bone = mesh.skeleton.bones.find((b) => SKELETON_ARM_PATTERNS.rightUpperArm.test(b.name));
-                if (bone) rightArm = bone;
-              }
-            });
-          }
-          if (rightArm) {
-            try {
-              const rest = rightArm.quaternion.clone();
-              const qRaised = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.6, 0, 0.3, 'XYZ'));
-              const times = [0, 0.25, 0.5, 0.75, 1];
-              const v = (q: THREE.Quaternion) => [q.x, q.y, q.z, q.w];
-              const values = [...v(rest), ...v(qRaised), ...v(rest), ...v(qRaised), ...v(rest)];
-              const trackName = rightArm.uuid + '.quaternion';
-              const track = new THREE.QuaternionKeyframeTrack(trackName, times, values);
-              const clip = new THREE.AnimationClip('waveArm', 1, [track]);
-              const mixer = new THREE.AnimationMixer(vrmModel.scene);
-              mixerRef.current = mixer;
-              mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
-              console.warn('[VRMAvatar] Wave animation started for bone:', rightArm.name);
-            } catch (animErr) {
-              console.warn('[VRMAvatar] Wave clip failed:', (animErr as Error).message);
-            }
-          } else {
-            console.warn('[VRMAvatar] No rightUpperArm bone found — wave animation skipped');
-          }
-          // Log skeleton structure for debugging (always show when VRM loads)
-          const armBones: string[] = [];
-          const allBones: string[] = [];
-          vrmModel.scene.traverse((o) => {
-            const m = o as THREE.SkinnedMesh;
-            if (m.skeleton) {
-              m.skeleton.bones.forEach((b) => {
-                allBones.push(b.name);
-                if (/arm|hand|upper|lower|shoulder|forearm/i.test(b.name)) armBones.push(b.name);
-              });
-            }
-          });
-          console.warn('[VRMAvatar] VRM loaded. Arm bones:', armBones.length ? armBones.join(', ') : 'none');
-          if (allBones.length === 0) {
-            console.warn('[VRMAvatar] No skeleton found in scene — mesh structure may differ');
-          } else if (armBones.length === 0) {
-            console.warn('[VRMAvatar] Bone names (first 25):', allBones.slice(0, 25).join(', '));
-          }
-        } catch (e) {
-          console.warn = origWarn;
-          const msg = (e as Error)?.message ?? 'VRM load error';
-          console.warn('[VRMAvatar] خطأ تحميل VRM:', msg);
-          onError?.(msg);
+          console.log('[VRM] managers ready — Emotion ✅  Phoneme ✅  expressionMgr:', !!vrmModel.expressionManager);
+        } catch (managerErr) {
+          console.warn('[VRM] manager init failed (non-fatal — avatar still renders):', managerErr);
         }
       },
       undefined,
       (error) => {
         if (cancelled) return;
         console.warn = origWarn;
-        const msg = (error as Error)?.message || 'VRM load failed';
-        console.warn('[VRMAvatar] Furina.vrm غير موجود — استخدم SimpleAvatarPlaceholder (كرة زرقاء). أضف public/models/Furina.vrm لتفعيل الأفاتار الكامل.', msg);
+        const msg = (error as Error)?.message || 'VRM network error';
+        console.warn('[VRMAvatar] Failed to fetch VRM file:', msg, '— URL was:', vrmUrl);
         onError?.(msg);
       }
     );
@@ -645,6 +879,8 @@ function VRMModel({
     emotionRef.current = 'neutral';
     postureLeanRef.current = 0;
     visemeRef.current = { aa: 0, ih: 0, ou: 0 };
+    // V29: stop PhonemeManager lip-sync
+    phonemeManagerRef.current?.stop();
     const v = vrmRef.current;
     if (v?.expressionManager) {
       v.expressionManager.setValue(BS_AA, 0);
@@ -657,11 +893,24 @@ function VRMModel({
     }
   }, []);
 
-  const doSpeak = useCallback((text: string) => {
-    if (!text?.trim()) return;
+  const doSpeak = useCallback((rawText: string) => {
+    if (!rawText?.trim()) return;
+
+    // ── فصل أوصاف الحركات عن الحوار ────────────────────────────
+    const { dialogue: cleanDialogue, emotion: parsedEmotion, action } = parseVeronaResponse(rawText);
+    // text = الحوار النظيف فقط (بدون *حركات* ولا [EMOTION])
+    const text = cleanDialogue || rawText;
+
+    // ── نُفِّعل الحركات والمشاعر من وسم Verona أولاً ────────────────────
+    if (action) dispatchGestureFromActionText(action);
+
     const plan = inferResponsePlan(text);
-    emotionRef.current = plan.emotion;
+    // وسم Verona يتقدم على الاستنتاج المحلي
+    emotionRef.current = parsedEmotion !== 'neutral' ? parsedEmotion : plan.emotion;
     postureLeanRef.current = plan.posture.lean === 'listen' ? 0.03 : plan.posture.lean === 'emphasize' ? -0.02 : 0;
+    // V29: trigger VRMA body animation from speech emotion
+    console.log('[V29] 💬 doSpeak → emotion:', emotionRef.current, '| text:', text.slice(0, 60));
+    emotionManagerRef.current?.setEmotion(emotionRef.current);
     // Dispatch gesture based on emotion
     const emotionGestureMap: Record<string, { type: ExtendedGestureType; side: 'left' | 'right' | 'both'; duration: number; intensity: number }> = {
       celebration: { type: 'wave', side: 'both', duration: 2.5, intensity: 1 },
@@ -684,14 +933,24 @@ function VRMModel({
         };
       }
     }
-    speakWithTTS(text, {
-      onStart: () => {
-        isTalkingRef.current = true;
-        talkStartRef.current = 0;
-      },
-      onEnd: onSpeakEnd,
-    }).then((ok) => {
-      if (!ok) fallbackSpeakWebSpeech(text);
+    const ttsOnStart = () => {
+      isTalkingRef.current = true;
+      talkStartRef.current = 0;
+      // V29: start PhonemeManager procedural lip-sync if no timings
+      if (!timingsRef.current?.length) phonemeManagerRef.current?.startProcedural();
+    };
+    // نَطق الحوار النظيف فقط (text) — ليس rawText
+    speakWithTTS(text, { onStart: ttsOnStart, onEnd: onSpeakEnd }).then((ok) => {
+      if (!ok) {
+        // TTS فشل — نُفعِّل lip-sync يدوياً عبر Web Speech API
+        const started = fallbackSpeakWebSpeech(text, ttsOnStart, onSpeakEnd);
+        if (!started) {
+          // لا يوجد صوت على الإطلاق — نحرِّك الفم إجرائياً لمدة تقريبية
+          ttsOnStart();
+          const est = Math.max(2000, text.length * 60);
+          setTimeout(onSpeakEnd, est);
+        }
+      }
     });
   }, [onSpeakEnd]);
 
@@ -699,46 +958,60 @@ function VRMModel({
     onSpeakReady?.(doSpeak);
   }, [onSpeakReady, doSpeak]);
 
+  // ── V29: Debug object — accessible from browser console as window.__avatarDebug ────
   useEffect(() => {
-    const onSpeak = (e: Event) => {
-      const d = (e as CustomEvent<{ text?: string; timings?: WordTiming[]; sampleRate?: number; audio?: HTMLAudioElement } | string>).detail;
-      const text = typeof d === 'string' ? d : d?.text ?? '';
-      const timings = typeof d === 'object' ? d?.timings : undefined;
-      const audio = typeof d === 'object' ? d?.audio : undefined;
-      if (text) {
-        const plan = inferResponsePlan(text);
-        emotionRef.current = plan.emotion;
-        postureLeanRef.current = plan.posture.lean === 'listen' ? 0.03 : plan.posture.lean === 'emphasize' ? -0.02 : 0;
-      }
-      if (timings !== undefined) {
-        timingsRef.current = Array.isArray(timings) ? timings : null;
-      }
-      if (text && timings === undefined && !audio) {
-        doSpeak(text);
-      }
+    if (typeof window === 'undefined' || !vrm) return;
+    const avatarDebug = {
+      get emotionManager() { return emotionManagerRef.current; },
+      get phonemeManager() { return phonemeManagerRef.current; },
+      get vrm() { return vrmRef.current; },
+      get emotion() { return emotionRef.current; },
+      get isTalking() { return isTalkingRef.current; },
+      get mixer() { return mixerRef.current; },
+      testEmotion: (e: string) => {
+        console.log('[V29] 🧪 testEmotion:', e);
+        window.dispatchEvent(new CustomEvent('avatar:emotion', { detail: { emotion: e } }));
+      },
+      testSpeak: (t: string) => {
+        console.log('[V29] 🧪 testSpeak:', t.slice(0, 50));
+        window.dispatchEvent(new CustomEvent('avatar:speak', { detail: { text: t } }));
+      },
+      testWalk: (on = true) => {
+        console.log('[V29] 🧪 testWalk:', on);
+        window.dispatchEvent(new CustomEvent(on ? 'avatar:walk' : 'avatar:stop', { detail: { isWalking: on } }));
+      },
+      getAllBones: () => {
+        const bones: string[] = [];
+        vrmRef.current?.scene.traverse((o) => {
+          const m = o as THREE.SkinnedMesh;
+          if (m.skeleton) m.skeleton.bones.forEach((b) => bones.push(b.name));
+        });
+        return bones;
+      },
     };
-    const onSpeakStart = () => {
-      isTalkingRef.current = true;
-      talkStartRef.current = 0;
-      audioStartTimeRef.current = Date.now();
-    };
-    const onSpeakEndEvt = () => onSpeakEnd();
-
-    window.addEventListener('avatar:speak', onSpeak);
-    window.addEventListener('avatar:speak:start', onSpeakStart);
-    window.addEventListener('avatar:speak:end', onSpeakEndEvt);
-    return () => {
-      window.removeEventListener('avatar:speak', onSpeak);
-      window.removeEventListener('avatar:speak:start', onSpeakStart);
-      window.removeEventListener('avatar:speak:end', onSpeakEndEvt);
-    };
-  }, [doSpeak, onSpeakEnd]);
+    (window as unknown as Record<string, unknown>).__avatarDebug = avatarDebug;
+    console.log('[V29] 🔧 window.__avatarDebug ready. Try:\n  __avatarDebug.testEmotion("happy")\n  __avatarDebug.testEmotion("excited")\n  __avatarDebug.testSpeak("مرحباً!")\n  __avatarDebug.testWalk()\n  __avatarDebug.getAllBones()');
+  }, [vrm]);
 
   const { pointer, camera } = useThree();
   const lookAtTargetRef = useRef(new THREE.Vector3());
 
   // ── Animation frame ─────────────────────────────────────────────────────────
   useFrame((state, delta) => {
+    // V30 diagnostic: log every 5 s (300 frames @60fps) to confirm useFrame is alive
+    frameCounterRef.current += 1;
+    if (frameCounterRef.current % 300 === 1) {
+      console.log(
+        '%c[V30] 🔄 useFrame alive', 'color:orange',
+        '| frame:', frameCounterRef.current,
+        '| vrm:', !!vrmRef.current,
+        '| mixer:', !!mixerRef.current,
+        '| emotionMgr:', !!emotionManagerRef.current,
+        '| phonemeMgr:', !!phonemeManagerRef.current,
+        '| isTalking:', isTalkingRef.current,
+        '| isWalking:', activeWalkRef.current?.isWalking,
+      );
+    }
     if (mixerRef.current) mixerRef.current.update(delta);
     const currentVrm = vrmRef.current;
     if (currentVrm) {
@@ -750,6 +1023,16 @@ function VRMModel({
         lookAt.lookAt(lookAtTargetRef.current);
       }
       currentVrm.update(delta);
+
+      // V29: update PhonemeManager (lip-sync via blendshapes)
+      // EmotionManager VRMA animations driven by shared mixerRef.current above
+      phonemeManagerRef.current?.update(delta, isTalkingRef.current);
+
+      // Advance walk phase for bone animation (useArmPose reads this at priority 1)
+      const ws = activeWalkRef.current;
+      if (ws?.isWalking) {
+        ws.walkPhase = ((ws.walkPhase ?? 0) + delta * 4) % (Math.PI * 2);
+      }
 
       // ── Lip-sync (viseme) + emotion blendshapes ──────────────────────────────
       const em = currentVrm.expressionManager;
@@ -813,8 +1096,7 @@ function VRMModel({
   return vrm ? (
     <group
       ref={groupRef}
-      position={[0, AVATAR_BASE_Y, 0.2]}
-      matrixAutoUpdate={false}
+      position={[0, 0, 0]}
       onPointerDown={handlePointerDown}
       onPointerOver={(e) => {
         e.stopPropagation();
@@ -825,9 +1107,8 @@ function VRMModel({
         if (typeof document !== 'undefined') document.body.style.cursor = 'auto';
       }}
     >
-      <group rotation={[0, Math.PI, 0]}>
-        <primitive object={vrm.scene} />
-      </group>
+      {/* rotateVRM0 already handles orientation — no rotation group needed */}
+      <primitive object={vrm.scene} />
     </group>
   ) : null;
 }
@@ -898,6 +1179,8 @@ export interface BoardroomAvatarProps {
   onError?: (err: string) => void;
   useSimpleFallback?: boolean;
   walkStateRef?: React.RefObject<{ isWalking: boolean; walkPhase: number } | null>;
+  height?: string; // Added height prop
+  showChat?: boolean; // Added showChat prop
 }
 
 const VRMAvatarInner = forwardRef<VRMAvatarRef, BoardroomAvatarProps>(function VRMAvatarInner(
@@ -905,6 +1188,8 @@ const VRMAvatarInner = forwardRef<VRMAvatarRef, BoardroomAvatarProps>(function V
   ref
 ) {
   const [loadError, setLoadError] = useState<string | null>(null);
+  // إعادة تعيين حالة الخطأ عند تغيير رابط الـ VRM
+  useEffect(() => { setLoadError(null); }, [vrmUrl]);
   const speakFnRef = useRef<((text: string) => void) | null>(null);
   const humRef = useRef<Howl | null>(null);
   const humResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -979,7 +1264,7 @@ const VRMAvatarInner = forwardRef<VRMAvatarRef, BoardroomAvatarProps>(function V
 
   if (useSimpleFallback || loadError) {
     return (
-      <Float speed={1.5} rotationIntensity={0.2} floatIntensity={0.08} floatingRange={[-0.04, 0.04]}>
+      <Float speed={1.5} rotationIntensity={0} floatIntensity={0.08} floatingRange={[-0.04, 0.04]}>
         <group scale={scale}>
           <SimpleAvatarPlaceholder />
         </group>
@@ -988,7 +1273,7 @@ const VRMAvatarInner = forwardRef<VRMAvatarRef, BoardroomAvatarProps>(function V
   }
 
   return (
-    <Float speed={1.5} rotationIntensity={0.2} floatIntensity={0.08} floatingRange={[-0.04, 0.04]}>
+    <group>
       <group scale={scale}>
         <VRMModel
           vrmUrl={vrmUrl}
@@ -998,7 +1283,7 @@ const VRMAvatarInner = forwardRef<VRMAvatarRef, BoardroomAvatarProps>(function V
           walkStateRef={walkStateRef}
         />
       </group>
-    </Float>
+    </group>
   );
 });
 
