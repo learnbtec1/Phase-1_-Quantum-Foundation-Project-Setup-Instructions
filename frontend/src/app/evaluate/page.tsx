@@ -41,7 +41,22 @@ const EMOTION_TO_PERF: Record<string, string> = {
 export default function EvaluatePage() {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const avatarRef = useRef<AvatarCanvasRef | null>(null);
-  const handleAvatarReady = useCallback((ref: AvatarCanvasRef) => { avatarRef.current = ref; }, []);
+  const handleAvatarReady = useCallback((ref: AvatarCanvasRef) => {
+    avatarRef.current = ref;
+    // ── BOOT: fire AFTER VRM loads + event listeners are registered (fixes timing race) ──
+    // eslint-disable-next-line no-console
+    console.log('%c[HUMANIZE][BOOT] avatar ready → firing boot greeting', 'color:lime;font-weight:bold');
+    const greetingText = 'أهلاً وسهلاً! أنا د. حمزة، معلمك في BTEC Business. كيف أقدر أساعدك اليوم؟';
+    setMessages((prev) =>
+      prev.length === 0 ? [{ role: 'assistant', content: greetingText }] : prev,
+    );
+    const bootPlan = inferResponsePlan(greetingText);
+    bootPlan.emotion = 'friendly';
+    directAvatarPerformance(bootPlan);
+    ref.speak(greetingText);
+    selfCheckTelemetry({ intent: 'greeting', emotion: 'friendly', gesture: 'openHand', preroll: '0.2s', voice: { rate: 1.00, pitch: '+0st' }, errors: 0 });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -51,25 +66,10 @@ export default function EvaluatePage() {
   // Hybrid Persona Kernel: silence detection timer ref
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Full Human Persona Kernel: BOOT sequence
+  // Full Human Persona Kernel: BOOT log (greeting now fires in handleAvatarReady after VRM loads)
   useEffect(() => {
     // eslint-disable-next-line no-console
-    console.log('[HUMANIZE][BOOT] persona=FullHuman lang=AR autonomy=on');
-    // Boot greeting: wait 600-900ms then pipe a warm Arabic welcome through the AI director
-    const bootDelay = 600 + Math.floor(Math.random() * 300); // 600–900ms
-    const bootTimer = setTimeout(() => {
-      const greetingText = 'أهلاً وسهلاً! أنا د. حمزة، معلمك في BTEC Business. كيف أقدر أساعدك اليوم؟';
-      setMessages((prev) =>
-        prev.length === 0 ? [{ role: 'assistant', content: greetingText }] : prev,
-      );
-      const bootPlan = inferResponsePlan(greetingText);
-      bootPlan.emotion = 'friendly';
-      directAvatarPerformance(bootPlan);
-      // Emit self-check for boot sequence
-      selfCheckTelemetry({ intent: 'greeting', emotion: 'friendly', gesture: 'wave', preroll: '0.2s', voice: { rate: 1.00, pitch: '+0st' }, errors: 0 });
-    }, bootDelay);
-    return () => clearTimeout(bootTimer);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    console.log('[HUMANIZE][BOOT] persona=FullHuman lang=AR autonomy=on — waiting for avatar ready');
   }, []);
 
   // Barge-in: stop TTS when student starts speaking

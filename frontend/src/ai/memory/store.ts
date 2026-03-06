@@ -93,7 +93,10 @@ export function checkGestureCooldown(gestureType: string): boolean {
   const cooldown = GESTURE_COOLDOWNS_MS[gestureType] ?? 5_000;
   const last     = _lastGestureTime.get(gestureType) ?? 0;
   const now      = Date.now();
-  if (now - last < cooldown) return false;
+  if (now - last < cooldown) {
+    console.log(`%c[GESTURE] ${gestureType} blocked (cooldown: ${Math.round((cooldown - (now - last)) / 1000)}s remaining)`, 'color:#64748b');
+    return false;
+  }
   _lastGestureTime.set(gestureType, now);
   return true;
 }

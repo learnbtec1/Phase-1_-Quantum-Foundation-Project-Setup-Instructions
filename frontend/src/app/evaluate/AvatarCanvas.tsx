@@ -428,6 +428,7 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
 
   // ── Per-instance noise (prevents two avatars moving identically) ──────────
   const noisePhase    = useRef(Math.random() * Math.PI * 2);
+  const frameDbgRef   = useRef(0);   // [DIAG] frame counter for periodic bone-rotation logs
   const spinePhase          = useRef(Math.random() * Math.PI * 2);
   const weightShiftPhaseRef = useRef(Math.random() * Math.PI * 2);
   const hipShiftRef         = useRef(0);   // smoothed hip lateral offset (rad)
@@ -482,6 +483,16 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
           if ((o as THREE.Mesh).isMesh) { (o as THREE.Mesh).visible = true; meshCount++; }
         });
         console.log(`%c[AvatarCanvas] ✅ Loaded — ${meshCount} meshes`, 'color:lime;font-weight:bold');
+        // [DIAG] Bone availability check — NULL means getNormalizedBoneNode returns null for that bone
+        if (model.humanoid) {
+          const _boneNames = ['rightUpperArm','leftUpperArm','rightLowerArm','leftLowerArm','rightHand','leftHand','spine','chest','neck','hips'];
+          const _boneSummary = _boneNames.map((n) => {
+            const b = model.humanoid!.getNormalizedBoneNode(n as never);
+            return `${n}:${b ? '✓' : '✗'}`;
+          }).join(' | ');
+          // eslint-disable-next-line no-console
+          console.log(`%c[BONES] ${_boneSummary}`, 'color:cyan;font-weight:bold');
+        }
 
         // Greeting wave on load
         gestureRef.current = {
@@ -551,22 +562,14 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
 
   // ── Event listeners ───────────────────────────────────────────────────────
   useEffect(() => {
-    // [EVT][RIG] debug-once guard — prints normalised payload on first receipt per type
-    const _evtSeen = new Set<string>();
-    function dbgOnce(type: string, detail: unknown) {
-      if (process.env.NODE_ENV !== 'development' || _evtSeen.has(type)) return;
-      _evtSeen.add(type);
-      // eslint-disable-next-line no-console
-      console.log('[EVT][RIG]', type, { keys: Object.keys(detail as object), sample: detail });
-    }
-
     const onGesture = (e: Event) => {
       const d = (e as CustomEvent).detail as {
         type?: string; side?: string; duration?: number; intensity?: number; variance?: number;
         preroll?: number;  // Phase 3: ms to back-date the startMs for pre-roll
       };
-      // RIG contract: reads d.type (camelCase) | tokens: wave/openHand/point/beat
-      dbgOnce('avatar:gesture', d);
+      // [DIAG] persistent log — confirms event arrival for EVERY gesture dispatch
+      // eslint-disable-next-line no-console
+      console.log('%c[AVT:GESTURE] received', 'color:#fb923c;font-weight:bold', d);
       if (!d?.type) return;
       gestureRef.current = {
         type:       (d.type as ActiveGesture['type']),
@@ -579,8 +582,8 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
 
     const onEmotion    = (e: Event) => {
       const em = (e as CustomEvent<{ emotion?: string }>).detail?.emotion;
-      // RIG contract: reads detail.emotion (string)
-      dbgOnce('avatar:emotion', (e as CustomEvent).detail);
+      // eslint-disable-next-line no-console
+      console.log('%c[AVT:EMOTION] received', 'color:#34d399', em);
       if (em) emotionRef.current = em;
     };
     const onSpeakStart = () => { isTalkingRef.current = true;  talkElapsedRef.current = 0; };
@@ -626,8 +629,8 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
     };
     const onListening  = (e: Event) => {
       const active = (e as CustomEvent<{ active?: boolean }>).detail?.active ?? false;
-      // RIG contract: reads detail.active (boolean)
-      dbgOnce('avatar:listening', (e as CustomEvent).detail);
+      // eslint-disable-next-line no-console
+      console.log('%c[AVT:LISTEN]', 'color:#60a5fa', { active });
       isListeningRef.current = active;
       // When entering listening: snap look forward (attentive posture)
       if (active) {
@@ -1090,6 +1093,17 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
         applyFingerShape(humanoid, 'right', 'relax', 1);
         applyFingerShape(humanoid, 'left',  'relax', 1);
       }
+    }
+
+    // ── [DIAG] Periodic gesture + bone-rotation health check (every 2 s at 60fps) ──
+    frameDbgRef.current++;
+    if (process.env.NODE_ENV === 'development' && frameDbgRef.current % 120 === 0 && humanoid) {
+      const _ra = humanoid.getNormalizedBoneNode('rightUpperArm' as never);
+      // eslint-disable-next-line no-console
+      console.log(
+        `%c[FRAME] gesture=${gestureRef.current?.type ?? 'idle'} | rUpperArm.rx=${_ra?.rotation.x.toFixed(3) ?? 'NULL'}`,
+        'color:#475569',
+      );
     }
 
     // ── 7. VRM internal update ────────────────────────────────────────────

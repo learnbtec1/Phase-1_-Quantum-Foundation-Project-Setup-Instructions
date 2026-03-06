@@ -55,7 +55,10 @@ function safeGesture(
 ): void {
   if (!checkGestureCooldown(type)) return;
   recordGestureLog(type);
-  later(Math.max(0, delayMs - GESTURE_PREROLL_MS), () =>
+  const _fireMs = Math.max(0, delayMs - GESTURE_PREROLL_MS);
+  // eslint-disable-next-line no-console
+  console.log(`%c[DIRECTOR][EMIT] gesture=${type} side=${side} dur=${duration}s fire_in=${_fireMs}ms`, 'color:#a78bfa;font-weight:bold');
+  later(_fireMs, () =>
     dispatch('avatar:gesture', { type, side, duration, intensity, variance: Math.random() }),
   );
 }
@@ -97,6 +100,8 @@ export function directAvatarPerformance(plan: ResponsePlan): void {
   if (emotion === 'celebration') {
     // Behavior contract: Celebrating → raise both hands, bright smile, rapid blink ×3, laugh
     dispatch('avatar:laugh',   { intensity: 0.95, duration: 1600 });
+    // eslint-disable-next-line no-console
+    console.log('%c[DIRECTOR][EMIT] waveBothHands (celebration)', 'color:#a78bfa;font-weight:bold');
     gestureEngine.waveBothHands(3.0);
     dispatch('avatar:blink',   { style: 'rapid', count: 3 });
   } else if (emotion === 'excited') {
