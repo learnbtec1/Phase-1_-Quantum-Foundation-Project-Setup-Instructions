@@ -35,7 +35,7 @@ const BLINK_INTERVAL_MIN = 2.2;
 const BLINK_INTERVAL_MAX = 4.5;
 const AVATAR_BASE_Y = -0.5;
 const IDLE_SWAY_AMOUNT = 0.04; // كان 0.1 — خفّفنا التمايل الخفيف
-const BREATHE_AMPLITUDE = 0.11;
+const BREATHE_AMPLITUDE = 0; // Breathing handled by HumanizationRig chest-bone rotation — do not move whole group
 const WAVE_DURATION = 4;
 const HEAD_LERP = 0.28;
 const ARM_IDLE_SWAY = 0.08;
@@ -87,12 +87,17 @@ function useHeadTracking(
   _listeningRef?: React.RefObject<boolean>,
   opts?: { waveUntilRef?: React.RefObject<number>; postureLeanRef?: React.RefObject<number>; isTalkingRef?: React.RefObject<boolean> }
 ) {
-  useFrame((state) => {
+  const yOscLoggedRef = useRef(false);
+  useFrame(() => {
+    // First-frame diagnostic: confirm whole-body Y oscillation is absent
+    if (!yOscLoggedRef.current) {
+      console.log('[HUMANIZE][IDLE] Whole-body Y oscillation: disabled');
+      yOscLoggedRef.current = true;
+    }
     const g = groupRef.current;
     if (!g) return;
-    const t = state.clock.elapsedTime;
-    const breathe = Math.sin(t * 0.9) * BREATHE_AMPLITUDE;
-    g.position.set(0, AVATAR_BASE_Y + breathe + Math.sin(t * 0.5) * 0.07, 0.2);
+    // Feet stay planted — breathing/sway handled by HumanizationRig bone rotations.
+    g.position.set(0, AVATAR_BASE_Y, 0.2);
     g.updateMatrix();
   });
 }
