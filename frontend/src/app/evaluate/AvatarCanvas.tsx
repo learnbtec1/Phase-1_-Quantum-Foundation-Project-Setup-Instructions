@@ -27,6 +27,10 @@ import styles from './AvatarCanvas.module.css';
 import type { WordTiming } from '@/ai/lipsync/timing';
 import { timingsToVisemeAt, lerpViseme } from '@/ai/lipsync/timing';
 import type { VisemeWeights } from '@/ai/lipsync/viseme';
+import { PhonemeManager } from '@/ai/avatar/managers';
+import { gestureEngine } from '@/ai/cognitive/GestureEngine';
+import type { ScheduledGesture } from '@/ai/cognitive/GestureEngine';
+import { classifyReplyType, selectMicroExpression } from '@/ai/cognitive/CognitiveEngine';
 
 // ─── Public interface ────────────────────────────────────────────────────────
 export interface AvatarCanvasRef {
@@ -383,6 +387,16 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
   const wordTimingsRef   = useRef<WordTiming[]>([]);
   const speechAudioRef   = useRef<HTMLAudioElement | null>(null);
   const visemeRef        = useRef<VisemeWeights>({ aa: 0, ih: 0, ou: 0 });
+  const phonemeManagerRef = useRef<PhonemeManager | null>(null);
+
+  // ── Phase 3: pre-roll scheduled gestures ──────────────────────────────
+  const scheduledGesturesRef = useRef<ScheduledGesture[]>([]);
+
+  // ── Phase 5: triggered micro-expressions ─────────────────────────────
+  const microExprRef = useRef<{
+    type: string; intensity: number; startMs: number; holdMs: number; fadeMs: number;
+  } | null>(null);
+  const nextIdleMicroRef = useRef(Date.now() + 5000 + Math.random() * 5000);
 
   // ── Emotion blending ──────────────────────────────────────────────────────
   const emotionRef = useRef<string>('neutral');
@@ -477,6 +491,7 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
 
         vrmRef.current = model;
         setVrm(model);
+        phonemeManagerRef.current = new PhonemeManager(model);
         onLoad();
       },
       undefined,
@@ -574,12 +589,40 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       emotionRef.current = 'neutral';
       wordTimingsRef.current = [];
       speechAudioRef.current = null;
+      phonemeManagerRef.current?.stop();
+      scheduledGesturesRef.current = [];   // Phase 3: clear pending
     };
-    // Phase 2: capture word timings + audio element from TTS
+    // Phase 2 + 3 + 5: capture word timings + audio, schedule pre-roll gestures, auto micro-expr
     const onSpeak = (e: Event) => {
-      const d = (e as CustomEvent<{ timings?: WordTiming[]; audio?: HTMLAudioElement }>).detail;
+      const d = (e as CustomEvent<{ timings?: WordTiming[]; text?: string; audio?: HTMLAudioElement }>).detail;
       if (d?.timings?.length) wordTimingsRef.current = d.timings;
       if (d?.audio)           speechAudioRef.current = d.audio;
+      // Phase 3: build pre-roll gesture schedule from word timings
+      scheduledGesturesRef.current = gestureEngine.scheduleGesturesForText(
+        d?.text ?? '', d?.timings ?? [], emotionRef.current,
+      );
+      // Phase 2 phoneme: feed timings into PhonemeManager
+      if (d?.timings?.length) {
+        phonemeManagerRef.current?.setTimings(d.timings);
+      } else {
+        phonemeManagerRef.current?.startProcedural();
+      }
+      // Phase 5: auto-trigger micro-expression based on reply content
+      if (d?.text) {
+        const replyType = classifyReplyType(d.text);
+        const microType = replyType === 'question'    ? 'eyebrowRaise'
+                        : replyType === 'celebration' ? 'halfSmile'
+                        : replyType === 'surprised'   ? 'eyebrowRaise'
+                        : replyType === 'sad'         ? 'microFrown'
+                        : null;
+        if (microType) {
+          setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('avatar:micro', {
+              detail: { type: microType, intensity: 0.75, duration: 0.6 },
+            }));
+          }, 300);
+        }
+      }
     };
     const onListening  = (e: Event) => {
       const active = (e as CustomEvent<{ active?: boolean }>).detail?.active ?? false;
@@ -637,6 +680,21 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       if (d?.pitch != null) voiceRef.current.pitch = d.pitch;
     };
 
+    // Phase 5: triggered micro-expression
+    const onMicro = (e: Event) => {
+      const d = (e as CustomEvent<{ type?: string; intensity?: number; duration?: number }>).detail;
+      if (!d?.type) return;
+      const totalMs = (d.duration ?? 0.6) * 1000;
+      microExprRef.current = {
+        type:      d.type,
+        intensity: d.intensity ?? 0.7,
+        startMs:   Date.now(),
+        holdMs:    totalMs * 0.5,
+        fadeMs:    totalMs * 0.5,
+      };
+      console.log(`[MICRO] ${d.type} intensity=${(d.intensity ?? 0.7).toFixed(2)} duration=${(d.duration ?? 0.6)}s`);
+    };
+
     window.addEventListener('avatar:gesture',      onGesture);
     window.addEventListener('avatar:emotion',      onEmotion);
     window.addEventListener('avatar:speak',        onSpeak);
@@ -654,6 +712,7 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
     window.addEventListener('avatar:specialBlink', onForcedBlink);
     window.addEventListener('avatar:headTilt',     onHeadPose);
     // avatar:waveBoth → already handled by avatar:gesture with side='both'
+    window.addEventListener('avatar:micro',        onMicro);
 
     return () => {
       window.removeEventListener('avatar:gesture',      onGesture);
@@ -670,6 +729,7 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       window.removeEventListener('avatar:voice',        onVoice);
       window.removeEventListener('avatar:specialBlink', onForcedBlink);
       window.removeEventListener('avatar:headTilt',     onHeadPose);
+      window.removeEventListener('avatar:micro',        onMicro);
     };
   }, []);
 
@@ -799,6 +859,14 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       try { em.setValue('ih' as never, visemeRef.current.ih); } catch {}
       try { em.setValue('ou' as never, visemeRef.current.ou); } catch {}
 
+      // ── Phase 3: PhonemeManager drives Ee + Oh (complements aa/ih/ou above) ──
+      phonemeManagerRef.current?.update(delta, isTalkingRef.current);
+
+      // ── Phase 3: Flush pre-rolled scheduled gestures against audio playback time ──
+      if (speechAudioRef.current && scheduledGesturesRef.current.length > 0) {
+        gestureEngine.flushScheduled(speechAudioRef.current.currentTime, scheduledGesturesRef.current);
+      }
+
       // ── Phase 5: Micro-expressions overlay (visible, emotion-driven) ───────
       const em5 = emotionRef.current;
       // 1. Brow raise — clearly visible, boosted on surprised/thinking/celebration
@@ -822,6 +890,64 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       const smileV = smileActive ? 0.40 + 0.18 * Math.sin(t * 1.1) : 0; // ↑ more visible smile (was 0.18+0.10)
       try { em.setValue('mouthSmileLeft'  as never, smileV); } catch {}
       try { em.setValue('mouthSmileRight' as never, smileV); } catch {}
+
+      // ── Phase 5b: Triggered micro-expression overlay (event-driven, short-lived) ──
+      if (microExprRef.current) {
+        const mx      = microExprRef.current;
+        const elapsed = now - mx.startMs;
+        let weight = 0;
+        if (elapsed < mx.holdMs) {
+          weight = Math.min(1, elapsed / 100) * mx.intensity;   // ~100ms ramp-up
+        } else if (elapsed < mx.holdMs + mx.fadeMs) {
+          weight = (1 - (elapsed - mx.holdMs) / mx.fadeMs) * mx.intensity;
+        } else {
+          microExprRef.current = null;
+        }
+        if (weight > 0) {
+          switch (mx.type) {
+            case 'eyebrowRaise':
+              try { em.setValue('browInnerUp'     as never, weight); } catch {
+                try { em.setValue('browUp'         as never, weight); } catch {} }
+              try { em.setValue('browOuterUpLeft'  as never, weight * 0.6); } catch {}
+              try { em.setValue('browOuterUpRight' as never, weight * 0.6); } catch {}
+              break;
+            case 'eyeSquint':
+              try { em.setValue('cheekSquintLeft'  as never, weight); } catch {
+                try { em.setValue('squintLeft'      as never, weight); } catch {} }
+              try { em.setValue('cheekSquintRight' as never, weight); } catch {
+                try { em.setValue('squintRight'     as never, weight); } catch {} }
+              break;
+            case 'halfSmile':
+              try { em.setValue('mouthSmileLeft'  as never, weight); } catch {}
+              try { em.setValue('mouthSmileRight' as never, weight); } catch {}
+              break;
+            case 'microFrown':
+              try { em.setValue('mouthFrownLeft'  as never, weight); } catch {}
+              try { em.setValue('mouthFrownRight' as never, weight); } catch {}
+              break;
+            case 'noseWrinkle':
+              try { em.setValue('noseSneerLeft'   as never, weight); } catch {}
+              try { em.setValue('noseSneerRight'  as never, weight); } catch {}
+              break;
+            default: break;
+          }
+        }
+      }
+
+      // ── Phase 5c: Idle micro-expression (Poisson process, every 5–10 s) ──────
+      if (!isTalkingRef.current && now >= nextIdleMicroRef.current) {
+        nextIdleMicroRef.current = now + 5000 + Math.random() * 5000;
+        const idleTypes = ['eyebrowRaise', 'eyeSquint', 'halfSmile'] as const;
+        const idleType  = idleTypes[Math.floor(Math.random() * idleTypes.length)];
+        microExprRef.current = {
+          type:      idleType,
+          intensity: 0.25 + Math.random() * 0.2,
+          startMs:   now,
+          holdMs:    300,
+          fadeMs:    350,
+        };
+        console.log(`[MICRO] idle ${idleType}`);
+      }
 
       em.update();
     }

@@ -107,6 +107,22 @@ export default function EvaluatePage() {
     const text = (overrideText ?? inputText).trim();
     if (!text || isLoading) return;
 
+    // ── Dev slash commands — manual micro-expression testing ─────────────────
+    if (text.startsWith('/')) {
+      const SLASH_MAP: Record<string, { type: string; intensity: number; duration: number }> = {
+        '/raise_eyebrow': { type: 'eyebrowRaise', intensity: 0.9,  duration: 0.6 },
+        '/squint':        { type: 'eyeSquint',    intensity: 0.8,  duration: 0.5 },
+        '/half_smile':    { type: 'halfSmile',    intensity: 0.85, duration: 0.7 },
+        '/frown':         { type: 'microFrown',   intensity: 0.7,  duration: 0.5 },
+      };
+      const detail = SLASH_MAP[text.toLowerCase()];
+      if (detail && typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('avatar:micro', { detail }));
+      }
+      setInputText('');
+      return;
+    }
+
     // Clear silence timer — user is responding
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);

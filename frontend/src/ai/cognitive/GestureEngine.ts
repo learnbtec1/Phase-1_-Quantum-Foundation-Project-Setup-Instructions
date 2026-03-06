@@ -8,15 +8,34 @@
  */
 
 import { dispatchGestureFromActionText } from '@/ai/avatar/actions';
+import type { WordTiming } from '@/ai/lipsync/timing';
 
 // ─── Gesture descriptor ───────────────────────────────────────────────────────
 
 export interface GestureDescriptor {
+
   type: 'wave' | 'point' | 'openHand' | 'beat';
   side?: 'left' | 'right';
   intensity?: number;   // 0.0 – 1.5
   duration?: number;    // seconds
 }
+
+/**
+ * Phase 3: A gesture queued to fire at a specific audio playback time.
+ * `fireAtSec` is the audio `currentTime` (seconds) at which to dispatch.
+ */
+export interface ScheduledGesture {
+  id: string;
+  fireAtSec: number;
+  descriptor: GestureDescriptor;
+  fired: boolean;
+}
+
+// Patterns that identify emphasis-worthy words in Arabic/Latin text
+const EMPHASIS_PATTERNS: RegExp[] = [
+  /(?:المهم|الأساسي|ملاحظة|مثلاً|مثلا|لكن|إذن|إذاً|لأن|يعني)\s+(\S+)/gu,
+  /\b(P1|P2|P3|M1|M2|M3|D1|D2|D3|BTEC|PESTLE|SWOT|تحليل|استراتيجية)\b/giu,
+];
 
 // ─── Emotion → gesture override ───────────────────────────────────────────────
 
@@ -56,6 +75,77 @@ const GESTURE_COOLDOWN_MS: Record<string, number> = {
 export class GestureEngine {
   /** Phase 9: Motor memory — tracks last-played time per gesture type. */
   private _recentGestures = new Map<string, number>();
+
+  // ── Phase 3: Pre-roll scheduling ──────────────────────────────────────────
+
+  /**
+   * Analyse `text` against `timings` to find emphasis keywords.
+   * Returns an array of ScheduledGesture items ready to be flushed each frame.
+   * Gestures are scheduled to fire 200 ms BEFORE the keyword's audio start time.
+   */
+  scheduleGesturesForText(
+    text: string,
+    timings: WordTiming[],
+    emotion?: string,
+  ): ScheduledGesture[] {
+    const scheduled: ScheduledGesture[] = [];
+    if (!timings.length || !text) return scheduled;
+
+    const emphasisWordIndices: number[] = [];
+
+    // Strategy 1: find emphasis-marker patterns in text then locate in timings
+    for (const pattern of EMPHASIS_PATTERNS) {
+      pattern.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = pattern.exec(text)) !== null) {
+        const anchor = (m[1] ?? m[0]).slice(0, 5);
+        const idx = timings.findIndex(
+          (t, i) => !emphasisWordIndices.includes(i) && t.word.includes(anchor),
+        );
+        if (idx >= 0) emphasisWordIndices.push(idx);
+      }
+    }
+
+    // Strategy 2: fallback — 35% through the word list
+    if (emphasisWordIndices.length === 0 && timings.length >= 3) {
+      emphasisWordIndices.push(Math.floor(timings.length * 0.35));
+    }
+
+    const emotionHint = emotion ? EMOTION_GESTURE_HINTS[emotion] : undefined;
+
+    for (const idx of emphasisWordIndices.slice(0, 2)) {
+      const wt        = timings[idx];
+      const kwTimeSec = (wt as any).start_time ?? (wt as any).startTime ?? 0;
+      const fireAtSec = Math.max(0, kwTimeSec - 0.2);   // 200 ms pre-roll
+
+      const descriptor: GestureDescriptor = {
+        type:      emotionHint?.type      ?? 'beat',
+        side:      'right',
+        intensity: emotionHint?.intensity ?? 0.65,
+        duration:  emotionHint?.duration  ?? 1.2,
+      };
+
+      console.log(
+        `[PRE-ROLL] scheduled ${descriptor.type} @ ${fireAtSec.toFixed(2)}s` +
+        ` (keyword "${wt.word}" @ ${kwTimeSec.toFixed(2)}s)`,
+      );
+      scheduled.push({ id: `pr_${idx}_${Date.now()}`, fireAtSec, descriptor, fired: false });
+    }
+
+    return scheduled;
+  }
+
+  /**
+   * Call each frame. Dispatches any queued gesture whose `fireAtSec` ≤ `audioTimeSec`.
+   */
+  flushScheduled(audioTimeSec: number, queue: ScheduledGesture[]): void {
+    for (const sg of queue) {
+      if (!sg.fired && audioTimeSec >= sg.fireAtSec) {
+        sg.fired = true;
+        this._dispatch(sg.descriptor, 0);
+      }
+    }
+  }
 
   /**
    * Parse an action-line string and dispatch the best-matching gesture event.

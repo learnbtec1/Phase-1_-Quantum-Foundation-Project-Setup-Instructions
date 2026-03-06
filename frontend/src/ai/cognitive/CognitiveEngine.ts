@@ -369,3 +369,35 @@ export function selfCheckTelemetry(payload: SelfCheckPayload): void {
     console.warn('[MISSING] degradation detected', payload.errors);
   }
 }
+
+// ─── Micro-expression selection ───────────────────────────────────────────────
+export type MicroExprType = 'eyebrowRaise' | 'eyeSquint' | 'halfSmile' | 'microFrown' | 'noseWrinkle';
+
+/**
+ * Choose the most expressive micro-expression for the given intent + emotion.
+ * Returns null when no strong signal warrants one.
+ */
+export function selectMicroExpression(
+  intent: IntentType,
+  emotion: string,
+): MicroExprType | null {
+  // Intent takes precedence over emotion
+  switch (intent) {
+    case 'btec_question':
+    case 'general_question': return 'eyebrowRaise';
+    case 'confusion':        return 'eyeSquint';
+    case 'success':
+    case 'gratitude':        return 'halfSmile';
+    case 'attempt':          return 'eyeSquint';
+    default:                 break;
+  }
+  // Fallback: emotion-driven selection
+  switch (emotion) {
+    case 'thinking':     return Math.random() < 0.5 ? 'eyeSquint' : 'eyebrowRaise';
+    case 'surprised':    return 'eyebrowRaise';
+    case 'sad':          return 'microFrown';
+    case 'encouraging':
+    case 'celebration':  return 'halfSmile';
+    default:             return null;
+  }
+}

@@ -214,6 +214,14 @@ export class EmotionManager {
     window.dispatchEvent(new CustomEvent('avatar:blink', { detail: { style: 'double', count: 2 } }));
   }
 
+  /** Dispatch a short micro-expression overlay event to the avatar canvas. */
+  triggerMicroExpression(type: string, intensity = 0.7, durationSec = 0.6): void {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('avatar:micro', {
+      detail: { type, intensity, duration: durationSec },
+    }));
+  }
+
   // ── private ───────────────────────────────────────────────────────────────
 
   /** @deprecated — use setEmotion() + update(delta) for smooth blending */
