@@ -47,9 +47,11 @@ const DrHamzaOrb: React.FC<Props> = ({ label = 'د. حمزة' }) => {
   const [isListening, setIsListening] = useState(false);
   const [isHovering, setIsHovering]   = useState(false);
   const [emotion, setEmotion]         = useState<string>('normal');
+  const [microExpr, setMicroExpr]     = useState<string | null>(null);
   const [pulseScale, setPulseScale]   = useState(1);
   const pulseRaf = useRef<number | null>(null);
   const pulsePhase = useRef(0);
+  const microExprTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Live pulse animation while speaking ──────────────────────────────────
   useEffect(() => {
@@ -82,16 +84,25 @@ const DrHamzaOrb: React.FC<Props> = ({ label = 'د. حمزة' }) => {
     const onListen = (e: Event) => {
       setIsListening((e as CustomEvent<{ active?: boolean }>).detail?.active ?? false);
     };
+    const onMicro = (e: Event) => {
+      const type = (e as CustomEvent<{ type?: string }>).detail?.type ?? null;
+      if (microExprTimer.current) clearTimeout(microExprTimer.current);
+      setMicroExpr(type);
+      microExprTimer.current = setTimeout(() => setMicroExpr(null), 800);
+    };
 
     window.addEventListener('avatar:speak:start', onStart);
     window.addEventListener('avatar:speak:end',   onEnd);
     window.addEventListener('avatar:emotion',     onEmot);
     window.addEventListener('avatar:listening',   onListen);
+    window.addEventListener('avatar:micro',       onMicro);
     return () => {
       window.removeEventListener('avatar:speak:start', onStart);
       window.removeEventListener('avatar:speak:end',   onEnd);
       window.removeEventListener('avatar:emotion',     onEmot);
       window.removeEventListener('avatar:listening',   onListen);
+      window.removeEventListener('avatar:micro',       onMicro);
+      if (microExprTimer.current) clearTimeout(microExprTimer.current);
     };
   }, []);
 
@@ -137,6 +148,7 @@ const DrHamzaOrb: React.FC<Props> = ({ label = 'د. حمزة' }) => {
         data-testid="avatar-orb"
         data-speaking={isSpeaking ? 'true' : 'false'}
         data-emotion={emotion}
+        data-micro-expr={microExpr ?? ''}
         role="button"
         tabIndex={0}
         aria-label="Dr Hamza interactive avatar"

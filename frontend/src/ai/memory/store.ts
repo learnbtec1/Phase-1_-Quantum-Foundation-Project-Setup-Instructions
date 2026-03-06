@@ -39,13 +39,18 @@ let shortTerm: Turn[] = [];
 
 // ─── Motor memory — cooldown per gesture type ─────────────────────────────────
 const GESTURE_COOLDOWNS_MS: Record<string, number> = {
-  // wave: once per session (handled by _waveUsedThisSession flag)
   point:     8_000,
-  wave:     12_000,  // 12-second cooldown (was session-gated once; now repeatable)
+  wave:     12_000,
   openHand:  6_000,
   beat:      5_000,
 };
 const _lastGestureTime = new Map<string, number>();
+
+// ─── Wave-once-per-session gate ───────────────────────────────────────────────
+let _waveUsedThisSession = false;
+
+/** Reset wave gate (call on page/session re-initialisation). */
+export function resetWaveGate(): void { _waveUsedThisSession = false; }
 
 // ─── Gesture audit log — last 5 gestures played this session ─────────────────
 const _gestureLog: string[] = [];
@@ -62,8 +67,29 @@ export function getLastGestureLog(): string[] {
   return [..._gestureLog];
 }
 
-/** Returns true if the gesture is "cooled down" and may be played. Updates timestamp. */
+/**
+ * Returns true if the gesture may be played (passes all memory gates).
+ * Gates applied in order:
+ *   1. Wave: once-per-session
+ *   2. Consecutive: never repeat same type twice in a row
+ *   3. Cooldown: per-type time window
+ * Updates internal state on approval.
+ */
 export function checkGestureCooldown(gestureType: string): boolean {
+  // Gate 1 — wave is a once-per-session gesture
+  if (gestureType === 'wave') {
+    if (_waveUsedThisSession) return false;
+    _waveUsedThisSession = true;
+    _lastGestureTime.set(gestureType, Date.now());
+    console.log('[HUMANIZE][GESTURE] wave allowed (first use this session)');
+    return true;
+  }
+  // Gate 2 — consecutive repetition prevention
+  if (_gestureLog.length > 0 && _gestureLog[_gestureLog.length - 1] === gestureType) {
+    console.log(`[HUMANIZE][GESTURE] ${gestureType} blocked (consecutive repeat)`);
+    return false;
+  }
+  // Gate 3 — time-based cooldown
   const cooldown = GESTURE_COOLDOWNS_MS[gestureType] ?? 5_000;
   const last     = _lastGestureTime.get(gestureType) ?? 0;
   const now      = Date.now();

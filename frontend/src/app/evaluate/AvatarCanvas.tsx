@@ -631,8 +631,18 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       isListeningRef.current = active;
       // When entering listening: snap look forward (attentive posture)
       if (active) {
+        // ── Barge-in: stop any ongoing avatar speech immediately ─────────────
+        if (speechAudioRef.current) {
+          try {
+            speechAudioRef.current.pause();
+            speechAudioRef.current.currentTime = 0;
+          } catch { /* ignore */ }
+          speechAudioRef.current = null;
+        }
+        scheduledGesturesRef.current = [];   // cancel pending pre-roll gestures
         listeningStartRef.current = Date.now();
         lookTargetRef.current.set(0, 1.05, 3.0);
+        console.log('%c[HUMANIZE][BARGE-IN] speech stopped → listening', 'color:#fb923c;font-weight:bold');
       }
     };
 
@@ -776,12 +786,14 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
         const spineR     = Math.sin(t * 0.51 + sp) * 0.022; // ↑ visible spine roll (was 0.010)
         const listenElapsed = isListeningRef.current ? (Date.now() - listeningStartRef.current) / 1000 : 0;
         const listenLean = lerpN(0, 0.060, Math.min(1, listenElapsed * 0.6)); // ↑ lean more (was 0.025)
+        // ── Phase 6b: think-lean backward (spine tilts back when doctor is thinking) ──
+        const thinkLean  = emotionRef.current === 'thinking' ? -0.045 : 0;
         const spineBone  = humanoid.getNormalizedBoneNode('spine' as never);
-        if (spineBone) spineBone.rotation.set(spineR * 0.8 + listenLean, spineSway * 0.6, spineR, 'XYZ'); // ↑ multipliers
+        if (spineBone) spineBone.rotation.set(spineR * 0.8 + listenLean + thinkLean, spineSway * 0.6, spineR, 'XYZ');
         const chestBone  = humanoid.getNormalizedBoneNode('chest' as never);
         // Laugh chest bounce: rapid chest heave layered on top of breathing
         const laughChest = laughActive ? Math.sin(laughProg * Math.PI * 7) * laughEnv * BREATHE_AMP * 2.2 : 0;
-        if (chestBone) chestBone.rotation.set(breatheY * 1.8 + listenLean * 0.8 + laughChest, 0, -hipShiftRef.current * 1.1, 'XYZ');
+        if (chestBone) chestBone.rotation.set(breatheY * 1.8 + listenLean * 0.8 + thinkLean * 0.75 + laughChest, 0, -hipShiftRef.current * 1.1, 'XYZ');
         const hipBone = humanoid.getNormalizedBoneNode('hips' as never);
         // Laugh hip sway: slight lateral bounce during laugh
         const laughHip = laughActive ? Math.sin(laughProg * Math.PI * 6) * laughEnv * 0.08 : 0;
