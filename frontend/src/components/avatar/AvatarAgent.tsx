@@ -1,11 +1,5 @@
 'use client';
 
-/** Ref handle exposed by this canvas (kept for backward compat with evaluate/page.tsx). */
-export type AvatarCanvasRef = {
-  speak: (text: string, onEnd?: () => void) => void;
-  setEmotion?: (emotion: string) => void;
-};
-
 /**
  * AvatarAgent — full autonomous avatar agent component.
  *
@@ -23,7 +17,7 @@ import VRMAvatar from '@/components/avatar/VRMAvatar';
 import { useAvatarAgent } from '@/hooks/useAvatarAgent';
 import type { AvatarAgentOptions } from '@/hooks/useAvatarAgent';
 
-// ── ZoomController (مأخوذ من صفحة /evaluate) ───────────────────────────────
+// ── ZoomController (مطابق لصفحة /evaluate) ─────────────────────────────────
 function ZoomController() {
   const { camera, gl } = useThree();
   const zRef = useRef((camera as THREE.PerspectiveCamera).position.z);
@@ -32,7 +26,7 @@ function ZoomController() {
     const canvas = gl.domElement;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      zRef.current = Math.min(5.5, Math.max(1.2, zRef.current + e.deltaY * 0.018));
+      zRef.current = Math.min(5.5, Math.max(1.2, zRef.current + e.deltaY * 0.01));
     };
     canvas.addEventListener('wheel', onWheel, { passive: false });
     return () => canvas.removeEventListener('wheel', onWheel);
@@ -64,15 +58,21 @@ function StatusDot({ connected, processing }: { connected: boolean; processing: 
 
 // ── Main component ───────────────────────────────────────────────────────────
 
+interface AvatarAgentProps {
+  vrmUrl?: string;
+  showDebug?: boolean;
+  wsUrl?: string;
+  autoReconnect?: boolean;
+  lang?: string;
+}
+
 export default function AvatarAgent({
-  vrmUrl = '/models/teach.vrm', // تأكد من وجود الملف في المسار الصحيح
+  vrmUrl = '/models/teach.vrm', // تأكد من وجود هذا الملف في المسار الصحيح
   showDebug = false,
   wsUrl,
   autoReconnect,
   lang = 'ar-SA',
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  onReady: _onReady,  // ← accepted for backward compat with evaluate/page; not called here
-}: AvatarAgentOptions & { vrmUrl?: string; showDebug?: boolean; onReady?: (ref: AvatarCanvasRef) => void }) {
+}: AvatarAgentProps) {
   const [textInput, setTextInput] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -103,31 +103,26 @@ export default function AvatarAgent({
   return (
     <div className="relative flex flex-col w-full h-full min-h-screen bg-[#0a0a12]" dir="rtl">
       {/* ── 3D Canvas ───────────────────────────────────────────────────── */}
-      <div className="flex-1 relative">
+      <div className="flex-1 relative overflow-hidden min-h-[380px] bg-[#0c1222]">
         <Canvas
           dpr={[1, 2]}
           shadows={false}
           camera={{ position: [0, 0.0, 3.2], fov: 50, near: 0.01, far: 100 }}
           gl={{ antialias: true, alpha: false }}
           onCreated={({ gl }) => {
-            gl.setClearColor(0x0c1222, 1); // نفس لون خلفية صفحة /evaluate
+            gl.setClearColor(0x0c1222, 1);
             gl.outputColorSpace = THREE.SRGBColorSpace;
           }}
+          /* eslint-disable-next-line react/forbid-component-props */
           style={{ width: '100%', height: '100%', display: 'block' }}
         >
-          {/* إضاءة مطابقة لصفحة /evaluate */}
           <ambientLight intensity={2.5} />
           <directionalLight position={[1, 3, 2]} intensity={2.5} />
-
-          {/* إضاءة نقطية إضافية (موجودة في /evaluate) */}
-          <pointLight position={[-2, 2, 2]} intensity={0.4} color="#8ecfff" />
+          <ZoomController />
 
           <Suspense fallback={null}>
-            {/* نمرر vrmUrl مع scale=1 كما في /evaluate */}
             <VRMAvatar vrmUrl={vrmUrl} scale={1} />
           </Suspense>
-
-          <ZoomController />
         </Canvas>
 
         {/* ── Status overlay ─────────────────────────────────────────────── */}

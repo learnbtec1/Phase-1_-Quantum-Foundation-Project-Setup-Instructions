@@ -1,11 +1,5 @@
 'use client';
 
-/** Ref handle exposed by this canvas (kept for backward compat with evaluate/page.tsx). */
-export type AvatarCanvasRef = {
-  speak: (text: string, onEnd?: () => void) => void;
-  setEmotion?: (emotion: string) => void;
-};
-
 /**
  * AvatarAgent — full autonomous avatar agent component.
  *
@@ -70,9 +64,7 @@ export default function AvatarAgent({
   wsUrl,
   autoReconnect,
   lang = 'ar-SA',
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  onReady: _onReady,  // ← accepted for backward compat with evaluate/page; not called here
-}: AvatarAgentOptions & { vrmUrl?: string; showDebug?: boolean; onReady?: (ref: AvatarCanvasRef) => void }) {
+}: AvatarAgentOptions & { vrmUrl?: string; showDebug?: boolean }) {
   const [textInput, setTextInput] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 

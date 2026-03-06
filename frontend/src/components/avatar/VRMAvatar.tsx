@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRM, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { Howl } from 'howler';
-import { speakWithTTS, type WordTiming } from '@/ai/io/tts';
+import { speakWithTTS, stopTTS, type WordTiming } from '@/ai/io/tts';
 import { inferResponsePlan, parseVeronaResponse } from '@/ai/avatar/brain';
 import { dispatchGestureFromActionText } from '@/ai/avatar/actions';
 import { EMOTION_BLENDSHAPES } from '@/ai/avatar/state';
@@ -16,7 +16,7 @@ import { timingsToVisemeAt, lerpViseme } from '@/ai/lipsync/timing';
 import { EmotionManager } from '@/ai/avatar/managers/EmotionManager';
 import { PhonemeManager } from '@/ai/avatar/managers/PhonemeManager';
 const VRM_URL = '/models/teach.vrm';
-const HUM_URL = '/audio/voices/furina/hum.mp3';
+const HUM_URL = '/audio/voices/teacher/hum.mp3';
 const HUM_URL_ALT = '/audio/ambience/boardroom.mp3';
 
 const BS_AA = 'aa';
@@ -552,6 +552,7 @@ function useProceduralBlink(vrmRef: React.RefObject<VRM | null>) {
 
 export interface VRMAvatarRef {
   speak: (text: string) => void;
+  setEmotion: (emotion: string) => void;
 }
 
 function fallbackSpeakWebSpeech(
@@ -562,22 +563,60 @@ function fallbackSpeakWebSpeech(
   if (typeof window === 'undefined' || !window.speechSynthesis) return false;
   try {
     window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = 'ar-SA';
-    u.rate = 0.9;
-    u.onstart = () => {
-      onStart?.();
-      window.dispatchEvent(new CustomEvent('avatar:speak:start'));
+
+    // Auto-detect language to prevent Arabic text playing on wrong-language voice (e.g. Japanese).
+    const lang     = /[\u0600-\u06FF]/.test(text) ? 'ar-SA' : 'en-US';
+    const langBase = lang.split('-')[0];
+
+    let launched = false;
+    const doSpeak = () => {
+      if (launched) return;
+      launched = true;
+      const voices   = window.speechSynthesis.getVoices();
+      const preferred =
+        voices.find(v => v.lang === lang) ??
+        voices.find(v => v.lang.startsWith(langBase)) ??
+        null;
+
+      if (!preferred) {
+        // No Arabic voice found — never fall back to a random system voice (e.g. Japanese).
+        console.warn('[TTS:VRMfallback] No voice for', lang, '— audio skipped');
+        onEnd?.();
+        window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+        return;
+      }
+
+      console.log('[TTS:VRMfallback] ✅ voice selected:', preferred.name, preferred.lang);
+
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = lang;
+      u.rate = 0.9;
+      u.voice = preferred;
+      u.onstart = () => {
+        onStart?.();
+        window.dispatchEvent(new CustomEvent('avatar:speak:start'));
+      };
+      u.onend = () => {
+        onEnd?.();
+        window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+      };
+      u.onerror = () => {
+        onEnd?.();
+        window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+      };
+      window.speechSynthesis.speak(u);
     };
-    u.onend = () => {
-      onEnd?.();
-      window.dispatchEvent(new CustomEvent('avatar:speak:end'));
-    };
-    u.onerror = () => {
-      onEnd?.();
-      window.dispatchEvent(new CustomEvent('avatar:speak:end'));
-    };
-    window.speechSynthesis.speak(u);
+
+    if (window.speechSynthesis.getVoices().length > 0) {
+      doSpeak();
+    } else {
+      window.speechSynthesis.onvoiceschanged = () => { doSpeak(); };
+      // Only fire the timeout fallback if voices have loaded by then.
+      // Empty-voices path → preferred=null → guard miss → browser default (could be Japanese).
+      setTimeout(() => {
+        if (window.speechSynthesis.getVoices().length > 0) doSpeak();
+      }, 800);
+    }
     return true;
   } catch {
     return false;
@@ -585,6 +624,24 @@ function fallbackSpeakWebSpeech(
 }
 
 // ─── VRMModel ─────────────────────────────────────────────────────────────────
+// Brief head-pose micro-reactions when a new emotion is received.
+// dx = lookAt.x offset (positive = right), dy = lookAt.y offset (negative = up).
+const EMOTION_HEAD_REACTIONS: Readonly<Record<string, { dx?: number; dy?: number; durationMs: number }>> = {
+  proud:       { dy: -0.22, durationMs: 1400 },   // chin-up
+  curious:     { dx: -0.18, durationMs: 1600 },   // tilt left (inquisitive)
+  concerned:   { dy:  0.18, durationMs: 1300 },   // head droop
+  attentive:   { dy: -0.12, durationMs: 1100 },   // slight look-up (engaged)
+  surprised:   { dy: -0.24, durationMs:  700 },   // quick head-back
+  excited:     { dy: -0.14, durationMs:  900 },   // upward energy
+  celebration: { dy: -0.20, durationMs: 1000 },
+  celebrate:   { dy: -0.20, durationMs: 1000 },
+  happy:       { dy: -0.10, durationMs: 1000 },
+  thinking:    { dx:  0.16, durationMs: 2000 },   // tilt right while pondering
+  sad:         { dy:  0.22, durationMs: 2200 },   // head bow
+  angry:       { dy:  0.08, durationMs: 1200 },   // forward glare
+  sleepy:      { dy:  0.15, durationMs: 2500 },
+  goodbye:     { dx: -0.10, durationMs: 1000 },   // tilt left on farewell
+};
 
 function VRMModel({
   vrmUrl,
@@ -695,6 +752,14 @@ function VRMModel({
         emotionRef.current = em;
         if (em !== 'neutral') postureLeanRef.current = 0.02;
         emotionManagerRef.current?.setEmotion(em);
+        // Micro head-pose reaction: brief directional movement matching the emotion
+        const reaction = EMOTION_HEAD_REACTIONS[em];
+        if (reaction) {
+          const orig = lookAtTargetRef.current.clone();
+          if (reaction.dx) lookAtTargetRef.current.x += reaction.dx;
+          if (reaction.dy) lookAtTargetRef.current.y += reaction.dy;
+          setTimeout(() => lookAtTargetRef.current.copy(orig), reaction.durationMs);
+        }
       }
     };
     window.addEventListener('avatar:emotion', onEmotion);
@@ -982,6 +1047,16 @@ function VRMModel({
     onSpeakReady?.(doSpeak);
   }, [onSpeakReady, doSpeak]);
 
+  // ── avatar:stopSpeaking — interrupt speech from any source (e.g. when mic opens) ──
+  useEffect(() => {
+    const handleStopSpeaking = () => {
+      stopTTS();    // stops HTMLAudioElement from speakWithTTS (evaluate route etc.)
+      onSpeakEnd(); // resets lipsync, expression, emotion to neutral
+    };
+    window.addEventListener('avatar:stopSpeaking', handleStopSpeaking);
+    return () => window.removeEventListener('avatar:stopSpeaking', handleStopSpeaking);
+  }, [onSpeakEnd]);
+
   // ── V29: Debug object — accessible from browser console as window.__avatarDebug ────
   useEffect(() => {
     if (typeof window === 'undefined' || !vrm) return;
@@ -1217,11 +1292,21 @@ const VRMAvatarInner = forwardRef<VRMAvatarRef, BoardroomAvatarProps>(function V
   const speakFnRef = useRef<((text: string) => void) | null>(null);
   const humRef = useRef<Howl | null>(null);
   const humResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Refs lifted to this scope so useImperativeHandle can reach them.
+  // VRMModel's inner copies are the authoritative ones; here we relay via events.
+  const emotionRef = useRef<string>('neutral');
+  const emotionManagerRef = useRef<{ setEmotion: (e: string) => void } | null>(null);
 
   useImperativeHandle(ref, () => ({
     speak: (text: string) => {
       if (speakFnRef.current) speakFnRef.current(text);
       else fallbackSpeakWebSpeech(text);
+    },
+    setEmotion: (emotion: string) => {
+      emotionRef.current = emotion;
+      emotionManagerRef.current?.setEmotion(emotion);
+      // Also relay through the event bus so inner VRMModel receives it
+      window.dispatchEvent(new CustomEvent('avatar:emotion', { detail: { emotion } }));
     },
   }));
 

@@ -19,11 +19,10 @@
     "allowJs": true,
     "isolatedModules": true,
     "forceConsistentCasingInFileNames": true,
-    /* التعديل الجوهري هنا */
     "baseUrl": ".",
     "paths": {
       "@/*": [
-        "./src/*"
+        "src/*"
       ]
     },
     "types": [
@@ -47,6 +46,11 @@
   "exclude": [
     "node_modules",
     "src/__tests__",
-    "src/app.txt"
+    "src/app.txt",
+    "**/__tests__/**",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.spec.ts",
+    "**/*.spec.tsx"
   ]
 }
