@@ -4,9 +4,7 @@ import OpenAI from 'openai';
 
 export const runtime = 'nodejs';
 
-const OPENAI_API_KEY =
-  process.env.OPENAI_API_KEY ??
-  'REDACTED_OPENAI_KEY_2';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 type GradePayload = {
   grade: 'DISTINCTION' | 'MERIT' | 'PASS' | 'REFER (FAIL)';
