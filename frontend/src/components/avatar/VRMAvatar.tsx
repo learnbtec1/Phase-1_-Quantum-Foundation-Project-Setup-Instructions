@@ -69,7 +69,14 @@ function useChatSentTimestamp() {
 function useListeningState() {
   const listeningRef = useRef(false);
   useEffect(() => {
+    const _evtSeen_ls = new Set<string>();
     const onListening = (e: Event) => {
+      // RIG contract: reads detail.active (boolean)
+      if (process.env.NODE_ENV === 'development' && !_evtSeen_ls.has('avatar:listening')) {
+        _evtSeen_ls.add('avatar:listening');
+        // eslint-disable-next-line no-console
+        console.log('[EVT][RIG]', 'avatar:listening', { keys: Object.keys((e as CustomEvent).detail ?? {}), sample: (e as CustomEvent).detail });
+      }
       listeningRef.current = (e as CustomEvent<{ active?: boolean }>).detail?.active ?? false;
     };
     window.addEventListener('avatar:listening', onListening);
@@ -675,8 +682,14 @@ function VRMModel({
 
   // ── avatar:emotion — set emotion state directly ─────────────────────────
   useEffect(() => {
+    const _evtSeen_em = new Set<string>();
     const onEmotion = (e: Event) => {
       const em = (e as CustomEvent<{ emotion?: string }>).detail?.emotion;
+      // RIG contract: reads detail.emotion (string)
+      if (process.env.NODE_ENV === 'development' && !_evtSeen_em.has('avatar:emotion')) {
+        _evtSeen_em.add('avatar:emotion');
+        console.log('[EVT][RIG]', 'avatar:emotion', { keys: Object.keys((e as CustomEvent).detail ?? {}), sample: (e as CustomEvent).detail });
+      }
       console.log('%c[V30] 📨 avatar:emotion received', 'color:cyan', '| emotion:', em, '| EmotionManager:', emotionManagerRef.current ? '✅ ready' : '❌ NULL');
       if (em) {
         emotionRef.current = em;
@@ -720,8 +733,14 @@ function VRMModel({
 
   // ── avatar:gesture/headturn event listener ────────────────────────────────
   useEffect(() => {
+    const _evtSeen_gs = new Set<string>();
     const onGesture = (e: Event) => {
       const d = (e as CustomEvent<{ type?: string; side?: string; duration?: number; intensity?: number }>).detail;
+      // RIG contract: reads d.type (camelCase) | tokens: point/openHand/beat
+      if (process.env.NODE_ENV === 'development' && !_evtSeen_gs.has('avatar:gesture')) {
+        _evtSeen_gs.add('avatar:gesture');
+        console.log('[EVT][RIG]', 'avatar:gesture', { keys: Object.keys(d ?? {}), sample: d });
+      }
       if (!d?.type) return;
       const type = d.type as ExtendedGestureType;
       const side = (d.side ?? 'right') as 'left' | 'right' | 'both';

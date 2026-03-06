@@ -149,6 +149,11 @@ const EMOTION_WEIGHTS: Record<string, EmotionWeights> = {
   celebration:      { happy: 1.00, sad: 0,    angry: 0,    relaxed: 0,    surprised: 0.30 },
   strictEvaluation: { happy: 0,    sad: 0,    angry: 0.45, relaxed: 0.20, surprised: 0    },
   encouraging:      { happy: 0.60, sad: 0,    angry: 0,    relaxed: 0.30, surprised: 0    },
+  // Full Human Persona Kernel — new emotion blends
+  proud:            { happy: 0.75, sad: 0,    angry: 0,    relaxed: 0.30, surprised: 0    },
+  curious:          { happy: 0.20, sad: 0,    angry: 0,    relaxed: 0.20, surprised: 0.35 },
+  attentive:        { happy: 0.10, sad: 0,    angry: 0,    relaxed: 0.15, surprised: 0.15 },
+  concerned:        { happy: 0,    sad: 0.35, angry: 0,    relaxed: 0.25, surprised: 0    },
 };
 
 // ─── Math helpers ─────────────────────────────────────────────────────────────
@@ -196,38 +201,55 @@ function idlePose(t: number, noisePhase: number): ArmPose {
 
 /**
  * Natural wave — shoulder raise + wrist oscillation + elbow follow-through.
- * @param waveT   seconds elapsed since gesture started
- * @param durSec  total gesture duration in seconds
- * @param variance  0–1 per-gesture random seed (alters speed/amplitude)
+ * Supports side: 'right' | 'left' | 'both'.
+ * For 'both', left arm starts 220 ms behind right for natural stagger.
  */
-function wavePose(waveT: number, durSec: number, variance: number): ArmPose {
-  const speed = 4.6 + variance * 1.6;          // wrist osc frequency
-  const amp   = 0.85 + variance * 0.30;        // wrist sweep amplitude
+function wavePose(waveT: number, durSec: number, variance: number, side: 'left' | 'right' | 'both' = 'right'): ArmPose {
+  // Shared arm-component calculator for a given time offset
+  const computeArm = (t: number) => {
+    const speed     = 4.6 + variance * 1.6;
+    const amp       = 0.85 + variance * 0.30;
+    const armRaise  = easeInOut(Math.min(1, t / 0.5));
+    const elbowBend = easeOut(Math.min(1, Math.max(0, (t - 0.15) / 0.45)));
+    const wristEnv  = t > 0.35 ? easeInOut(Math.min(1, (t - 0.35) / 0.20)) : 0;
+    const wristWave = Math.sin((t - 0.35) * speed) * amp * wristEnv;
+    const lowerStart = Math.max(0.5, durSec - 0.60);
+    const lowerEase  = t > lowerStart ? easeInOut(Math.min(1, (t - lowerStart) / 0.60)) : 0;
+    return {
+      raise: armRaise  * (1 - lowerEase),
+      elbow: elbowBend * (1 - lowerEase),
+      wrist: wristWave * (1 - lowerEase),
+    };
+  };
 
-  // ── Phase 1: arm raise (0 → 0.5 s) ───────────────────────────────────
-  const armRaise  = easeInOut(Math.min(1, waveT / 0.5));
+  if (side === 'both') {
+    const r = computeArm(waveT);
+    const l = computeArm(Math.max(0, waveT - 0.22)); // 220 ms natural stagger
+    return {
+      rua: [-1.05 * r.raise,  0.12 * r.raise,  r.wrist * 0.18],
+      rla: [-0.65 * r.elbow,  0,               r.wrist * 0.25],
+      rh:  [ 0,               0,               r.wrist        ],
+      lua: [-1.05 * l.raise, -0.12 * l.raise, -l.wrist * 0.18],
+      lla: [-0.65 * l.elbow,  0,              -l.wrist * 0.25],
+      lh:  [ 0,               0,              -l.wrist        ],
+    };
+  }
 
-  // ── Phase 2: elbow follows with 0.15 s lag ─────────────────────────────
-  const elbowBend = easeOut(Math.min(1, Math.max(0, (waveT - 0.15) / 0.45)));
-
-  // ── Phase 3: wrist oscillation (starts at 0.35 s) ──────────────────────
-  const wristEnv  = waveT > 0.35 ? easeInOut(Math.min(1, (waveT - 0.35) / 0.20)) : 0;
-  const wristWave = Math.sin((waveT - 0.35) * speed) * amp * wristEnv;
-
-  // ── Phase 4: smooth lower in last 0.6 s ───────────────────────────────
-  const lowerStart = Math.max(0.5, durSec - 0.60);
-  const lowerEase  = waveT > lowerStart ? easeInOut(Math.min(1, (waveT - lowerStart) / 0.60)) : 0;
-  const raise      = armRaise  * (1 - lowerEase);
-  const elbow      = elbowBend * (1 - lowerEase);
-  const wristFinal = wristWave * (1 - lowerEase);
-
+  const { raise, elbow, wrist } = computeArm(waveT);
+  if (side === 'left') {
+    return {
+      rua: [0.05 * raise, 0, 0.06 * raise], rla: Z3, rh: Z3,
+      lua: [-1.05 * raise, -0.12 * raise, -wrist * 0.18],
+      lla: [-0.65 * elbow,  0,            -wrist * 0.25],
+      lh:  [ 0,             0,            -wrist        ],
+    };
+  }
+  // default: 'right'
   return {
-    rua: [-1.05 * raise,  0.12 * raise,  wristFinal * 0.18],
-    rla: [-0.65 * elbow,  0,             wristFinal * 0.25],
-    rh:  [ 0,             0,             wristFinal        ],
-    // Left arm: slight natural counterbalance
-    lua: [0.05 * raise, 0, -0.06 * raise],
-    lla: Z3, lh: Z3,
+    rua: [-1.05 * raise,  0.12 * raise,  wrist * 0.18],
+    rla: [-0.65 * elbow,  0,             wrist * 0.25],
+    rh:  [ 0,             0,             wrist        ],
+    lua: [0.05 * raise, 0, -0.06 * raise], lla: Z3, lh: Z3,
   };
 }
 
@@ -324,8 +346,9 @@ function parseVerona(raw: string): { text: string; emotion: string; action: stri
 }
 
 function inferEmotion(text: string): string {
-  if (/ممتاز|رائع|أحسنت|صحيح|تمام|عظيم/i.test(text)) return 'friendly';
-  if (/خطأ|ناقص|راجع|غير صحيح|لا يكفي/i.test(text))  return 'thinking';
+  if (/أحسنت|مبروك|إبداع|ممتاز جداً|ممتاز جدا|ممتاز!/i.test(text)) return 'celebration';
+  if (/ممتاز|رائع|صحيح|تمام|عظيم/i.test(text))                      return 'friendly';
+  if (/خطأ|ناقص|راجع|غير صحيح|لا يكفي/i.test(text))                 return 'thinking';
   return 'neutral';
 }
 
@@ -369,6 +392,9 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
 
   // ── Gesture ───────────────────────────────────────────────────────────────
   const gestureRef = useRef<ActiveGesture | null>(null);
+
+  // ── Hybrid Persona Kernel: prosody hint from avatar:voice event ──────────
+  const voiceRef = useRef<{ rate: number; pitch: string }>({ rate: 0.97, pitch: '0st' });
 
   // ── Smooth pose (actual rendered — lerps toward target) ───────────────────
   const renderedPoseRef = useRef<ArmPose>(idlePose(0, 0));
@@ -472,7 +498,12 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       if (!rawText?.trim()) return;
 
       const { text, emotion, action } = parseVerona(rawText);
-      emotionRef.current = emotion !== 'neutral' ? emotion : inferEmotion(text);
+      // Preserve director-set emotion (celebration, thinking, etc.) that was dispatched
+      // synchronously via avatar:emotion before speak() runs. Only overwrite if neutral.
+      const inferredEmotion = emotion !== 'neutral' ? emotion : inferEmotion(text);
+      if (emotionRef.current === 'neutral' || emotionRef.current === 'normal') {
+        emotionRef.current = inferredEmotion;
+      }
 
       if (action) {
         try {
@@ -493,7 +524,7 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
 
       import('@/ai/io/tts')
         .then(({ speakWithTTS }) =>
-          speakWithTTS(text, { onStart, onEnd, emotion: emotionRef.current }).then((ok) => {
+          speakWithTTS(text, { onStart, onEnd, emotion: emotionRef.current, rate: voiceRef.current.rate }).then((ok) => {
             if (!ok) fallbackSpeak(text, onStart, onEnd);
           }),
         )
@@ -505,11 +536,22 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
 
   // ── Event listeners ───────────────────────────────────────────────────────
   useEffect(() => {
+    // [EVT][RIG] debug-once guard — prints normalised payload on first receipt per type
+    const _evtSeen = new Set<string>();
+    function dbgOnce(type: string, detail: unknown) {
+      if (process.env.NODE_ENV !== 'development' || _evtSeen.has(type)) return;
+      _evtSeen.add(type);
+      // eslint-disable-next-line no-console
+      console.log('[EVT][RIG]', type, { keys: Object.keys(detail as object), sample: detail });
+    }
+
     const onGesture = (e: Event) => {
       const d = (e as CustomEvent).detail as {
         type?: string; side?: string; duration?: number; intensity?: number; variance?: number;
         preroll?: number;  // Phase 3: ms to back-date the startMs for pre-roll
       };
+      // RIG contract: reads d.type (camelCase) | tokens: wave/openHand/point/beat
+      dbgOnce('avatar:gesture', d);
       if (!d?.type) return;
       gestureRef.current = {
         type:       (d.type as ActiveGesture['type']),
@@ -522,6 +564,8 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
 
     const onEmotion    = (e: Event) => {
       const em = (e as CustomEvent<{ emotion?: string }>).detail?.emotion;
+      // RIG contract: reads detail.emotion (string)
+      dbgOnce('avatar:emotion', (e as CustomEvent).detail);
       if (em) emotionRef.current = em;
     };
     const onSpeakStart = () => { isTalkingRef.current = true;  talkElapsedRef.current = 0; };
@@ -539,6 +583,8 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
     };
     const onListening  = (e: Event) => {
       const active = (e as CustomEvent<{ active?: boolean }>).detail?.active ?? false;
+      // RIG contract: reads detail.active (boolean)
+      dbgOnce('avatar:listening', (e as CustomEvent).detail);
       isListeningRef.current = active;
       // When entering listening: snap look forward (attentive posture)
       if (active) {
@@ -553,14 +599,15 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       if (d.result === 'correct') {
         emotionRef.current = 'celebration';
         window.dispatchEvent(new CustomEvent('avatar:gesture', {
-          detail: { type: 'wave', duration: 1800, preroll: 0 },
+          // duration in SECONDS (handler multiplies by 1000); side='both' for celebration
+          detail: { type: 'wave', side: 'both', duration: 2.2, preroll: 0 },
         }));
       } else if (d.result === 'incorrect') {
         emotionRef.current = 'thinking';
       } else if (d.result === 'partial') {
         emotionRef.current = 'encouraging';
         window.dispatchEvent(new CustomEvent('avatar:gesture', {
-          detail: { type: 'openHand', duration: 1400, preroll: 0 },
+          detail: { type: 'openHand', side: 'both', duration: 1.4, preroll: 0 },
         }));
       }
     };
@@ -583,6 +630,12 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       const d = (e as CustomEvent<{ yaw?: number; pitch?: number; duration?: number }>).detail;
       headPoseRef.current = { yaw: d?.yaw ?? 0, pitch: d?.pitch ?? 0, endMs: Date.now() + (d?.duration ?? 2000) };
     };
+    // Hybrid Persona Kernel: store prosody hint for next speakWithTTS call
+    const onVoice = (e: Event) => {
+      const d = (e as CustomEvent<{ rate?: number; pitch?: string }>).detail;
+      if (d?.rate != null)  voiceRef.current.rate  = d.rate;
+      if (d?.pitch != null) voiceRef.current.pitch = d.pitch;
+    };
 
     window.addEventListener('avatar:gesture',      onGesture);
     window.addEventListener('avatar:emotion',      onEmotion);
@@ -595,6 +648,7 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
     window.addEventListener('avatar:nod',          onNod);
     window.addEventListener('avatar:laugh',        onLaugh);
     window.addEventListener('avatar:headpose',     onHeadPose);
+    window.addEventListener('avatar:voice',        onVoice);
     // Phase 10: Semantic aliases — GestureEngine dispatches these; they forward
     // to the canonical handlers already wired above.
     window.addEventListener('avatar:specialBlink', onForcedBlink);
@@ -613,6 +667,7 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       window.removeEventListener('avatar:nod',          onNod);
       window.removeEventListener('avatar:laugh',        onLaugh);
       window.removeEventListener('avatar:headpose',     onHeadPose);
+      window.removeEventListener('avatar:voice',        onVoice);
       window.removeEventListener('avatar:specialBlink', onForcedBlink);
       window.removeEventListener('avatar:headTilt',     onHeadPose);
     };
@@ -856,7 +911,7 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
         const waveT    = (now - active.startMs) / 1000;
         const progress = (now - active.startMs) / active.durationMs;
 
-        if      (active.type === 'wave')     targetPose = wavePose(waveT, active.durationMs / 1000, active.variance);
+        if      (active.type === 'wave')     targetPose = wavePose(waveT, active.durationMs / 1000, active.variance, active.side);
         else if (active.type === 'point')    targetPose = pointPose(progress, active.side, t);
         else if (active.type === 'openHand') targetPose = openHandPose(progress, active.side, t);
         else                                 targetPose = beatPose(progress, active.side, t, active.variance);
@@ -889,8 +944,9 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
         if (activeFinger.side !== 'left')  applyFingerShape(humanoid, 'right', 'open', fingerEnv);
         if (activeFinger.side !== 'right') applyFingerShape(humanoid, 'left',  'open', fingerEnv);
       } else if (activeFinger?.type === 'wave') {
-        // Open hand during wave
-        applyFingerShape(humanoid, 'right', 'open', fingerEnv);
+        // Open hand during wave — apply to whichever side(s) are active
+        if (activeFinger.side !== 'left')  applyFingerShape(humanoid, 'right', 'open', fingerEnv);
+        if (activeFinger.side !== 'right') applyFingerShape(humanoid, 'left',  'open', fingerEnv);
       } else {
         // Idle: natural relaxed curl
         applyFingerShape(humanoid, 'right', 'relax', 1);
@@ -955,7 +1011,7 @@ export default function AvatarCanvas({ vrmUrl = '/models/teach.vrm', onReady }: 
       <Canvas
         dpr={[1, 2]}
         shadows={false}
-        camera={{ position: [0, 0.3, 3.2], fov: 50, near: 0.01, far: 100 }}
+        camera={{ position: [0, 0.0, 3.2], fov: 50, near: 0.01, far: 100 }}
         gl={{ antialias: true, alpha: false }}
         onCreated={({ gl }) => {
           gl.setClearColor(0x0c1222, 1);
