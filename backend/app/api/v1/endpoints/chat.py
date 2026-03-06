@@ -99,7 +99,14 @@ def _infer_emotion(text: str) -> str:
 
 
 def _patch_format(text: str) -> str:
-    """Adds missing *action* and/or [EMOTION] without altering dialogue."""
+    """Ensures the reply has *action* and [EMOTION: tag].
+
+    When no *action* is found the model likely emitted a bare action line
+    (no asterisks).  Per the 3-part contract that line is always the last
+    non-empty line before [EMOTION:].  We extract it, wrap it in *...*,
+    and exclude it from the dialogue instead of appending a generic default
+    alongside it (which caused the bare text to leak into the chat UI).
+    """
     has_action    = bool(re.search(r'\*[^*]+\*', text))
     emotion_match = re.search(r'\[EMOTION:\s*(\w+)\]', text)
     emotion       = emotion_match.group(1).lower() if emotion_match else _infer_emotion(text)
@@ -107,7 +114,14 @@ def _patch_format(text: str) -> str:
         emotion = 'friendly'
     cleaned = re.sub(r'\s*\[EMOTION:\s*\w+\]', '', text).rstrip()
     if not has_action:
-        cleaned += f'\n*{_ACTION_DEFAULTS.get(emotion, _ACTION_DEFAULTS["neutral"])}*'
+        # The last non-empty line is the bare action line — extract & wrap it.
+        lines = [l.strip() for l in cleaned.splitlines() if l.strip()]
+        if len(lines) >= 2:
+            bare_action = lines.pop()   # remove from dialogue content
+            cleaned = '\n'.join(lines)
+        else:
+            bare_action = _ACTION_DEFAULTS.get(emotion, _ACTION_DEFAULTS['neutral'])
+        cleaned += f'\n*{bare_action}*'
     return cleaned + f'\n[EMOTION: {emotion}]'
 
 

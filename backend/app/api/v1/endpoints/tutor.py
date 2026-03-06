@@ -486,18 +486,9 @@ async def _get_dr_hamza_response(message: str, context: dict) -> str:
         "*يميل برأسه بهدوء ويبتسم*\n"
         "[EMOTION: friendly]"
       )
-    # Load system prompt from file
-    import pathlib
-    prompt_path = pathlib.Path(__file__).parent.parent.parent.parent / "prompts" / "dr_hamza_v200.txt"
-    try:
-      with open(prompt_path, "r", encoding="utf-8") as f:
-        dr_hamza_prompt = f.read()
-    except Exception as e:
-      logger.error(f"Failed to load Dr. Hamza system prompt: {e}")
-      dr_hamza_prompt = "أهلاً وسهلاً! (System prompt missing)"
     client = OpenAI(api_key=api_key)
     model = os.getenv("DR_HAMZA_MODEL", os.getenv("TUTOR_MODEL", "gpt-4o"))
-    messages = [{"role": "system", "content": dr_hamza_prompt}]
+    messages = [{"role": "system", "content": DR_HAMZA_V200_SYSTEM_PROMPT}]
     if context.get("history"):
       for h in context["history"][-6:]:
         messages.append({"role": "user",      "content": h.get("user",      "")})

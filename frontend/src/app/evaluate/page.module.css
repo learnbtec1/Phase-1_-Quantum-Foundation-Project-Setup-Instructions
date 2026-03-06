@@ -17,7 +17,8 @@
 }
 
 .avatarFrame {
-  height: 520px;
+  height: 100%;
+  min-height: 380px;
   overflow: hidden;
 }
 

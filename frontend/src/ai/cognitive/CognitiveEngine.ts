@@ -17,6 +17,10 @@ export type IntentType =
   | 'general_question'
   | 'request'
   | 'confusion'
+  | 'attempt'       // student submitting an answer/effort
+  | 'success'       // student expressing they understood / correct answer
+  | 'reflection'    // student thinking aloud / pondering / reviewing
+  | 'off_topic'     // outside BTEC business scope
   | 'gratitude'
   | 'greeting'
   | 'farewell'
@@ -56,6 +60,24 @@ export interface PedagogicalStrategy {
 // ─── Intent keyword maps ──────────────────────────────────────────────────────
 
 const INTENT_PATTERNS: Array<{ intent: IntentType; patterns: RegExp[] }> = [
+  {
+    intent: 'success',
+    patterns: [
+      /فهمت|فهمتها|استوعبت|got it|I understand|now I see|اتضح|صار واضح|وضح معي|نجحت|صح/i,
+    ],
+  },
+  {
+    intent: 'attempt',
+    patterns: [
+      /جوابي|الجواب هو|أعتقد|أظن|بظن|I think|my answer|I believe|استنتجت|يعني بشكل عام|تقريباً|هيك صح؟/i,
+    ],
+  },
+  {
+    intent: 'off_topic',
+    patterns: [
+      /\b(فيزياء|رياضيات|تاريخ|جغرافيا|physics|math|biology|science|chemistry|history|sport|رياضة|طبخ|cooking|أكل|food|حب|love|سياسة|politics)\b/i,
+    ],
+  },
   {
     intent: 'btec_question',
     patterns: [
@@ -103,14 +125,18 @@ const INTENT_PATTERNS: Array<{ intent: IntentType; patterns: RegExp[] }> = [
 // ─── Intent → Goal mapping ────────────────────────────────────────────────────
 
 const INTENT_TO_GOAL: Record<IntentType, GoalType> = {
-  btec_question: 'teach_btec',
-  general_question: 'answer_question',
-  request: 'assist_request',
-  confusion: 'calm_student',
-  gratitude: 'friendly_reply',
-  greeting: 'greet',
-  farewell: 'farewell',
-  idle: 'idle_behaviour',
+  btec_question:   'teach_btec',
+  general_question:'answer_question',
+  request:         'assist_request',
+  confusion:       'calm_student',
+  attempt:         'assist_request',
+  success:         'friendly_reply',
+  reflection:      'answer_question',
+  off_topic:       'friendly_reply',
+  gratitude:       'friendly_reply',
+  greeting:        'greet',
+  farewell:        'farewell',
+  idle:            'idle_behaviour',
 };
 
 // ─── Emotional state cues ─────────────────────────────────────────────────────
@@ -283,4 +309,63 @@ export function classifyReplyType(reply: string): ReplyType {
   if (/[؟?]|هل |لماذا |كيف |ماذا |\bwhat\b|\bwhy\b|\bhow\b|\bwhen\b/i.test(reply))
     return 'question';
   return 'neutral';
+}
+
+// ─── Prosody hints from emotion ───────────────────────────────────────────────
+export interface ProsodyHint { rate: number; pitch: string; }
+
+/**
+ * Returns TTS prosody rate and pitch hint for a given emotion tag.
+ * Maps to the Hybrid Persona Kernel emotion→prosody contract.
+ */
+export function emotionToProsody(emotion: string): ProsodyHint {
+  switch (emotion) {
+    case 'happy': case 'excited': case 'proud':       return { rate: 1.08, pitch: '+2st' };
+    case 'celebration':                               return { rate: 1.12, pitch: '+3st' };
+    case 'encouraging':                               return { rate: 0.95, pitch: '+0st' };
+    case 'curious': case 'attentive':                 return { rate: 1.00, pitch: '+1st' };
+    case 'friendly': case 'relax':                    return { rate: 1.00, pitch: '+0st' };
+    case 'thinking':                                  return { rate: 0.93, pitch: '0st'  };
+    case 'concerned': case 'sad':                     return { rate: 0.90, pitch: '-1st' };
+    case 'strictEvaluation': case 'angry':            return { rate: 0.92, pitch: '-1st' };
+    case 'surprised':                                 return { rate: 1.05, pitch: '+2st' };
+    default:                                          return { rate: 1.00, pitch: '0st'  };
+  }
+}
+
+// ─── Client-side telemetry ────────────────────────────────────────────────────
+/** Emit a [HUMANIZE] telemetry line to the browser console. */
+export function humanizeTelemetry(
+  channel: 'LISTEN' | 'EMOTION' | 'GESTURE' | 'VOICE' | 'COG' | 'PROG' | 'BOOT' | 'SELF-CHECK',
+  data: Record<string, unknown>,
+): void {
+  try {
+    // eslint-disable-next-line no-console
+    console.log(`[HUMANIZE][${channel}]`, JSON.stringify(data));
+  } catch {
+    // ignore serialization errors
+  }
+}
+
+// ─── Self-audit (Full Human Persona Kernel) ──────────────────────────────────
+export interface SelfCheckPayload {
+  intent: string;
+  emotion: string;
+  gesture: string;
+  preroll: string;
+  voice: { rate: number; pitch: string };
+  memory?: { lastGestures: string[] };
+  errors: number | string;
+}
+
+/**
+ * Emit a [SELF-CHECK] audit line every turn.
+ * If errors > 0, logs a [MISSING] warning as well.
+ */
+export function selfCheckTelemetry(payload: SelfCheckPayload): void {
+  humanizeTelemetry('SELF-CHECK', payload as unknown as Record<string, unknown>);
+  if (payload.errors) {
+    // eslint-disable-next-line no-console
+    console.warn('[MISSING] degradation detected', payload.errors);
+  }
 }

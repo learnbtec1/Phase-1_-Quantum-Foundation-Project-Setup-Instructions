@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Forensic Engine — Neural–Logic Fusion v4.0 (OpenAI Edition)
+Forensic Engine — Neural–Logic Fusion v5.0 (Dual-Provider Edition)
 -----------------------------------------------------------
-- Uses OpenAI API (gpt-4o) for criterion evaluation.
+- Supports both OpenAI (gpt-4o) and Anthropic Claude (sonnet-4-5) for criterion evaluation.
+- Automatically selects provider based on GRADER_MODEL name.
 - Level 3 integration: Algorithm is the only judge; AI extracts evidence only.
 - Full Arabic support (numbers, plurals, dual forms, verbs, context signals).
 - Advanced quantitative requirement extraction (multi-target).
@@ -24,14 +25,16 @@ from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 
+# Import both AI SDKs
+try:
+    import anthropic
+except ImportError:
+    anthropic = None  # type: ignore
+    
 try:
     from openai import OpenAI
 except ImportError:
-    raise RuntimeError("❌ openai package not installed. Run: pip install openai")
-try:
-    from openai import RateLimitError
-except ImportError:
-    RateLimitError = None  # type: ignore
+    OpenAI = None  # type: ignore
 
 # استيراد الخوارزميات المساعدة
 try:
@@ -55,28 +58,39 @@ logging.basicConfig(
 logger = logging.getLogger("forensic.v4")
 
 # ========= Configuration =========
-api_key = os.getenv("OPENAI_API_KEY")
-client = None
+MODEL = os.getenv("GRADER_MODEL", "claude-sonnet-4-5").strip() or "claude-sonnet-4-5"
+MODEL_NAME = MODEL  # Alias exported for the health-check endpoint in main.py
 
-if not api_key or (api_key.strip() == "") or api_key == "your-openai-key-here":
-    logger.warning("⚠️ OPENAI_API_KEY غير مُعيَّن أو يحتوي على قيمة افتراضية — محرك التقييم لن يعمل حتى يتم تعيين المفتاح الصحيح.")
-else:
-    client = OpenAI(api_key=api_key)
+# Initialize clients based on model name
+openai_client = None
+anthropic_client = None
 
-# Model must be a valid OpenAI model (this engine uses OpenAI API, not Anthropic).
-# If GRADER_MODEL is set to a Claude model (e.g. claude-sonnet-4-*), fall back to gpt-4o.
-_raw_model = os.getenv("GRADER_MODEL", "gpt-4o").strip()
-if _raw_model.lower().startswith("claude-"):
-    logger.warning(
-        "GRADER_MODEL=%s is an Anthropic model; this engine uses OpenAI. Falling back to gpt-4o.",
-        _raw_model,
-    )
-    MODEL = "gpt-4o"
+if MODEL.startswith("gpt-") or MODEL.startswith("o1-"):
+    # OpenAI model
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key or openai_key.strip() == "" or openai_key == "your-openai-key-here":
+        logger.warning("⚠️ OPENAI_API_KEY غير مُعيَّن — لا يمكن استخدام نماذج OpenAI.")
+    elif OpenAI is None:
+        logger.error("❌ openai package not installed. Run: pip install openai")
+    else:
+        openai_client = OpenAI(api_key=openai_key)
+        logger.info(f"✅ Initialized OpenAI client for model: {MODEL}")
+elif MODEL.startswith("claude-"):
+    # Anthropic model
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    if not anthropic_key or anthropic_key.strip() == "" or anthropic_key == "sk-ant-your-key-here":
+        logger.warning("⚠️ ANTHROPIC_API_KEY غير مُعيَّن — لا يمكن استخدام نماذج Claude.")
+    elif anthropic is None:
+        logger.error("❌ anthropic package not installed. Run: pip install anthropic")
+    else:
+        anthropic_client = anthropic.Anthropic(api_key=anthropic_key)
+        logger.info(f"✅ Initialized Anthropic client for model: {MODEL}")
 else:
-    MODEL = _raw_model or "gpt-4o"
-# Alias exported for the health-check endpoint in main.py
-MODEL_NAME = MODEL
-MAX_TOKENS = int(os.getenv("GRADER_MAX_TOKENS", "2000"))
+    logger.error(f"❌ Unknown model provider for: {MODEL}. Expected gpt-* or claude-*")
+
+# For backward compatibility
+client = anthropic_client or openai_client
+MAX_TOKENS = int(os.getenv("GRADER_MAX_TOKENS", "3000"))
 HARD_DEADLINE = int(os.getenv("GRADER_HARD_DEADLINE_SEC", "120"))
 REQUEST_TIMEOUT = int(os.getenv("GRADER_REQUEST_TIMEOUT", "60"))
 # تقليل التزامن لتجنب 429 Too Many Requests من OpenAI
@@ -92,7 +106,7 @@ _cache: Dict[str, Tuple[datetime, dict]] = {}
 
 
 def _cache_key(assignment: str, student: str, code: str) -> str:
-    h = hashlib.sha256(f"{assignment[:500]}|{student[:500]}|{code}".encode()).hexdigest()
+    h = hashlib.sha256(f"{assignment[:2000]}|{student[:2000]}|{code}".encode()).hexdigest()
     return h
 
 
@@ -187,16 +201,26 @@ def extract_criteria_codes(text: str) -> List[str]:
 
 
 def extract_criteria_descriptions(assignment_text: str, codes: List[str]) -> Dict[str, str]:
-    """Try to extract description text following each criteria code."""
+    """Extract rich description text following each criteria code from the assignment brief."""
     descriptions = {}
     for code in codes:
-        # Try to find the code followed by descriptive text
-        pattern = re.escape(code) + r'[\s:–\-]+(.{10,300}?)(?=\n|\b(?:[A-Z]{1,2}\.)?(?:P|M|D)\d+\b|$)'
+        # Try longer capture: up to 500 chars, stopping at next criterion code or double newline
+        pattern = (
+            re.escape(code)
+            + r'[\s:–\-]+(.{10,500}?)(?=\n\n|\b(?:[A-Z]{1,2}\.)?(?:P|M|D)\d+\b|$)'
+        )
         match = re.search(pattern, assignment_text, re.IGNORECASE | re.DOTALL)
         if match:
-            descriptions[code] = match.group(1).strip()
+            desc = re.sub(r'\s+', ' ', match.group(1)).strip()
+            descriptions[code] = desc
         else:
-            descriptions[code] = f"معيار {code}"
+            # Fall back: try to find table row with code
+            row_pattern = r'\|?\s*' + re.escape(code) + r'\s*\|?\s*(.{10,300}?)(?=\n|\||$)'
+            row_match = re.search(row_pattern, assignment_text, re.IGNORECASE)
+            if row_match:
+                descriptions[code] = re.sub(r'\s+', ' ', row_match.group(1)).strip()
+            else:
+                descriptions[code] = f"معيار {code} — الوصف غير موجود في نص الواجب"
     return descriptions
 
 
@@ -245,14 +269,25 @@ async def evaluate_one(
     student: str,
     adv_constraints: Dict[str, Any]
 ) -> Tuple[str, Dict]:
-    """Evaluate a single criterion using OpenAI (gpt-4o)."""
+    """Evaluate a single criterion using configured AI provider (OpenAI or Anthropic)."""
 
-    if client is None:
+    # Determine which client to use
+    active_client = None
+    provider_name = ""
+    
+    if MODEL.startswith("gpt-") or MODEL.startswith("o1-"):
+        active_client = openai_client
+        provider_name = "OpenAI"
+    elif MODEL.startswith("claude-"):
+        active_client = anthropic_client
+        provider_name = "Anthropic Claude"
+    
+    if active_client is None:
         return code, {
             "band": band_from_code(code),
             "achieved": False,
-            "reasoning": "OPENAI_API_KEY غير مُعيَّن — لا يمكن التقييم.",
-            "feedback": "OPENAI_API_KEY غير مُعيَّن — لا يمكن التقييم.",
+            "reasoning": f"مفتاح API غير مُعيَّن لـ {provider_name} أو الحزمة غير مثبتة — لا يمكن التقييم.",
+            "feedback": f"مفتاح API غير مُعيَّن لـ {provider_name} — لا يمكن التقييم.",
             "evidence": [],
             "evidence_quote": "",
             "quality": "خطأ",
@@ -266,54 +301,160 @@ async def evaluate_one(
         return code, cached
 
     band = band_from_code(code)
-    
-    prompt = f"""أنت مقيّم أكاديمي خبير في معايير BTEC. قيّم إجابة الطالب التالية وفقاً للمعيار المحدد.
 
-## المعيار: {code}
-## الوصف: {desc}
-## المستوى: {band}
+    # Map BTEC band to expected cognitive verb level
+    band_verb_map = {
+        "PASS":        "وصف (Describe) — الطالب يُبيّن ما هو الشيء بوضوح مع تفاصيل كافية ومثال من السياق.",
+        "MERIT":       "تحليل (Analyse) — الطالب يُفسّر ويربط: يشرح الأسباب، يكشف العلاقات، ويجيب على لماذا وكيف.",
+        "DISTINCTION": "تقييم (Evaluate/Justify) — الطالب يُقيّم: يزن البدائل، يُبدي حكماً نقدياً مُبرهَناً، ويصل إلى استنتاج مدعوم بأدلة.",
+    }
+    expected_depth = band_verb_map.get(band, "الإجابة يجب أن تكون واضحة ومدعومة.")
 
-## نص الواجب (Assignment Brief):
-{assignment[:8000]}
+    # Build quantitative requirements warning if present
+    quant_warning = ""
+    if adv_constraints and adv_constraints.get("by_target"):
+        quant_requirements = []
+        for target, required_count in adv_constraints["by_target"].items():
+            # Translate target names to Arabic
+            target_ar = {
+                "businesses": "شركات/مؤسسات",
+                "examples": "أمثلة",
+                "methods": "طرق/أساليب",
+                "factors": "عوامل",
+                "advantages": "مزايا/فوائد",
+                "disadvantages": "عيوب/سلبيات",
+                "features": "خصائص/سمات",
+                "impacts": "تأثيرات/آثار",
+            }.get(target, target)
+            quant_requirements.append(f"- {target_ar}: {required_count}")
+        
+        if quant_requirements:
+            quant_warning = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️⚠️⚠️ متطلبات كمية إلزامية (CRITICAL) ⚠️⚠️⚠️
+الواجب يحتوي على متطلبات عددية صريحة يجب استيفاؤها:
 
-## إجابة الطالب:
-{student[:20000]}
+{chr(10).join(quant_requirements)}
 
-## التعليمات:
-1. اقرأ إجابة الطالب بعناية وقيّم إن كانت تحقق المعيار المطلوب من حيث **المفهوم والجودة** (وليس مجرد عد الكلمات).
-2. ابحث عن أدلة مباشرة في النص تدعم تحقيق أو عدم تحقيق المعيار.
-3. قدّم تقييماً مفصلاً باللغة العربية.
+🔴 قاعدة صارمة: إذا كان المعيار {code} يتطلب عدداً محدداً من العناصر (مثل شركتين، 3 أمثلة، إلخ)،
+يجب على الطالب تقديم العدد المطلوب **بالضبط أو أكثر**. إذا كان النقص واضحاً، المعيار = NOT ACHIEVED.
 
-أعد النتيجة بتنسيق JSON التالي فقط (بدون أي نص إضافي):
+مثال: إذا طُلب "قارن بين شركتين" والطالب ذكر شركة واحدة فقط → NOT ACHIEVED مهما كانت جودة التحليل.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+
+    prompt = f"""أنت مقيّم أكاديمي متخصص في مؤهلات BTEC. مهمتك الوحيدة: إصدار حكم موضوعي ومُبرهَن على هذا المعيار الواحد.
+
+⚠️ تنبيه جوهري: قرارك يؤثر على مستقبل طالب حقيقي. كن دقيقاً وعادلاً ومبنياً حصراً على ما كتبه الطالب.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+المعيار: {code}  |  المستوى: {band}
+الوصف الكامل: {desc}
+العمق المعرفي المطلوب: {expected_depth}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{quant_warning}
+
+## تعريف المستويات وحدود كل منها:
+
+**PASS — الوصف:**
+✅ يكفي: الطالب يُبيّن ما هو المفهوم بأسلوبه الخاص مع تفاصيل كافية وأمثلة من السياق.
+❌ لا يكفي: مجرد ذكر اسم المفهوم، أو تكرار جمل السؤال، أو حشو بلا معنى.
+
+**MERIT — التحليل (يشمل PASS ويتجاوزه):**
+✅ يكفي: الطالب يُفسّر ويربط — يشرح لماذا/كيف، يربط العوامل بالأسباب والنتائج، يُظهر تفكيراً تحليلياً.
+❌ لا يكفي: وصف موسّع بدون تحليل سببي واضح، أو تعداد نقاط مفككة.
+
+**DISTINCTION — التقييم (يشمل MERIT ويتجاوزه):**
+✅ يكفي: الطالب يُقيّم — يقارن بدائل، يُبدي حكماً نقدياً، يزن إيجابيات وسلبيات، يصل إلى استنتاج مُبرَّر.
+❌ لا يكفي: تحليل بدون حكم نقدي أو مقارنة بدائل أو استنتاج مبرر.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## سياق الواجب (للفهم فقط — لا تقيّم على أساسه):
+{assignment[:15000]}
+
+## إجابة الطالب الكاملة:
+⚠️ ملاحظة هامة جداً: الإجابة قد تتضمن أقساماً متعددة أو تتحدث عن أكثر من شركة/منظمة. اقرأ الإجابة **بالكامل من البداية إلى النهاية** قبل إصدار أي حكم. لا تكتفِ بقراءة البداية فقط.
+{student[:60000]}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## اتبع هذه الخطوات بالترتيب:
+
+**خطوة 0 — التحقق من المتطلبات الكمية أولاً (إن وجدت):**
+⚠️ قبل أي شيء: إذا كان المعيار {code} يتطلب عدداً محدداً من العناصر، **عدّها أولاً** في إجابة الطالب:
+- كم شركة ذكرها؟ (إذا طُلبت شركتان)
+- كم مثالاً قدّم؟ (إذا طُلبت 3 أمثلة)
+- كم طريقة/عامل/ميزة؟ (حسب المطلوب)
+
+🔴 إذا كان العدد أقل من المطلوب → المعيار NOT ACHIEVED فوراً، بغض النظر عن جودة المحتوى.
+
+**خطوة 1 — استوعب مطلب المعيار في سياق هذا الواجب:**
+ماذا يطلب {code} تحديداً؟ ما الذي يجب أن يُثبته الطالب؟
+
+**خطوة 2 — ابحث في إجابة الطالب عن الأدلة:**
+اقرأ الإجابة كاملة. أين عالج الطالب هذا المعيار؟ قد يكون بأسلوبه الخاص أو بأمثلة مختلفة — هذا مقبول.
+
+**خطوة 3 — قيّم عمق الفهم (ليس الكلمات):**
+السؤال المحوري: هل أثبت الطالب أنه يفهم المفهوم ويستطيع تطبيقه؟
+- ✅ اقبل: الفهم مُثبَت بأسلوبه الخاص، بأمثلة بديلة، أو من زاوية مختلفة
+- ✅ اقبل: إجابة قصيرة لكن دقيقة ومركّزة
+- ❌ ارفض: حشو أو تكرار بدون فهم حقيقي
+- ❌ ارفض: عمق الإجابة أقل من الحد المطلوب لمستوى {band}
+
+**خطوة 4 — أصدر الحكم بناءً على الأدلة فقط:**
+لا افتراضات، لا تساهل غير مبرر، لا تشدد غير مبرر.
+
+أعد النتيجة بتنسيق JSON التالي فقط (بدون أي نص خارجه):
 {{
   "achieved": true أو false,
-  "reasoning": "شرح مفصل باللغة العربية لماذا تحقق أو لم يتحقق المعيار",
-  "evidence": ["اقتباس 1 من إجابة الطالب", "اقتباس 2 إن وُجد"],
-  "quality": "تقييم جودة الإجابة: ممتاز / جيد / مقبول / ضعيف",
-  "missing_requirements": ["متطلب ناقص 1", "متطلب ناقص 2"] 
+  "quantitative_check": {{
+    "required": "وصف المتطلب الكمي إن وجد (مثل: شركتان، 3 أمثلة)",
+    "found": "ما وجده الطالب (مثل: شركة واحدة، مثالان)",
+    "satisfied": true أو false
+  }},
+  "reasoning": "تحليل مفصّل: (1) نتيجة التحقق الكمي إن وجد، (2) ما الذي أثبته الطالب ✓ مع ذكر أجزاء محددة من نصه، (3) ما الذي لم يُثبته أو كان ناقصاً ✗، (4) الحكم النهائي ولماذا بالنسبة لمستوى {band}",
+  "evidence": ["اقتباس حرفي من إجابة الطالب يدعم التقييم", "اقتباس ثانٍ إن وُجد"],
+  "quality": "ممتاز / جيد / مقبول / ضعيف",
+  "missing_requirements": ["ما الذي كان يجب إضافته تحديداً لتحقيق هذا المعيار — صياغة واضحة وقابلة للعمل بها"]
 }}"""
 
     async with semaphore:
         try:
-            # تأخير بسيط لتجنب 429 (Rate Limit) من OpenAI
+            # تأخير بسيط لتجنب 429 (Rate Limit)
             if GRADER_DELAY_SEC > 0:
                 await asyncio.sleep(GRADER_DELAY_SEC)
-            # Run synchronous OpenAI call in thread pool
+            
             loop = asyncio.get_event_loop()
-            response = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: client.chat.completions.create(
-                        model=MODEL,
-                        max_tokens=MAX_TOKENS,
-                        messages=[{"role": "user", "content": prompt}],
-                        response_format={"type": "json_object"},
-                    )
-                ),
-                timeout=REQUEST_TIMEOUT
-            )
-
-            raw_text = (response.choices[0].message.content or "").strip()
+            
+            # Choose API call based on provider
+            if MODEL.startswith("claude-"):
+                # Anthropic Claude
+                response = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: active_client.messages.create(
+                            model=MODEL,
+                            max_tokens=MAX_TOKENS,
+                            messages=[{"role": "user", "content": prompt}],
+                        )
+                    ),
+                    timeout=REQUEST_TIMEOUT
+                )
+                raw_text = (response.content[0].text or "").strip()
+            else:
+                # OpenAI (gpt-4o, etc.)
+                response = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: active_client.chat.completions.create(
+                            model=MODEL,
+                            max_tokens=MAX_TOKENS,
+                            messages=[{"role": "user", "content": prompt}],
+                            response_format={"type": "json_object"},
+                        )
+                    ),
+                    timeout=REQUEST_TIMEOUT
+                )
+                raw_text = (response.choices[0].message.content or "").strip()
             
             # Extract JSON from response
             json_match = re.search(r'\{[\s\S]*\}', raw_text)
@@ -358,6 +499,7 @@ async def evaluate_one(
                 "evidence_quote": validated_evidence[0]["quote"] if validated_evidence else "",
                 "quality": result.get("quality", "غير محدد"),
                 "missing_requirements": result.get("missing_requirements", []),
+                "quantitative_check": result.get("quantitative_check", None),  # Add quantitative verification
             }
 
             # Cache the result
@@ -386,10 +528,10 @@ async def evaluate_one(
                 or "invalid" in err_msg
                 or "429" in err_msg
                 or "rate limit" in err_msg
-                or (RateLimitError is not None and isinstance(e, RateLimitError))
+                or "overloaded" in err_msg
             )
-            if "429" in err_msg or "rate limit" in err_msg or (RateLimitError is not None and isinstance(e, RateLimitError)):
-                logger.warning("تجاوز حد طلبات OpenAI (429). قلّل GRADER_MAX_CONCURRENT أو زِد GRADER_DELAY_SEC في .env")
+            if "429" in err_msg or "rate limit" in err_msg or "overloaded" in err_msg:
+                logger.warning("تجاوز حد طلبات Anthropic (429/overloaded). قلّل GRADER_MAX_CONCURRENT أو زِد GRADER_DELAY_SEC في .env")
                 reason = "تجاوز حد طلبات API. جرب لاحقاً أو قلّل عدد المعايير."
             else:
                 reason = f"خطأ فني: {str(e)}"
@@ -484,7 +626,7 @@ async def forensic_grade_stream(assignment_text: str, student_text: str) -> Asyn
             logger.error("API error during grading: %s", err_reason)
             yield json.dumps({
                 "type": "error",
-                "message": "تقييم غير متاح حالياً. يرجى التحقق من إعدادات GRADER_MODEL و OPENAI_API_KEY والمحاولة لاحقاً.",
+                "message": "تقييم غير متاح حالياً. يرجى التحقق من إعدادات GRADER_MODEL ومفتاح API المناسب (OPENAI_API_KEY أو ANTHROPIC_API_KEY) والمحاولة لاحقاً.",
                 "detail": err_reason,
             }, ensure_ascii=False) + "\n"
             return

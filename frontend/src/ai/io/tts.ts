@@ -8,6 +8,7 @@ export type { WordTiming };
 
 export interface SpeakOptions {
   emotion?:  string;   // Phase 8: maps to TTS speed for prosody
+  rate?:     number;   // Hybrid Persona Kernel: direct speed override (1.0 = normal)
   onStart?: () => void;
   onEnd?:   () => void;
 }
@@ -66,7 +67,7 @@ export async function speakWithTTS(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text,
-        speed: EMOTION_SPEED[options?.emotion ?? ''] ?? 0.97,
+        speed: options?.rate ?? EMOTION_SPEED[options?.emotion ?? ''] ?? 0.97,
       }),
     });
 

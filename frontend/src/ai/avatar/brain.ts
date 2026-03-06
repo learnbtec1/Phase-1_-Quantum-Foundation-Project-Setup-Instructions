@@ -34,7 +34,8 @@ export interface ResponsePlan {
   language: 'ar' | 'en';
   tone: 'neutral' | 'friendly' | 'encouraging' | 'strict';
   emotion: 'neutral' | 'thinking' | 'friendly' | 'encouraging' | 'strictEvaluation' | 'celebration'
-            | 'happy' | 'excited' | 'angry' | 'sad' | 'surprised' | 'blush' | 'sleepy' | 'relax' | 'goodbye';
+            | 'happy' | 'excited' | 'angry' | 'sad' | 'surprised' | 'blush' | 'sleepy' | 'relax' | 'goodbye'
+            | 'proud' | 'curious' | 'attentive' | 'concerned';
   gestures: Array<{ type: 'emphasis' | 'point' | 'openHand' | 'beat'; at: number; hand: 'L' | 'R' | 'both'; strength: number }>;
   head: { nodAtPhrases: boolean; microYaw: boolean; microPitch: boolean };
   posture: { lean: 'listen' | 'neutral' | 'emphasize' };

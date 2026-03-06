@@ -13,8 +13,10 @@ if _backend_dir not in sys.path:
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Optional
 
 from app.api.v1.endpoints.assessment import router as assessment_router
 from app.api.v1.endpoints.chat import router as chat_router
@@ -79,6 +81,50 @@ app.include_router(assessment_router)
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(stt_router, prefix="/api/v1")
 app.include_router(tts_timing_router, prefix="/api/v1")
+
+
+# ========= Models for Multi-File Grading =========
+class SolutionFile(BaseModel):
+    """ملف حل واحد"""
+    file_label: str
+    file_content: str
+    description: Optional[str] = None
+
+
+class MultiFileGradingRequest(BaseModel):
+    """طلب تقييم حل متعدد الملفات"""
+    assignment_text: str
+    solutions: List[SolutionFile]
+
+
+# ========= Multi-File Grading Endpoint =========
+@app.post("/api/v1/assessment/evaluate-multi-file")
+async def grade_multi_file(request: MultiFileGradingRequest):
+    """
+    تقييم متكامل لحل مكون من ملفات متعددة
+    
+    مثال:
+    {
+      "assignment_text": "الواجب...",
+      "solutions": [
+        {"file_label": "TalkMateAI", "file_content": "محتوى..."},
+        {"file_label": "Phase-1", "file_content": "محتوى..."}
+      ]
+    }
+    
+    النتيجة: تقييم موحد يفهم أن الملفات تشكل حل واحد
+    """
+    try:
+        from app.services.integrated_grader import evaluate_integrated
+        
+        result = await evaluate_integrated(
+            request.assignment_text,
+            [s.dict() for s in request.solutions]
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Error in multi-file grading: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/health")
 async def api_health():

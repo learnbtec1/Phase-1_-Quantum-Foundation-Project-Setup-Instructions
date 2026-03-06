@@ -137,13 +137,12 @@ export class GestureEngine {
    */
   waveBothHands(duration: number = 2.8): void {
     if (typeof window === 'undefined') return;
-    const fire = (side: string, delayMs: number) =>
-      setTimeout(() =>
-        window.dispatchEvent(new CustomEvent('avatar:gesture', {
-          detail: { type: 'wave', side, intensity: 1.1, duration, variance: Math.random() },
-        })), delayMs);
-    fire('right',   0);
-    fire('left',  220);  // stagger for realism
+    // Single side='both' event — the 220 ms left-arm stagger is baked into
+    // AvatarCanvas.tsx wavePose() so both arms stay active for the full duration.
+    // Two separate events would cause the 2nd to replace the 1st, dropping the right arm.
+    window.dispatchEvent(new CustomEvent('avatar:gesture', {
+      detail: { type: 'wave', side: 'both', intensity: 1.1, duration, variance: Math.random() },
+    }));
   }
 
   /**

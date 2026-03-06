@@ -19,6 +19,10 @@ const EMOTION_PALETTE: Record<string, { bg: string; glow: string }> = {
   friendly:         { bg: 'radial-gradient(circle, #fde68a, #f59e0b)', glow: '#fbbf24' },
   neutral:          { bg: 'radial-gradient(circle, #cbd5e1, #475569)', glow: '#94a3b8' },
   normal:           { bg: 'radial-gradient(circle, #cbd5e1, #475569)', glow: '#94a3b8' },
+  proud:            { bg: 'radial-gradient(circle, #a7f3d0, #059669)', glow: '#34d399' },
+  curious:          { bg: 'radial-gradient(circle, #fde68a, #d97706)', glow: '#fbbf24' },
+  attentive:        { bg: 'radial-gradient(circle, #bfdbfe, #1d4ed8)', glow: '#60a5fa' },
+  concerned:        { bg: 'radial-gradient(circle, #fed7aa, #c2410c)', glow: '#fb923c' },
 };
 
 const IDLE_PALETTE   = { bg: 'radial-gradient(circle, #ffaa00, #ff5500)', glow: '#ffaa00' };
@@ -31,6 +35,7 @@ const EMOTION_LABEL: Record<string, string> = {
   surprised: 'مندهش', blush: 'خجول', sleepy: 'نعسان', thinking: 'يفكر',
   relax: 'مرتاح', celebration: 'يحتفل', encouraging: 'يشجع',
   strictEvaluation: 'صارم', friendly: 'ودود', neutral: 'محايد', normal: 'جاهز',
+  proud: 'فخور', curious: 'فضولي', attentive: 'منتبه', concerned: 'قلق',
 };
 
 type Props = {
