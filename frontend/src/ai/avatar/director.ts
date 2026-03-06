@@ -16,6 +16,8 @@
  */
 
 import type { ResponsePlan } from './brain';
+import { classifyReplyType } from '@/ai/cognitive/CognitiveEngine';
+import { gestureEngine }     from '@/ai/cognitive/GestureEngine';
 
 // Rough Arabic speech rate: ~4 chars/second (conservative, includes pauses)
 function estimateSpeechMs(text: string): number {
@@ -37,8 +39,20 @@ function later(ms: number, fn: () => void): void {
  * Call once per AI reply immediately after receiving the LLM response.
  */
 export function directAvatarPerformance(plan: ResponsePlan): void {
-  const { text, emotion, gestures, head } = plan;
+  const { text, gestures, head } = plan;
+  let { emotion } = plan;
   const speechMs = estimateSpeechMs(text);
+
+  // ── Phase 10: Upgrade neutral/friendly emotion using reply-text classification ──
+  // classifyReplyType catches text cues that brain.ts may have missed (e.g. the
+  // reply says "أحسنت" but emotion wasn’t set to celebration).
+  if (emotion === 'neutral' || emotion === 'friendly' || emotion === 'relax') {
+    const replyType = classifyReplyType(text);
+    if      (replyType === 'celebration') emotion = 'celebration';
+    else if (replyType === 'sad')         emotion = 'sad';
+    else if (replyType === 'surprised')   emotion = 'surprised';
+    else if (replyType === 'question')    emotion = 'thinking';
+  }
 
   // ── 1. Instant emotion ─────────────────────────────────────────────────────
   dispatch('avatar:emotion', { emotion });
@@ -46,16 +60,15 @@ export function directAvatarPerformance(plan: ResponsePlan): void {
   // ── 2. Emotion-specific immediate reactions ────────────────────────────────
 
   if (emotion === 'surprised') {
-    // Double-blink + head jerk back then forward
+    // Phase 10: use GestureEngine.headJerks for the back-then-forward sequence
+    gestureEngine.headJerks();
     dispatch('avatar:blink',    { style: 'double', count: 2 });
-    dispatch('avatar:headpose', { yaw: 0,    pitch: -0.10, duration: 380 });
-    later(400,  () => dispatch('avatar:headpose', { yaw: 0.07, pitch: 0,    duration: 500 }));
-    later(920,  () => dispatch('avatar:headpose', { yaw: 0,    pitch: 0,    duration: 700 }));
   }
 
   if (emotion === 'celebration') {
     dispatch('avatar:laugh',   { intensity: 0.95, duration: 1600 });
-    dispatch('avatar:gesture', { type: 'wave', side: 'both',     duration: 3.0, intensity: 1.0, variance: Math.random() });
+    // Phase 10: use GestureEngine.waveBothHands for natural staggered both-hand wave
+    gestureEngine.waveBothHands(3.0);
     dispatch('avatar:blink',   { style: 'rapid', count: 3 });
   } else if (emotion === 'excited') {
     dispatch('avatar:laugh',   { intensity: 0.65, duration: 1000 });
@@ -74,15 +87,15 @@ export function directAvatarPerformance(plan: ResponsePlan): void {
   }
 
   if (emotion === 'thinking') {
-    // Lean head sideways, slow deliberate blinking
-    dispatch('avatar:headpose', { yaw: 0.13, pitch: -0.06, duration: Math.min(speechMs * 0.75, 4500) });
+    // Phase 10: use GestureEngine.headTilt for semantic clarity
+    gestureEngine.headTilt('left', 0.13, Math.min(speechMs * 0.75, 4500));
     dispatch('avatar:blink',    { style: 'slow' });
   }
 
   if (emotion === 'sad') {
-    // Head slightly drooped, slow mournful blinks
-    dispatch('avatar:headpose', { yaw: 0,    pitch: 0.12, duration: Math.min(speechMs * 0.80, 5500) });
+    // Phase 10: combined head droop + slow mournful blink
     dispatch('avatar:blink',    { style: 'slow' });
+    dispatch('avatar:headpose', { yaw: 0, pitch: 0.12, duration: Math.min(speechMs * 0.80, 5500) });
   }
 
   if (emotion === 'angry' || emotion === 'strictEvaluation') {

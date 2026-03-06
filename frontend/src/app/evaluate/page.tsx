@@ -4,9 +4,9 @@ import React, { useRef, useCallback, useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import type { AvatarCanvasRef } from './AvatarCanvas';
 import styles from './page.module.css';
-import { parseVeronaResponse } from '@/ai/avatar/brain';
-import { inferResponsePlan } from '@/ai/avatar/brain';
+import { parseVeronaResponse, inferResponsePlan } from '@/ai/avatar/brain';
 import { directAvatarPerformance } from '@/ai/avatar/director';
+import { classifyReplyType }       from '@/ai/cognitive/CognitiveEngine';
 
 const AvatarCanvas = dynamic(() => import('./AvatarCanvas'), {
   ssr: false,
@@ -120,6 +120,20 @@ export default function EvaluatePage() {
               window.dispatchEvent(new CustomEvent('avatar:headpose', {
                 detail: { yaw: data.head_pose.yaw ?? 0, pitch: data.head_pose.pitch ?? 0, duration: 2500 },
               }));
+            }
+            // Phase 10: honour replyType from structured response
+            const rt: string = data.replyType ?? classifyReplyType(cleanText);
+            if (rt === 'celebration') {
+              window.dispatchEvent(new CustomEvent('avatar:laugh',  { detail: { intensity: 0.9,  duration: 1500 } }));
+              window.dispatchEvent(new CustomEvent('avatar:blink',  { detail: { style: 'rapid', count: 3 } }));
+            } else if (rt === 'sad') {
+              window.dispatchEvent(new CustomEvent('avatar:blink',    { detail: { style: 'slow' } }));
+              window.dispatchEvent(new CustomEvent('avatar:headpose', { detail: { yaw: 0, pitch: 0.11, duration: 2200 } }));
+            } else if (rt === 'surprised') {
+              window.dispatchEvent(new CustomEvent('avatar:blink',    { detail: { style: 'double', count: 2 } }));
+            } else if (rt === 'question') {
+              window.dispatchEvent(new CustomEvent('avatar:headpose', { detail: { yaw: 0.14, pitch: -0.03, duration: 1800 } }));
+              window.dispatchEvent(new CustomEvent('avatar:blink',    { detail: { style: 'slow' } }));
             }
           }
 

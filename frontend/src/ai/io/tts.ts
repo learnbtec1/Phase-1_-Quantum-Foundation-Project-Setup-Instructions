@@ -108,6 +108,40 @@ export async function speakWithTTS(
     );
     window.dispatchEvent(new CustomEvent('avatar:speak:start'));
 
+    // ── Phase 10: Sentence-boundary head nods ──────────────────────────────
+    // When we have actual word timings, schedule a nod 120ms after each sentence-
+    // ending word — more accurate than director’s character-count estimates.
+    if (wordTimings.length > 0) {
+      const sentenceEnd = /[.!?\u061f\u060c]+$/;
+      wordTimings.forEach((wt) => {
+        if (sentenceEnd.test(wt.word ?? '') && wt.end_time > 0) {
+          setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('avatar:nod', {
+              detail: {
+                intensity: 0.16 + Math.random() * 0.18,
+                duration:  360  + Math.random() * 160,
+              },
+            }));
+          }, wt.end_time * 1000 + 120);   // end_time is seconds; add 120ms grace
+        }
+      });
+    }
+    // Fallback: character-count-based nods when word timings are absent
+    else if (text.split(/[.!?\u061f]+/).filter(s => s.trim().length > 3).length > 1) {
+      const sentences = text.split(/[.!?\u061f]+/).filter(s => s.trim().length > 3);
+      const totalMs   = Math.max(1500, text.length * 190);
+      let cumLen = 0;
+      sentences.slice(0, -1).forEach((s) => {
+        cumLen += s.length + 1;
+        const delay = Math.max(300, (cumLen / text.length) * totalMs) + 80;
+        setTimeout(() => {
+          window.dispatchEvent(new CustomEvent('avatar:nod', {
+            detail: { intensity: 0.14 + Math.random() * 0.16, duration: 340 + Math.random() * 130 },
+          }));
+        }, delay);
+      });
+    }
+
     await audio.play();
     return true;
   } catch {

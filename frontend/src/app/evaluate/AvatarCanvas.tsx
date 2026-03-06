@@ -595,6 +595,11 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
     window.addEventListener('avatar:nod',          onNod);
     window.addEventListener('avatar:laugh',        onLaugh);
     window.addEventListener('avatar:headpose',     onHeadPose);
+    // Phase 10: Semantic aliases — GestureEngine dispatches these; they forward
+    // to the canonical handlers already wired above.
+    window.addEventListener('avatar:specialBlink', onForcedBlink);
+    window.addEventListener('avatar:headTilt',     onHeadPose);
+    // avatar:waveBoth → already handled by avatar:gesture with side='both'
 
     return () => {
       window.removeEventListener('avatar:gesture',      onGesture);
@@ -608,6 +613,8 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       window.removeEventListener('avatar:nod',          onNod);
       window.removeEventListener('avatar:laugh',        onLaugh);
       window.removeEventListener('avatar:headpose',     onHeadPose);
+      window.removeEventListener('avatar:specialBlink', onForcedBlink);
+      window.removeEventListener('avatar:headTilt',     onHeadPose);
     };
   }, []);
 

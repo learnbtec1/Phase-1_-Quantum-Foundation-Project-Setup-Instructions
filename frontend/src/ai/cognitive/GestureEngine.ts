@@ -128,6 +128,52 @@ export class GestureEngine {
     this._dispatch({ type: 'openHand', side: 'right', intensity: 0.7, duration: 1.8 });
   }
 
+  // ── Phase 10: New gesture primitives ──────────────────────────────────────
+
+  /**
+   * Wave both hands — celebration / farewell.
+   * Right leads, left follows 220ms later for natural stagger.
+   * Bypasses cooldown since each hand is fired independently.
+   */
+  waveBothHands(duration: number = 2.8): void {
+    if (typeof window === 'undefined') return;
+    const fire = (side: string, delayMs: number) =>
+      setTimeout(() =>
+        window.dispatchEvent(new CustomEvent('avatar:gesture', {
+          detail: { type: 'wave', side, intensity: 1.1, duration, variance: Math.random() },
+        })), delayMs);
+    fire('right',   0);
+    fire('left',  220);  // stagger for realism
+  }
+
+  /**
+   * Tilt head sideways — thinking / question replies.
+   * Dispatches avatar:headpose with lateral yaw.
+   */
+  headTilt(side: 'left' | 'right' = 'left', intensity: number = 0.18, duration: number = 1200): void {
+    if (typeof window === 'undefined') return;
+    const yaw = side === 'left' ? intensity : -intensity;
+    window.dispatchEvent(new CustomEvent('avatar:headpose', {
+      detail: { yaw, pitch: -0.03, duration },
+    }));
+  }
+
+  /**
+   * Rapid two-stage head jerk — for surprised reactions.
+   * Snaps back then leans forward, finally returns to neutral.
+   */
+  headJerks(): void {
+    if (typeof window === 'undefined') return;
+    const pose = (yaw: number, pitch: number, dur: number, delay: number) =>
+      setTimeout(() =>
+        window.dispatchEvent(new CustomEvent('avatar:headpose', {
+          detail: { yaw, pitch, duration: dur },
+        })), delay);
+    pose(0,     -0.12,  310,   0);   // snap back
+    pose(0.05,   0.06,  460, 340);   // lean forward
+    pose(0,      0,     720, 830);   // return to neutral
+  }
+
   private _dispatch(g: GestureDescriptor, prerollMs = 0): void {
     if (typeof window === 'undefined') return;
 

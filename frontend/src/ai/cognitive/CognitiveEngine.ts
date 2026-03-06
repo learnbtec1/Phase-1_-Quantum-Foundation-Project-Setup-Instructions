@@ -262,3 +262,25 @@ export class CognitiveEngine {
 }
 
 export const cognitiveEngine = new CognitiveEngine();
+
+// ─── Reply-type classifier ────────────────────────────────────────────────────
+// Classifies the *AI reply text* (not the student message) to drive avatar
+// reactions. Distinct from analyzeIntent() which classifies student input.
+
+export type ReplyType = 'celebration' | 'question' | 'sad' | 'surprised' | 'neutral';
+
+/**
+ * Detect what kind of reply the AI gave and return an avatar reaction type.
+ * Used by director.ts to override neutral emotion when text has strong cues.
+ */
+export function classifyReplyType(reply: string): ReplyType {
+  if (/أحسنت|ممتاز|رائع|جيد جداً|جيد جدا|شاطر|bravo|excellent|perfect|great|تهانينا|مبروك|إبداع|عظيم/i.test(reply))
+    return 'celebration';
+  if (/للأسف|خطأ|سيء|خاطئ|wrong|error|fail|unfortunately|محزن/i.test(reply))
+    return 'sad';
+  if (/يا إلهي|حقاً|حقا|لا أصدق|أحقاً|أحقا|wow|oh my god|really\?|omg|مدهش|لا يُصدَّق/i.test(reply))
+    return 'surprised';
+  if (/[؟?]|هل |لماذا |كيف |ماذا |\bwhat\b|\bwhy\b|\bhow\b|\bwhen\b/i.test(reply))
+    return 'question';
+  return 'neutral';
+}

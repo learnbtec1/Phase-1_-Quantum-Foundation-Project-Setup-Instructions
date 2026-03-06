@@ -186,6 +186,34 @@ export class EmotionManager {
     this._exprTarget = EMOTION_EXPR_WEIGHTS['neutral'] ?? {};
   }
 
+  // ── Phase 10: Blink-pattern dispatchers ───────────────────────────────────
+  // These dispatch avatar:blink events handled by AvatarCanvas's forcedBlinkRef.
+
+  /** 3 rapid blinks — celebration / high-excitement reactions. */
+  rapidTripleBlink(): void {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('avatar:blink', { detail: { style: 'rapid', count: 3 } }));
+  }
+
+  /** One slow, deliberate blink — thinking / warm / friendly replies. */
+  slowSingleBlink(): void {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('avatar:blink', { detail: { style: 'slow' } }));
+  }
+
+  /** Slow blink combined with head droop — sad / apologetic feedback. */
+  slowMournfulBlink(): void {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('avatar:blink',    { detail: { style: 'slow' } }));
+    window.dispatchEvent(new CustomEvent('avatar:headpose', { detail: { yaw: 0, pitch: 0.12, duration: 2800 } }));
+  }
+
+  /** Two quick blinks in succession — surprised / double-take reaction. */
+  doubleBlink(): void {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('avatar:blink', { detail: { style: 'double', count: 2 } }));
+  }
+
   // ── private ───────────────────────────────────────────────────────────────
 
   /** @deprecated — use setEmotion() + update(delta) for smooth blending */

@@ -17,6 +17,7 @@ MUST respond with a VALID JSON object (no markdown, no code block) with EXACTLY 
 {
   "dialogue": "Arabic text to speak aloud (conversational, warm, educational)",
   "emotion": "ONE of: happy|excited|angry|sad|surprised|blush|sleepy|thinking|relax|celebration|encouraging|strictEvaluation|friendly|neutral",
+  "replyType": "ONE of: celebration|question|sad|surprised|neutral",
   "blink": "ONE of: normal|slow|double|rapid",
   "laugh": false,
   "head_nod": true,
@@ -27,6 +28,7 @@ MUST respond with a VALID JSON object (no markdown, no code block) with EXACTLY 
 Rules:
 - dialogue: Arabic only, no JSON/brackets in the text itself
 - emotion: must be one of the listed values
+- replyType: celebration if praising/congratulating; question if reply contains ? or asks something; sad if correcting errors/giving bad news; surprised for unexpected info; neutral otherwise
 - blink: slow=warm/sad/thinking; double=surprised; rapid=excited/celebration; normal=default
 - laugh: true ONLY for celebration or very excited
 - head_nod: true if affirmative/encouraging
@@ -194,6 +196,7 @@ export async function POST(req: NextRequest) {
           reply: aiReply, dialogue: aiReply, action, emotion: aiEmotion,
           intent: 'ai', reqId, source: 'openai',
           // Forward full avatar control fields for the director
+          replyType: structured.replyType ?? 'neutral',
           blink: structured.blink ?? 'normal',
           laugh: structured.laugh ?? false,
           head_nod:  structured.head_nod  ?? true,
