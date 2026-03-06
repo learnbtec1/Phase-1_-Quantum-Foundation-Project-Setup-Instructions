@@ -1,4 +1,7 @@
 node_modules
+backend/venv311/
+backend/venv/
+backend/.venv/
 .next
 .env
 .env.*
