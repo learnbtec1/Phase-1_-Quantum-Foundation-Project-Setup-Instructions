@@ -97,7 +97,7 @@ function setFingerCurl(
   const bones = FINGER_BONES[side][finger];
   for (const name of bones) {
     try {
-      const bone = humanoid.getRawBoneNode(name as never);
+      const bone = humanoid.getNormalizedBoneNode(name as never);
       if (!bone) continue;
       if (finger === 'thumb') {
         bone.rotation.set(0, curl * 0.6, curl * 0.5, 'XYZ');
@@ -310,7 +310,7 @@ function beatPose(progress: number, side: 'left'|'right'|'both', t: number, vari
 function applyArmPose(humanoid: NonNullable<VRM['humanoid']>, pose: ArmPose): void {
   const set = (name: string, r: Rot3) => {
     try {
-      const bone = humanoid.getRawBoneNode(name as never);
+      const bone = humanoid.getNormalizedBoneNode(name as never);
       if (bone) bone.rotation.set(r[0], r[1], r[2], 'XYZ');
     } catch { /* bone absent in this VRM */ }
   };
@@ -716,13 +716,13 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
         const spineR     = Math.sin(t * 0.51 + sp) * 0.022; // ↑ visible spine roll (was 0.010)
         const listenElapsed = isListeningRef.current ? (Date.now() - listeningStartRef.current) / 1000 : 0;
         const listenLean = lerpN(0, 0.060, Math.min(1, listenElapsed * 0.6)); // ↑ lean more (was 0.025)
-        const spineBone  = humanoid.getRawBoneNode('spine' as never);
+        const spineBone  = humanoid.getNormalizedBoneNode('spine' as never);
         if (spineBone) spineBone.rotation.set(spineR * 0.8 + listenLean, spineSway * 0.6, spineR, 'XYZ'); // ↑ multipliers
-        const chestBone  = humanoid.getRawBoneNode('chest' as never);
+        const chestBone  = humanoid.getNormalizedBoneNode('chest' as never);
         // Laugh chest bounce: rapid chest heave layered on top of breathing
         const laughChest = laughActive ? Math.sin(laughProg * Math.PI * 7) * laughEnv * BREATHE_AMP * 2.2 : 0;
         if (chestBone) chestBone.rotation.set(breatheY * 1.8 + listenLean * 0.8 + laughChest, 0, -hipShiftRef.current * 1.1, 'XYZ');
-        const hipBone = humanoid.getRawBoneNode('hips' as never);
+        const hipBone = humanoid.getNormalizedBoneNode('hips' as never);
         // Laugh hip sway: slight lateral bounce during laugh
         const laughHip = laughActive ? Math.sin(laughProg * Math.PI * 6) * laughEnv * 0.08 : 0;
         if (hipBone) hipBone.rotation.z = hipShiftRef.current * 2.5 + laughHip;
@@ -894,7 +894,7 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       neckX += headCurrPitchRef.current;
 
       try {
-        const neckBone = humanoid.getRawBoneNode('neck' as never);
+        const neckBone = humanoid.getNormalizedBoneNode('neck' as never);
         if (neckBone) neckBone.rotation.set(neckX, neckY, neckZ, 'XYZ');
       } catch {}
     }
