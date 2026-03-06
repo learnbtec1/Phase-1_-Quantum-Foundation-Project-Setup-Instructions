@@ -2,10 +2,86 @@
  * Chat bridge: forwards to backend POST /api/v1/chat
  * Accepts { message } and returns { reply } without exposing API keys.
  * 503=unreachable, 502=upstream error, 408=timeout.
- * Falls back to local persona responses when the backend is unreachable.
+ * Falls back to structured OpenAI call (with full avatar metadata) when backend
+ * is unreachable. If no API key, falls back to LOCAL_PERSONA static replies.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
+import OpenAI from "openai";
+
+// ── Avatar-aware system prompt for the Verona persona ————————————————
+const AVATAR_SYSTEM_PROMPT = `أنتي فيرونا (فيرونيكا) — مساعدة تعليمية ذكية بالعربية على منصة NEXUS التعليمية.
+تجيبين دائماً بالعربية الفصحى بطريقة دافئة وحيوية.
+
+MUST respond with a VALID JSON object (no markdown, no code block) with EXACTLY these fields:
+{
+  "dialogue": "Arabic text to speak aloud (conversational, warm, educational)",
+  "emotion": "ONE of: happy|excited|angry|sad|surprised|blush|sleepy|thinking|relax|celebration|encouraging|strictEvaluation|friendly|neutral",
+  "blink": "ONE of: normal|slow|double|rapid",
+  "laugh": false,
+  "head_nod": true,
+  "head_pose": {"yaw": 0.0, "pitch": 0.0},
+  "gestures": [{"at_pct": 0, "type": "wave", "hand": "right", "strength": 0.8}]
+}
+
+Rules:
+- dialogue: Arabic only, no JSON/brackets in the text itself
+- emotion: must be one of the listed values
+- blink: slow=warm/sad/thinking; double=surprised; rapid=excited/celebration; normal=default
+- laugh: true ONLY for celebration or very excited
+- head_nod: true if affirmative/encouraging
+- head_pose: yaw -0.3→0.3 (turn), pitch -0.2→0.2 (look up/down). Zero for neutral
+- gestures: 1-3 items. type: wave|point|openHand|beat. at_pct: when in speech 0-100. strength: 0-1
+`.trim();
+
+// Parse escaped-JSON safely
+function parseAvatarJSON(raw: string) {
+  try {
+    // Strip any accidental markdown code fences
+    const cleaned = raw.replace(/^```[\s\S]*?\n/, '').replace(/\n?```$/, '').trim();
+    return JSON.parse(cleaned);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Call OpenAI with the avatar-aware persona prompt.
+ * Returns structured avatar data on success, null on failure.
+ */
+async function callOpenAIStructured(
+  message: string,
+  history: Array<{ user: string; assistant: string }>,
+): Promise<Record<string, unknown> | null> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return null;
+
+  try {
+    const client = new OpenAI({ apiKey });
+    const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+      { role: 'system', content: AVATAR_SYSTEM_PROMPT },
+    ];
+    // Inject recent history (last 6 turns)
+    for (const h of history.slice(-6)) {
+      if (h.user)      messages.push({ role: 'user',      content: h.user      });
+      if (h.assistant) messages.push({ role: 'assistant', content: h.assistant });
+    }
+    messages.push({ role: 'user', content: message });
+
+    const completion = await client.chat.completions.create({
+      model:            'gpt-4o-mini',
+      messages,
+      response_format:  { type: 'json_object' },
+      max_tokens:       600,
+      temperature:      0.80,
+    });
+
+    const raw = completion.choices[0]?.message?.content ?? '';
+    return parseAvatarJSON(raw);
+  } catch {
+    return null;
+  }
+}
 
 // ── ردود محلية لشخصية فورينا ─────────────────────────────────────────────────
 const LOCAL_PERSONA: Array<{ pattern: RegExp; reply: string }> = [
@@ -99,8 +175,33 @@ export async function POST(req: NextRequest) {
       });
     } catch (err) {
       clearTimeout(timeoutId);
+      // ── Fallback cascade: structured OpenAI → local patterns → 503 ─────────────
       const local = localFallback(message);
       if (local) return NextResponse.json({ reply: local, reqId, source: 'local' }, { headers });
+
+      // Structured OpenAI call (server-side key only, not exposed to client)
+      const structured = await callOpenAIStructured(
+        message,
+        Array.isArray(payload?.history) ? payload.history : [],
+      );
+      if (structured?.dialogue) {
+        const aiReply   = String(structured.dialogue).trim();
+        const aiEmotion = String(structured.emotion  ?? 'friendly');
+        // Build a gesture action string from the first gesture for downstream compat
+        const firstGesture = Array.isArray(structured.gestures) ? structured.gestures[0] : null;
+        const action = firstGesture ? `${firstGesture.type} ${firstGesture.hand}` : '';
+        return NextResponse.json({
+          reply: aiReply, dialogue: aiReply, action, emotion: aiEmotion,
+          intent: 'ai', reqId, source: 'openai',
+          // Forward full avatar control fields for the director
+          blink: structured.blink ?? 'normal',
+          laugh: structured.laugh ?? false,
+          head_nod:  structured.head_nod  ?? true,
+          head_pose: structured.head_pose ?? { yaw: 0, pitch: 0 },
+          gestures:  structured.gestures  ?? [],
+        }, { headers });
+      }
+
       return NextResponse.json(
         { error: "Backend unreachable", reqId },
         { status: 503, headers }

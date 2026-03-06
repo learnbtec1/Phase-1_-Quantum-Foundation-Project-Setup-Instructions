@@ -5,7 +5,8 @@ import dynamic from 'next/dynamic';
 import type { AvatarCanvasRef } from './AvatarCanvas';
 import styles from './page.module.css';
 import { parseVeronaResponse } from '@/ai/avatar/brain';
-import { dispatchGestureFromActionText, dispatchEmotion } from '@/ai/avatar/actions';
+import { inferResponsePlan } from '@/ai/avatar/brain';
+import { directAvatarPerformance } from '@/ai/avatar/director';
 
 const AvatarCanvas = dynamic(() => import('./AvatarCanvas'), {
   ssr: false,
@@ -85,13 +86,44 @@ export default function EvaluatePage() {
       let detectedEmotion = 'neutral';
       const reply = (() => {
         if (res.ok && data.reply) {
-          const { dialogue, emotion, action } = parseVeronaResponse(data.reply);
-          if (action) dispatchGestureFromActionText(action);
-          if (emotion && emotion !== 'neutral') {
-            dispatchEmotion(emotion);
-            detectedEmotion = emotion;
+          // Clean dialogue (strip Verona tokens but keep Arabic text)
+          const { dialogue, emotion: veronaEmotion } = parseVeronaResponse(data.reply);
+          const cleanText = dialogue || data.reply;
+
+          // Build full response plan: prefer backend detection, then infer from text
+          const plan = inferResponsePlan(cleanText);
+          // Backend-detected emotion wins if meaningful
+          const backendEmotion = (data.emotion ?? veronaEmotion ?? '').toLowerCase();
+          const EMOTION_OVERRIDE_MAP: Record<string, typeof plan.emotion> = {
+            celebrate:        'celebration', celebrating: 'celebration',
+            friendly:         'friendly',   neutral: 'neutral',
+            thinking:         'thinking',   encouraging: 'encouraging',
+            strict:           'strictEvaluation',
+            happy:            'happy',      excited: 'excited',
+            sad:              'sad',        angry: 'angry',
+            surprised:        'surprised',  blush: 'blush',
+            sleepy:           'sleepy',     relax: 'relax',
+          };
+          if (backendEmotion && EMOTION_OVERRIDE_MAP[backendEmotion]) {
+            plan.emotion = EMOTION_OVERRIDE_MAP[backendEmotion];
           }
-          return dialogue || data.reply;
+
+          // Let the AI Director orchestrate all avatar behavior
+          directAvatarPerformance(plan);
+          detectedEmotion = plan.emotion;
+
+          // When OpenAI returned structured fields, apply them on top of director
+          if (data.source === 'openai') {
+            if (data.blink) window.dispatchEvent(new CustomEvent('avatar:blink', { detail: { style: data.blink } }));
+            if (data.laugh) window.dispatchEvent(new CustomEvent('avatar:laugh', { detail: { intensity: 0.85, duration: 1400 } }));
+            if (data.head_pose?.yaw != null || data.head_pose?.pitch != null) {
+              window.dispatchEvent(new CustomEvent('avatar:headpose', {
+                detail: { yaw: data.head_pose.yaw ?? 0, pitch: data.head_pose.pitch ?? 0, duration: 2500 },
+              }));
+            }
+          }
+
+          return cleanText;
         }
         return 'عذراً، حدث خطأ. حاول مرة أخرى.';
       })();
@@ -163,20 +195,7 @@ export default function EvaluatePage() {
         <span className="text-[10px] text-slate-500">بيئة تعلم احترافية</span>
       </div>
 
-      <div className="relative flex flex-col z-0">
-        {/* ── شاشة الأفاتار ── */}
-        <div className="flex-shrink-0 flex items-center justify-center w-full px-6 pt-16 pb-2">
-          <div
-            className={`relative w-full max-w-2xl rounded-2xl evaluate-screen-frame ${styles.avatarFrame}`}
-          >
-            <div
-              className="absolute inset-0 rounded-2xl border-2 border-slate-600/50 shadow-[0_0_60px_-10px_rgba(6,182,212,0.15),inset_0_1px_0_rgba(255,255,255,0.05)] pointer-events-none z-20"
-            />
-            {/* ✅ Canvas + VRMAvatar محمّلان ديناميكياً (عميل فقط) */}
-            <AvatarCanvas vrmUrl="/models/teach.vrm" onReady={handleAvatarReady} />
-          </div>
-        </div>
-
+      <div className="relative flex flex-col min-h-screen z-0">
         {/* ── سجل المحادثة ── */}
         <div
           ref={messagesContainerRef}
@@ -229,7 +248,7 @@ export default function EvaluatePage() {
 
         {/* ── شريط الإدخال ── */}
         <div
-          className={`flex-shrink-0 flex items-center gap-3 mx-4 mb-4 px-4 py-3 rounded-xl border border-white/10 bg-slate-800/70 backdrop-blur-md shadow-xl ${styles.inputBar}`}
+          className={`flex-shrink-0 flex items-center gap-3 mx-4 mb-2 px-4 py-3 rounded-xl border border-white/10 bg-slate-800/70 backdrop-blur-md shadow-xl ${styles.inputBar}`}
         >
           <input
             type="text"
@@ -267,6 +286,19 @@ export default function EvaluatePage() {
           >
             إرسال
           </button>
+        </div>
+
+        {/* ── شاشة الأفاتار — في أسفل الشاشة ── */}
+        <div className="flex-shrink-0 flex items-end justify-center w-full px-6 pb-4">
+          <div
+            className={`relative w-full max-w-2xl rounded-2xl evaluate-screen-frame ${styles.avatarFrame}`}
+          >
+            <div
+              className="absolute inset-0 rounded-2xl border-2 border-slate-600/50 shadow-[0_0_60px_-10px_rgba(6,182,212,0.15),inset_0_1px_0_rgba(255,255,255,0.05)] pointer-events-none z-20"
+            />
+            {/* ✅ Canvas + VRMAvatar محمّلان ديناميكياً (عميل فقط) */}
+            <AvatarCanvas vrmUrl="/models/teach.vrm" onReady={handleAvatarReady} />
+          </div>
         </div>
       </div>
     </div>

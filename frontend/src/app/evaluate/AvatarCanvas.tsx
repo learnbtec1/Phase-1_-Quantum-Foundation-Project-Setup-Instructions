@@ -373,6 +373,19 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
   // ── Smooth pose (actual rendered — lerps toward target) ───────────────────
   const renderedPoseRef = useRef<ArmPose>(idlePose(0, 0));
 
+  // ── AI Director refs ───────────────────────────────────────────────────────
+  /** Forced blink: style overrides natural blink speed/count */
+  const forcedBlinkRef   = useRef<{ style: string; remaining: number } | null>(null);
+  /** AI nod: rapid head nod with arc envelope */
+  const nodRef           = useRef<{ startMs: number; durationMs: number; intensity: number } | null>(null);
+  /** AI laugh: whole-body laugh bouncing chest + head */
+  const laughRef         = useRef<{ startMs: number; durationMs: number; intensity: number } | null>(null);
+  /** AI headpose: desired yaw/pitch held until endMs */
+  const headPoseRef      = useRef<{ yaw: number; pitch: number; endMs: number } | null>(null);
+  /** Smoothed current head yaw/pitch (lerped toward headPoseRef target) */
+  const headCurrYawRef   = useRef(0);
+  const headCurrPitchRef = useRef(0);
+
   // ── Per-instance noise (prevents two avatars moving identically) ──────────
   const noisePhase    = useRef(Math.random() * Math.PI * 2);
   const spinePhase          = useRef(Math.random() * Math.PI * 2);
@@ -552,6 +565,25 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       }
     };
 
+    // ── AI Director — new event types ────────────────────────────────────────
+    const onForcedBlink = (e: Event) => {
+      const d = (e as CustomEvent<{ style?: string; count?: number }>).detail;
+      forcedBlinkRef.current = { style: d?.style ?? 'normal', remaining: d?.count ?? 1 };
+      blinkPhaseRef.current  = 0.001; // kick blink immediately
+    };
+    const onNod = (e: Event) => {
+      const d = (e as CustomEvent<{ intensity?: number; duration?: number }>).detail;
+      nodRef.current = { startMs: Date.now(), durationMs: d?.duration ?? 550, intensity: d?.intensity ?? 0.32 };
+    };
+    const onLaugh = (e: Event) => {
+      const d = (e as CustomEvent<{ intensity?: number; duration?: number }>).detail;
+      laughRef.current = { startMs: Date.now(), durationMs: d?.duration ?? 1200, intensity: d?.intensity ?? 0.70 };
+    };
+    const onHeadPose = (e: Event) => {
+      const d = (e as CustomEvent<{ yaw?: number; pitch?: number; duration?: number }>).detail;
+      headPoseRef.current = { yaw: d?.yaw ?? 0, pitch: d?.pitch ?? 0, endMs: Date.now() + (d?.duration ?? 2000) };
+    };
+
     window.addEventListener('avatar:gesture',      onGesture);
     window.addEventListener('avatar:emotion',      onEmotion);
     window.addEventListener('avatar:speak',        onSpeak);
@@ -559,6 +591,10 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
     window.addEventListener('avatar:speak:end',    onSpeakEnd);
     window.addEventListener('avatar:listening',    onListening);
     window.addEventListener('student:performance', onStudentPerformance);
+    window.addEventListener('avatar:blink',        onForcedBlink);
+    window.addEventListener('avatar:nod',          onNod);
+    window.addEventListener('avatar:laugh',        onLaugh);
+    window.addEventListener('avatar:headpose',     onHeadPose);
 
     return () => {
       window.removeEventListener('avatar:gesture',      onGesture);
@@ -568,6 +604,10 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       window.removeEventListener('avatar:speak:end',    onSpeakEnd);
       window.removeEventListener('avatar:listening',    onListening);
       window.removeEventListener('student:performance', onStudentPerformance);
+      window.removeEventListener('avatar:blink',        onForcedBlink);
+      window.removeEventListener('avatar:nod',          onNod);
+      window.removeEventListener('avatar:laugh',        onLaugh);
+      window.removeEventListener('avatar:headpose',     onHeadPose);
     };
   }, []);
 
@@ -583,6 +623,14 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
     const now = Date.now();
     const np  = noisePhase.current;
     const sp  = spinePhase.current;
+
+    // ── Pre-calc: laugh envelope (shared between chest + neck sections) ───────
+    const laughActive = laughRef.current !== null;
+    const laughProg   = laughActive
+      ? Math.min(1, (now - laughRef.current!.startMs) / laughRef.current!.durationMs) : 0;
+    const laughEnv    = laughActive ? Math.sin(laughProg * Math.PI) * laughRef.current!.intensity : 0;
+    // clear laugh when done
+    if (laughActive && laughProg >= 1) laughRef.current = null;
 
     // ── 1. Breathing + subtle torso drift ────────────────────────────────
     const breatheY  = Math.sin(t * 0.82) * BREATHE_AMP;
@@ -609,9 +657,13 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
         const spineBone  = humanoid.getRawBoneNode('spine' as never);
         if (spineBone) spineBone.rotation.set(spineR * 0.8 + listenLean, spineSway * 0.6, spineR, 'XYZ'); // ↑ multipliers
         const chestBone  = humanoid.getRawBoneNode('chest' as never);
-        if (chestBone) chestBone.rotation.set(breatheY * 1.8 + listenLean * 0.8, 0, -hipShiftRef.current * 1.1, 'XYZ'); // ↑ breathing + shoulder (was 1.1, 0.55)
+        // Laugh chest bounce: rapid chest heave layered on top of breathing
+        const laughChest = laughActive ? Math.sin(laughProg * Math.PI * 7) * laughEnv * BREATHE_AMP * 2.2 : 0;
+        if (chestBone) chestBone.rotation.set(breatheY * 1.8 + listenLean * 0.8 + laughChest, 0, -hipShiftRef.current * 1.1, 'XYZ');
         const hipBone = humanoid.getRawBoneNode('hips' as never);
-        if (hipBone) hipBone.rotation.z = hipShiftRef.current * 2.5; // ↑ hip tilt (was 1.2)
+        // Laugh hip sway: slight lateral bounce during laugh
+        const laughHip = laughActive ? Math.sin(laughProg * Math.PI * 6) * laughEnv * 0.08 : 0;
+        if (hipBone) hipBone.rotation.z = hipShiftRef.current * 2.5 + laughHip;
       } catch { /* bone absent */ }
     }
 
@@ -619,9 +671,14 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
     if (em) {
       const bd = Math.min(1, delta * EMOTION_BLEND_SPEED);
 
-      // Blink
+      // Blink — speed varies by AI directive style
+      const blinkSpeed = forcedBlinkRef.current
+        ? forcedBlinkRef.current.style === 'slow'  ? 4.0   //  ~0.78 s close+open (drowsy)
+        : forcedBlinkRef.current.style === 'rapid' ? 28    //  ~0.11 s (surprised/excited)
+        : 13                                               //  normal / double
+        : 11;                                             //  organic idle
       if (blinkPhaseRef.current > 0) {
-        blinkPhaseRef.current += delta * 11;
+        blinkPhaseRef.current += delta * blinkSpeed;
         const bv = blinkPhaseRef.current < Math.PI ? Math.sin(blinkPhaseRef.current) : 0;
         const bc = Math.min(1, bv);
         try { em.setValue('blink' as never, bc); } catch {
@@ -632,7 +689,14 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
           try { em.setValue('blink' as never, 0); } catch {
             try { em.setValue('blinkLeft' as never, 0); em.setValue('blinkRight' as never, 0); } catch {}
           }
-          nextBlinkRef.current = now + (BLINK_MIN + Math.random() * (BLINK_MAX - BLINK_MIN)) * 1000;
+          // Double/rapid: fire next blink after short gap if remaining > 1
+          if (forcedBlinkRef.current && forcedBlinkRef.current.remaining > 1) {
+            forcedBlinkRef.current.remaining--;
+            setTimeout(() => { blinkPhaseRef.current = 0.001; }, 90);
+          } else {
+            forcedBlinkRef.current = null; // done with forced sequence
+            nextBlinkRef.current = now + (BLINK_MIN + Math.random() * (BLINK_MAX - BLINK_MIN)) * 1000;
+          }
         }
       } else if (now >= nextBlinkRef.current) {
         blinkPhaseRef.current = 0.001;
@@ -714,25 +778,63 @@ function VRMScene({ vrmUrl, speakRef, onLoad }: VRMSceneProps) {
       vrmLookAt.lookAt(lookTargetRef.current);
     }
 
-    // ── 5. Micro-gestures (Poisson process) ──────────────────────────────
-    if (now >= nextMicroRef.current) {
-      microTypeRef.current  = Math.random() < 0.5 ? 'tilt' : 'nod';
-      microStartRef.current = now;
-      microDurRef.current   = 500 + Math.random() * 600;  // ↑ slightly faster (was 600+700)
-      nextMicroRef.current  = now + 2000 + Math.random() * 3000; // ↑ more frequent (was 4000+5000)
-    }
+    // ── 5. Neck bone — AI Director accumulation (micro + nod + laugh + headpose) ──
+    if (humanoid) {
+      let neckX = 0, neckY = 0, neckZ = 0;
 
-    if (microTypeRef.current && humanoid) {
-      const mProg = Math.min(1, (now - microStartRef.current) / microDurRef.current);
-      const mEnv  = Math.sin(mProg * Math.PI) * 0.14; // ↑ clearly visible head tilt/nod (was 0.055)
+      // a) Organic micro-gesture (existing Poisson process — tilt or nod)
+      if (now >= nextMicroRef.current) {
+        microTypeRef.current  = Math.random() < 0.5 ? 'tilt' : 'nod';
+        microStartRef.current = now;
+        microDurRef.current   = 500 + Math.random() * 600;
+        nextMicroRef.current  = now + 2000 + Math.random() * 3000;
+      }
+      if (microTypeRef.current) {
+        const mProg = Math.min(1, (now - microStartRef.current) / microDurRef.current);
+        const mEnv  = Math.sin(mProg * Math.PI) * 0.14;
+        if (microTypeRef.current === 'tilt') neckZ += mEnv;
+        else                                 neckX += mEnv;
+        if (mProg >= 1) microTypeRef.current = null;
+      }
+
+      // b) AI Nod — rapid triple-nod with envelope
+      if (nodRef.current) {
+        const nProg = Math.min(1, (now - nodRef.current.startMs) / nodRef.current.durationMs);
+        const nEnv  = Math.sin(nProg * Math.PI) * nodRef.current.intensity;
+        neckX += Math.sin(nProg * Math.PI * 3) * nEnv;
+        if (nProg >= 1) nodRef.current = null;
+      }
+
+      // c) AI Laugh — head bounces with chest
+      if (laughActive) {
+        neckX += Math.sin(laughProg * Math.PI * 7) * laughEnv * 0.10;
+        neckZ += Math.sin(laughProg * Math.PI * 5) * laughEnv * 0.06;
+      }
+
+      // d) AI HeadPose — smooth lerp toward target yaw/pitch
+      if (headPoseRef.current) {
+        const active = now < headPoseRef.current.endMs;
+        const ty = active ? headPoseRef.current.yaw   : 0;
+        const tp = active ? headPoseRef.current.pitch : 0;
+        headCurrYawRef.current   = lerpN(headCurrYawRef.current,   ty, delta * 3.5);
+        headCurrPitchRef.current = lerpN(headCurrPitchRef.current, tp, delta * 3.5);
+        if (!active
+          && Math.abs(headCurrYawRef.current)   < 0.005
+          && Math.abs(headCurrPitchRef.current) < 0.005) {
+          headPoseRef.current = null;
+        }
+      } else {
+        // Return to neutral when no target active
+        headCurrYawRef.current   = lerpN(headCurrYawRef.current,   0, delta * 2.5);
+        headCurrPitchRef.current = lerpN(headCurrPitchRef.current, 0, delta * 2.5);
+      }
+      neckY += headCurrYawRef.current;
+      neckX += headCurrPitchRef.current;
+
       try {
         const neckBone = humanoid.getRawBoneNode('neck' as never);
-        if (neckBone) {
-          if (microTypeRef.current === 'tilt') neckBone.rotation.set(0,  0, mEnv, 'XYZ');
-          else                                 neckBone.rotation.set(mEnv, 0, 0, 'XYZ');
-        }
+        if (neckBone) neckBone.rotation.set(neckX, neckY, neckZ, 'XYZ');
       } catch {}
-      if (mProg >= 1) microTypeRef.current = null;
     }
 
     // ── 6. Arm pose with smooth blending ──────────────────────────────────
