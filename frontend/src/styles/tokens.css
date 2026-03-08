@@ -1,0 +1,69 @@
+:root {
+  /* Light */
+  --bg: #ffffff;
+  --text: #0b1220;            /* ~12:1 على الأبيض */
+  --muted: #334155;           /* slate-700 */
+  --subtle: #475569;          /* slate-600 */
+
+  --primary: #0ea5e9;         /* sky-500 */
+  --primary-text: #06202b;    /* نص فوق primary الفاتح */
+
+  --success: #16a34a;         /* green-600 */
+  --success-text: #052911;
+
+  --warning: #f59e0b;         /* amber-500 */
+  --warning-text: #2b1d00;
+
+  --danger: #ef4444;          /* red-500 */
+  --danger-text: #2b0b0b;
+
+  --surface: #f1f5f9;         /* slate-100 */
+  --surface-text: var(--text);
+}
+
+:root[data-theme="dark"] {
+  /* Dark */
+  --bg: #0a0a12;              /* خلفية مشروعك */
+  --text: #e6eaf2;            /* نص أساسي (AA+ على #0a0a12) */
+  --muted: #c7d1e0;           /* نص ثانوي ≥4.5 على #0a0a12 */
+  --subtle: #aab6c7;          /* لتسميات صغيرة؛ للنص الصغير استخدم muted أو text */
+
+  --primary: #22d3ee;         /* cyan-400 */
+  --primary-text: #06262c;    /* نص داكن فوق primary */
+  /* بدلاً من cyan-300 على نص صغير، استعمل text/subtle فوق bg، وضع cyan في الحدود/الأيقونات */
+
+  --success: #34d399;         /* emerald-400 */
+  --success-text: #042016;
+
+  --warning: #f59e0b;         /* amber-500 */
+  --warning-text: #2b1d00;
+
+  --danger: #f87171;          /* red-400 */
+  --danger-text: #2b0b0b;
+
+  --surface: #11131a;         /* طبقة زجاجية داكنة */
+  --surface-text: var(--text);
+}
+
+/* أدوات مساعدة عامة */
+.u-bg        { background-color: var(--bg); }
+.u-surface   { background-color: var(--surface); }
+.u-text      { color: var(--text); }
+.u-muted     { color: var(--muted); }
+.u-subtle    { color: var(--subtle); }
+
+.u-badge           { color: var(--surface-text); background-color: var(--surface); }
+.u-badge--primary  { color: #ffffff; background-color: var(--primary); }
+.u-badge--success  { color: #04150e; background-color: var(--success); }
+.u-badge--warning  { color: var(--warning-text); background-color: var(--warning); }
+.u-badge--danger   { color: #2b0b0b; background-color: var(--danger); }
+
+/* روابط وأزرار نصية */
+.u-link      { color: var(--text); text-decoration-color: var(--muted); }
+.u-link:hover, .u-link:focus-visible { color: var(--text); text-decoration-color: var(--primary); }
+
+/* حدود وتركيز واضح عالي التباين */
+.u-focus:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}

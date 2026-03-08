@@ -472,6 +472,32 @@ the 3-part output contract.
 """
 
 
+def parse_hamza_output(raw: str) -> dict:
+    """Parse Dr. Hamza raw output into {dialogue, emotion, action} dict.
+
+    Expected format (any order):
+        dialogue text
+        *action description*
+        [EMOTION: name]
+    """
+    import re
+    text = raw or ""
+    # Extract [EMOTION: xxx]
+    emotion_match = re.search(r'\[EMOTION:\s*(\w+)\]', text, re.IGNORECASE)
+    emotion = emotion_match.group(1).lower() if emotion_match else "neutral"
+
+    # Extract *action*
+    action_match = re.search(r'\*([^*]+)\*', text)
+    action = action_match.group(1).strip() if action_match else "beat"
+
+    # Dialogue = everything except the emotion tag and action markers
+    dialogue = re.sub(r'\[EMOTION:[^\]]*\]', '', text, flags=re.IGNORECASE)
+    dialogue = re.sub(r'\*[^*]*\*', '', dialogue)
+    dialogue = dialogue.strip()
+
+    return {"dialogue": dialogue, "emotion": emotion, "action": action}
+
+
 async def _get_dr_hamza_response(message: str, context: dict) -> str:
     """Dr. Hamza V200 — استدعاء GPT-4o بشخصية دكتور حمزة و A-Agent V200."""
     try:
