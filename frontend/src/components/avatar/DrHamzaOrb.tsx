@@ -21,7 +21,7 @@ const DrHamzaOrb: React.FC<Props> = ({ label = 'Dr. Hamza' }) => {
       role="button"
       tabIndex={0}
       aria-label="Dr Hamza interactive avatar"
-      aria-pressed={isActive}
+      aria-pressed={isActive ? 'true' : 'false'}
       onClick={toggleActive}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {

@@ -46,6 +46,11 @@ function VRMScene({
   const emotionRef        = useRef<string>('neutral');
   // Smooth emotion blending (lerp from prev to target)
   const emotionBlendRef   = useRef<Record<string, number>>({});
+  // Phase 2: real viseme weights from edge-tts word-boundary events
+  const azureVisemeRef    = useRef<{ aa: number; ih: number; ou: number }>({ aa: 0, ih: 0, ou: 0 });
+  const azureVisemeActive = useRef(false); // true while real visemes are scheduled
+  // Current rendered lip weights (for smooth lerp without reading from VRM)
+  const lipWeightsRef     = useRef<{ aa: number; ih: number; ou: number }>({ aa: 0, ih: 0, ou: 0 });
   const waveUntilRef      = useRef(0);
   const gestureRef        = useRef<{
     type: 'point' | 'openHand' | 'beat';
@@ -211,8 +216,19 @@ function VRMScene({
     };
     const onSpeakEnd   = () => {
       isTalkingRef.current = false;
+      azureVisemeActive.current = false;
+      azureVisemeRef.current = { aa: 0, ih: 0, ou: 0 };
       emotionRef.current = 'neutral';
       console.log('[BRAIN] avatar:speak:end — resetting to neutral');
+    };
+    // avatar:viseme:start — real visemes are incoming; switch from procedural
+    const onVisemeStart = () => { azureVisemeActive.current = true; };
+    // avatar:viseme — update target weights from real phoneme data
+    const onViseme = (e: Event) => {
+      const d = (e as CustomEvent<{ id?: number; weights?: { aa: number; ih: number; ou: number } }>).detail;
+      if (d?.weights) {
+        azureVisemeRef.current = d.weights;
+      }
     };
     const onWalk  = (e: Event) => { walkUntilRef.current  = Date.now() + ((e as CustomEvent<{ duration?: number }>).detail?.duration ?? 3) * 1000; };
     const onNod   = (e: Event) => {
@@ -241,6 +257,22 @@ function VRMScene({
       headPitchRef.current = d?.pitch ?? 0;
       headUntilRef.current = Date.now() + (d?.duration ?? 2000);
     };
+    const onSit = (e: Event) => {
+      const sitting = (e as CustomEvent<{ sitting?: boolean }>).detail?.sitting ?? true;
+      // Simulate sit posture: lower body and tilt spine forward
+      if (sitting) {
+        // Apply sit pose via head pose + spin tilt events
+        headPitchRef.current = -0.08;
+        headUntilRef.current = Date.now() + 60_000; // hold until stand
+        spineBreathRef.current = 0.18; // forward lean
+        console.log('[BRAIN] Avatar sit — posture applied');
+      } else {
+        headPitchRef.current = 0;
+        headUntilRef.current = Date.now() + 1000;
+        spineBreathRef.current = 0;
+        console.log('[BRAIN] Avatar stand — posture reset');
+      }
+    };
     // avatar:speak:text — TTS via Web Speech API; also parses sentence boundaries for nods
     const onSpeakText = (e: Event) => {
       const text = (e as CustomEvent<{ text?: string }>).detail?.text ?? '';
@@ -266,18 +298,22 @@ function VRMScene({
       });
     };
 
-    window.addEventListener('avatar:gesture',      onGesture);
-    window.addEventListener('avatar:emotion',      onEmotion);
-    window.addEventListener('avatar:speak:start',  onSpeakStart);
-    window.addEventListener('avatar:speak:end',    onSpeakEnd);
-    window.addEventListener('avatar:stopSpeaking', onSpeakEnd);
-    window.addEventListener('avatar:walk',         onWalk);
-    window.addEventListener('avatar:nod',          onNod);
-    window.addEventListener('avatar:laugh',        onLaugh);
-    window.addEventListener('avatar:voice',        onVoice);
-    window.addEventListener('avatar:blink',        onBlink);
-    window.addEventListener('avatar:headpose',     onHeadpose);
-    window.addEventListener('avatar:speak:text',   onSpeakText);
+    window.addEventListener('avatar:gesture',       onGesture);
+    window.addEventListener('avatar:emotion',       onEmotion);
+    window.addEventListener('avatar:speak:start',   onSpeakStart);
+    window.addEventListener('avatar:speak:end',     onSpeakEnd);
+    window.addEventListener('avatar:stopSpeaking',  onSpeakEnd);
+    window.addEventListener('avatar:viseme:start',  onVisemeStart);
+    window.addEventListener('avatar:viseme',        onViseme);
+    window.addEventListener('avatar:walk',          onWalk);
+    window.addEventListener('avatar:nod',           onNod);
+    window.addEventListener('avatar:laugh',         onLaugh);
+    window.addEventListener('avatar:voice',         onVoice);
+    window.addEventListener('avatar:blink',         onBlink);
+    window.addEventListener('avatar:headpose',      onHeadpose);
+    window.addEventListener('avatar:sit',           onSit);
+    window.addEventListener('avatar:stand',         (e) => onSit(new CustomEvent('avatar:sit', { detail: { sitting: false } })));
+    window.addEventListener('avatar:speak:text',    onSpeakText);
 
     return () => {
       window.removeEventListener('avatar:gesture',      onGesture);
@@ -285,12 +321,15 @@ function VRMScene({
       window.removeEventListener('avatar:speak:start',  onSpeakStart);
       window.removeEventListener('avatar:speak:end',    onSpeakEnd);
       window.removeEventListener('avatar:stopSpeaking', onSpeakEnd);
+      window.removeEventListener('avatar:viseme:start', onVisemeStart);
+      window.removeEventListener('avatar:viseme',       onViseme);
       window.removeEventListener('avatar:walk',         onWalk);
       window.removeEventListener('avatar:nod',          onNod);
       window.removeEventListener('avatar:laugh',        onLaugh);
       window.removeEventListener('avatar:voice',        onVoice);
       window.removeEventListener('avatar:blink',        onBlink);
       window.removeEventListener('avatar:headpose',     onHeadpose);
+      window.removeEventListener('avatar:sit',          onSit);
       window.removeEventListener('avatar:speak:text',   onSpeakText);
     };
   }, []);
@@ -350,19 +389,42 @@ function VRMScene({
         blinkPhaseRef.current = 0.001;
       }
 
-      // 3. Procedural lip-sync with natural variation
+      // 3. Lip-sync: real visemes (Phase 2) or procedural fallback
       if (isTalkingRef.current) {
         talkElapsedRef.current += delta;
-        // Natural mouth movement: mix fast and slow components
-        const fastJaw  = 0.5 * Math.sin(talkElapsedRef.current * 9.1);
-        const slowJaw  = 0.2 * Math.sin(talkElapsedRef.current * 3.7);
-        const jaw = Math.max(0, Math.min(1, 0.35 + fastJaw + slowJaw));
-        try { em.setValue('aa' as never, jaw); } catch {}
-        // Subtle 'oh' shape during speech
-        const oh = Math.max(0, Math.min(0.4, 0.15 * Math.sin(talkElapsedRef.current * 5.3 + 1)));
-        try { em.setValue('oh' as never, oh); } catch {}
+        const lw = lipWeightsRef.current;
+        if (azureVisemeActive.current) {
+          // ── Real phoneme-driven lip sync (edge-tts word-boundary timing) ──
+          const { aa, ih, ou } = azureVisemeRef.current;
+          const spd = delta * 18; // fast blend for tight sync
+          lw.aa = lerp(lw.aa, aa, spd);
+          lw.ih = lerp(lw.ih, ih, spd);
+          lw.ou = lerp(lw.ou, ou, spd);
+          try { em.setValue('aa' as never, lw.aa); } catch {}
+          try { em.setValue('ih' as never, lw.ih); } catch {}
+          try { em.setValue('ou' as never, lw.ou); } catch {}
+          try { em.setValue('oh' as never, 0); } catch {}
+        } else {
+          // ── Procedural fallback: sine-wave when no real timing available ──
+          const fastJaw = 0.5 * Math.sin(talkElapsedRef.current * 9.1);
+          const slowJaw = 0.2 * Math.sin(talkElapsedRef.current * 3.7);
+          const jaw = Math.max(0, Math.min(1, 0.35 + fastJaw + slowJaw));
+          lw.aa = jaw; lw.ih = 0; lw.ou = 0;
+          try { em.setValue('aa' as never, jaw); } catch {}
+          const oh = Math.max(0, Math.min(0.4, 0.15 * Math.sin(talkElapsedRef.current * 5.3 + 1)));
+          try { em.setValue('oh' as never, oh); } catch {}
+        }
       } else {
-        try { em.setValue('aa' as never, 0); em.setValue('oh' as never, 0); } catch {}
+        // Mouth closed: decay all lip shapes to zero using tracked weights
+        const lw = lipWeightsRef.current;
+        const spd = delta * 10;
+        lw.aa = lerp(lw.aa, 0, spd);
+        lw.ih = lerp(lw.ih, 0, spd);
+        lw.ou = lerp(lw.ou, 0, spd);
+        try { em.setValue('aa' as never, lw.aa); } catch {}
+        try { em.setValue('ih' as never, lw.ih); } catch {}
+        try { em.setValue('ou' as never, lw.ou); } catch {}
+        try { em.setValue('oh' as never, 0); } catch {}
       }
 
       // 4. Emotion blendshapes — smooth lerp between states
@@ -477,8 +539,9 @@ function VRMScene({
         if (rla) rla.rotation.set(-0.7,  0,   waveAng * 1.2, 'XYZ');
         const lua = humanoid.getRawBoneNode('leftUpperArm' as never);
         const lla = humanoid.getRawBoneNode('leftLowerArm' as never);
-        if (lua) lua.rotation.set(0, 0, 0, 'XYZ');
-        if (lla) lla.rotation.set(0, 0, 0, 'XYZ');
+        // Left arm hangs naturally at side during wave (not T-pose)
+        if (lua) lua.rotation.set(0, 0,  1.3, 'XYZ');
+        if (lla) lla.rotation.set(0.06, 0, 0, 'XYZ');
 
       } else if (hasGesture && gestureRef.current) {
         const progress = Math.min(1, (now - gestureRef.current.startMs) / gestureRef.current.durationMs);
@@ -511,28 +574,76 @@ function VRMScene({
         if (gSide === 'left'  || gSide === 'both') applyArm('left');
 
       } else if (isWalkingNow) {
-        const swing = Math.sin(t * 5.5) * 0.55;
+        // ── Real walk cycle: arms swing + legs swing + knee bend ──
+        const swing = Math.sin(t * 5.5);  // -1..1
         const rua   = humanoid.getRawBoneNode('rightUpperArm' as never);
         const lua   = humanoid.getRawBoneNode('leftUpperArm'  as never);
         const rla   = humanoid.getRawBoneNode('rightLowerArm' as never);
         const lla   = humanoid.getRawBoneNode('leftLowerArm'  as never);
-        if (rua) rua.rotation.set(-swing * 0.8, 0,  0.05, 'XYZ');
-        if (lua) lua.rotation.set( swing * 0.8, 0, -0.05, 'XYZ');
-        if (rla) rla.rotation.set(Math.max(0,  swing * 0.4), 0, 0, 'XYZ');
-        if (lla) lla.rotation.set(Math.max(0, -swing * 0.4), 0, 0, 'XYZ');
+        // Arms swing forward/back with Z base offset so they hang, not T-pose
+        if (rua) rua.rotation.set(-swing * 0.45, 0, -1.1, 'XYZ');
+        if (lua) lua.rotation.set( swing * 0.45, 0,  1.1, 'XYZ');
+        // Elbow bends slightly when arm swings forward
+        if (rla) rla.rotation.set(Math.max(0, -swing * 0.35), 0, 0, 'XYZ');
+        if (lla) lla.rotation.set(Math.max(0,  swing * 0.35), 0, 0, 'XYZ');
+        // ── Leg swing (opposite phase to same-side arm) ──
+        const rul = humanoid.getRawBoneNode('rightUpperLeg' as never);
+        const lul = humanoid.getRawBoneNode('leftUpperLeg'  as never);
+        const rll = humanoid.getRawBoneNode('rightLowerLeg' as never);
+        const lll = humanoid.getRawBoneNode('leftLowerLeg'  as never);
+        // Right arm forward (swing<0) → right leg back (swing>0) and vice versa
+        if (rul) rul.rotation.set( swing * 0.45, 0, 0, 'XYZ');
+        if (lul) lul.rotation.set(-swing * 0.45, 0, 0, 'XYZ');
+        // Knee bends when leg is behind the body
+        if (rll) rll.rotation.set(swing > 0 ? swing * 0.38 : 0, 0, 0, 'XYZ');
+        if (lll) lll.rotation.set(swing < 0 ? -swing * 0.38 : 0, 0, 0, 'XYZ');
+
       } else if (isLaughingNow) {
-        const shoulBounce = Math.sin(t * 14) * 0.18;
+        const shoulBounce = Math.sin(t * 14) * 0.15;
         const rua = humanoid.getRawBoneNode('rightUpperArm' as never);
         const lua = humanoid.getRawBoneNode('leftUpperArm'  as never);
-        if (rua) rua.rotation.set( shoulBounce, 0, 0, 'XYZ');
-        if (lua) lua.rotation.set(-shoulBounce, 0, 0, 'XYZ');
+        const rla = humanoid.getRawBoneNode('rightLowerArm' as never);
+        const lla = humanoid.getRawBoneNode('leftLowerArm'  as never);
+        // Keep arms at natural down position during laugh, just bounce shoulders
+        if (rua) rua.rotation.set( shoulBounce, 0, -1.3, 'XYZ');
+        if (lua) lua.rotation.set(-shoulBounce, 0,  1.3, 'XYZ');
+        if (rla) rla.rotation.set(0.08, 0, 0, 'XYZ');
+        if (lla) lla.rotation.set(0.08, 0, 0, 'XYZ');
+        // Reset legs to neutral when not walking
+        const rul = humanoid.getRawBoneNode('rightUpperLeg' as never);
+        const lul = humanoid.getRawBoneNode('leftUpperLeg' as never);
+        const rll = humanoid.getRawBoneNode('rightLowerLeg' as never);
+        const lll = humanoid.getRawBoneNode('leftLowerLeg' as never);
+        if (rul) rul.rotation.set(0, 0, 0, 'XYZ');
+        if (lul) lul.rotation.set(0, 0, 0, 'XYZ');
+        if (rll) rll.rotation.set(0, 0, 0, 'XYZ');
+        if (lll) lll.rotation.set(0, 0, 0, 'XYZ');
+
       } else {
-        // Idle sway with slight breathing influence on arm position
-        const sway = Math.sin(t * 0.4) * 0.08 + spineBreathRef.current * 0.3;
+        // ── Natural idle: arms hang at sides, NOT T-pose ──
+        // Z rotation brings arms from horizontal (T-pose=0) to natural downward hang
+        // -1.3 rad ≈ 74° below T-pose horizontal for right arm
+        //  1.3 rad ≈ 74° below T-pose horizontal for left arm
+        const sway    = Math.sin(t * 0.4) * 0.06;   // subtle forward/back micro-sway
+        const breathZ = spineBreathRef.current * 0.15; // breathing slightly opens arms
         const rua  = humanoid.getRawBoneNode('rightUpperArm' as never);
         const lua  = humanoid.getRawBoneNode('leftUpperArm'  as never);
-        if (rua) rua.rotation.set( sway, 0, 0, 'XYZ');
-        if (lua) lua.rotation.set(-sway, 0, 0, 'XYZ');
+        const rla  = humanoid.getRawBoneNode('rightLowerArm' as never);
+        const lla  = humanoid.getRawBoneNode('leftLowerArm'  as never);
+        if (rua) rua.rotation.set( sway, 0, -1.3 + breathZ, 'XYZ');
+        if (lua) lua.rotation.set(-sway, 0,  1.3 - breathZ, 'XYZ');
+        // Slight elbow micro-bend (more natural than perfectly straight arms)
+        if (rla) rla.rotation.set(0.07, 0, 0, 'XYZ');
+        if (lla) lla.rotation.set(0.07, 0, 0, 'XYZ');
+        // Ensure legs stay neutral in idle
+        const rul = humanoid.getRawBoneNode('rightUpperLeg' as never);
+        const lul = humanoid.getRawBoneNode('leftUpperLeg'  as never);
+        const rll = humanoid.getRawBoneNode('rightLowerLeg' as never);
+        const lll = humanoid.getRawBoneNode('leftLowerLeg'  as never);
+        if (rul) rul.rotation.set(0, 0, 0, 'XYZ');
+        if (lul) lul.rotation.set(0, 0, 0, 'XYZ');
+        if (rll) rll.rotation.set(0, 0, 0, 'XYZ');
+        if (lll) lll.rotation.set(0, 0, 0, 'XYZ');
       }
     }
   });

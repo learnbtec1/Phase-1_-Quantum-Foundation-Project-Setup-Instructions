@@ -2,8 +2,8 @@
 
 import React, { useRef, useState, useEffect } from 'react';
 import styles from './Chat.module.css';
-import { inferResponsePlan, parseVeronaResponse } from '@/ai/avatar/brain';
-import { reactToUserInput, dispatchGestureFromActionText, dispatchEmotion, applyVeronaResponse } from '@/ai/avatar/actions';
+import { inferResponsePlan } from '@/ai/avatar/brain';
+import { reactToUserInput, dispatchGestureFromActionText, dispatchEmotion } from '@/ai/avatar/actions';
 
 export interface Message {
   id: string;
@@ -67,36 +67,97 @@ export default function Chat() {
         body: JSON.stringify({ message: text }),
       });
       const data = await res.json();
-      const reply = res.ok && data.reply ? data.reply : 'عذراً، حدث خطأ. حاول مرة أخرى.';
+
+      // ── Phase 3: use structured avatar fields directly ──────────────────
+      // Both backend and OpenAI paths now return pre-parsed fields so we no
+      // longer need to regex-parse [EMOTION:] / *action* from reply text.
+      const cleanDialogue = res.ok && (data.dialogue || data.reply)
+        ? String(data.dialogue || data.reply)
+        : 'عذراً، حدث خطأ. حاول مرة أخرى.';
+      const parsedEmotion = String(data.emotion  ?? 'neutral');
+      const parsedAction  = String(data.action   ?? '');
+      const headPose      = data.head_pose as { yaw: number; pitch: number } | null | undefined;
+      const headNod       = Boolean(data.head_nod);
+      const blinkStyle    = String(data.blink ?? 'normal');
+      const doLaugh       = Boolean(data.laugh);
+      const gestureList   = Array.isArray(data.gestures) ? data.gestures as Array<Record<string, unknown>> : null;
+
       const assistantMessage: Message = {
         id: `a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         role: 'assistant',
-        content: reply,
+        content: cleanDialogue,
       };
       setMessages((prev) => [...prev, assistantMessage]);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('chat:received'));
         if (!spokenAssistantIdsRef.current.has(assistantMessage.id)) {
           spokenAssistantIdsRef.current.add(assistantMessage.id);
-          // فصل الحوار النظيف عن الحركات والمشاعر المضمَّنة
-          const { dialogue: cleanDialogue, emotion: parsedEmotion, action: parsedAction } = parseVeronaResponse(reply);
-          const speakText = cleanDialogue || reply;
-          // تنفيذ وسوم Verona (حركات + مشاعر) أولاً
-          applyVeronaResponse(parsedAction, parsedEmotion);
-          // إن لم يكن هناك وسوم، استنتج من النص النظيف
-          if (!parsedAction) {
-            const plan = inferResponsePlan(speakText);
-            dispatchEmotion(plan.tone);
+
+          // 1. Emotion
+          dispatchEmotion(parsedEmotion);
+
+          // 2. Head pose (only when non-zero)
+          if (headPose && (headPose.yaw !== 0 || headPose.pitch !== 0)) {
+            window.dispatchEvent(new CustomEvent('avatar:headpose', {
+              detail: { yaw: headPose.yaw, pitch: headPose.pitch, duration_ms: 2500 },
+            }));
+          }
+
+          // 3. Nod
+          if (headNod) {
+            window.dispatchEvent(new CustomEvent('avatar:nod', {
+              detail: { duration_ms: 1200, intensity: 0.4 },
+            }));
+          }
+
+          // 4. Blink variation
+          if (blinkStyle !== 'normal') {
+            window.dispatchEvent(new CustomEvent('avatar:blink', {
+              detail: { style: blinkStyle },
+            }));
+          }
+
+          // 5. Laugh
+          if (doLaugh) {
+            window.dispatchEvent(new CustomEvent('avatar:laugh', { detail: {} }));
+          }
+
+          // 6. Gestures — structured array (OpenAI) > action text mapping (backend)
+          if (gestureList && gestureList.length > 0) {
+            for (const g of gestureList) {
+              const hand = String(g.hand ?? 'right');
+              window.dispatchEvent(new CustomEvent('avatar:gesture', {
+                detail: {
+                  type:      String(g.type ?? 'openHand'),
+                  side:      hand === 'left' ? 'left' : hand === 'both' ? 'both' : 'right',
+                  duration:  typeof g.duration_ms === 'number' ? g.duration_ms / 1000 : 1.5,
+                  intensity: typeof g.strength   === 'number' ? g.strength     : 0.7,
+                },
+              }));
+            }
+          } else if (parsedAction) {
+            // Fallback: map action text to a gesture via existing helper
+            dispatchGestureFromActionText(parsedAction);
+          } else {
+            // Final fallback: derive from text if no structural hints
+            const plan = inferResponsePlan(cleanDialogue);
             if (plan.gestures[0]) {
               const g = plan.gestures[0];
               window.dispatchEvent(new CustomEvent('avatar:gesture', {
-                detail: { type: g.type === 'emphasis' ? 'beat' : g.type, side: g.hand === 'L' ? 'left' : g.hand === 'both' ? 'both' : 'right', duration: 1.5, intensity: g.strength },
+                detail: {
+                  type:      g.type === 'emphasis' ? 'beat' : g.type,
+                  side:      g.hand === 'L' ? 'left' : g.hand === 'both' ? 'both' : 'right',
+                  duration:  1.5,
+                  intensity: g.strength,
+                },
               }));
             }
           }
-          // إرسال الحوار النظيف فقط إلى الأفاتار
-          console.log('%c[V30] 📢 dispatching avatar:speak', 'color:yellow;font-weight:bold', '| emotion:', parsedEmotion, '| text:', speakText.slice(0, 80));
-          window.dispatchEvent(new CustomEvent('avatar:speak', { detail: speakText }));
+
+          // 7. Speak — dispatch clean dialogue only
+          console.log('%c[Phase3] 📢 avatar:speak', 'color:lime;font-weight:bold',
+            '| emotion:', parsedEmotion, '| text:', cleanDialogue.slice(0, 80));
+          window.dispatchEvent(new CustomEvent('avatar:speak', { detail: cleanDialogue }));
         }
       }
     } catch {

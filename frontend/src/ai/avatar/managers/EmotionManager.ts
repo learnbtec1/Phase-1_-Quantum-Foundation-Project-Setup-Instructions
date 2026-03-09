@@ -32,6 +32,8 @@ interface EmotionConfig {
   vrmaUrl: string;
   /** loop the animation? */
   loop: boolean;
+  /** per-emotion blend speed (overrides global _blendSpeed) */
+  blendSpeed?: number;
 }
 
 /**
@@ -40,23 +42,23 @@ interface EmotionConfig {
  */
 export const EMOTION_CONFIG: Record<string, EmotionConfig> = {
   // ── core 11 from AIMascotKit ──────────────────────────────────────────────
-  normal:     { expression: VRMExpressionPresetName.Neutral,   expressionIntensity: 0.3,  vrmaUrl: '/models/animations/Relax.vrma',     loop: true  },
-  happy:      { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 0.9,  vrmaUrl: '/models/animations/Clapping.vrma',  loop: false },
-  excited:    { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 1.0,  vrmaUrl: '/models/animations/Jump.vrma',      loop: false },
-  angry:      { expression: VRMExpressionPresetName.Angry,     expressionIntensity: 0.9,  vrmaUrl: '/models/animations/Angry.vrma',     loop: false },
-  sad:        { expression: VRMExpressionPresetName.Sad,       expressionIntensity: 0.8,  vrmaUrl: '/models/animations/Sad.vrma',       loop: false },
-  surprised:  { expression: VRMExpressionPresetName.Surprised, expressionIntensity: 0.9,  vrmaUrl: '/models/animations/Surprised.vrma', loop: false },
-  blush:      { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 0.6,  vrmaUrl: '/models/animations/Blush.vrma',     loop: false },
-  sleepy:     { expression: VRMExpressionPresetName.Relaxed,   expressionIntensity: 0.7,  vrmaUrl: '/models/animations/Sleepy.vrma',    loop: false },
-  thinking:   { expression: VRMExpressionPresetName.Neutral,   expressionIntensity: 0.2,  vrmaUrl: '/models/animations/Thinking.vrma', loop: false },
-  relax:      { expression: VRMExpressionPresetName.Relaxed,   expressionIntensity: 0.6,  vrmaUrl: '/models/animations/Relax.vrma',     loop: true  },
-  goodbye:    { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 0.5,  vrmaUrl: '/models/animations/Goodbye.vrma',   loop: false },
+  normal:     { expression: VRMExpressionPresetName.Neutral,   expressionIntensity: 0.3,  vrmaUrl: '/models/animations/Relax.vrma',     loop: true,  blendSpeed: 3.0 },
+  happy:      { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 0.9,  vrmaUrl: '/models/animations/Clapping.vrma',  loop: false, blendSpeed: 5.0 },
+  excited:    { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 1.0,  vrmaUrl: '/models/animations/Jump.vrma',      loop: false, blendSpeed: 7.0 },
+  angry:      { expression: VRMExpressionPresetName.Angry,     expressionIntensity: 0.9,  vrmaUrl: '/models/animations/Angry.vrma',     loop: false, blendSpeed: 6.0 },
+  sad:        { expression: VRMExpressionPresetName.Sad,       expressionIntensity: 0.8,  vrmaUrl: '/models/animations/Sad.vrma',       loop: false, blendSpeed: 1.5 },
+  surprised:  { expression: VRMExpressionPresetName.Surprised, expressionIntensity: 0.9,  vrmaUrl: '/models/animations/Surprised.vrma', loop: false, blendSpeed: 8.0 },
+  blush:      { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 0.6,  vrmaUrl: '/models/animations/Blush.vrma',     loop: false, blendSpeed: 4.0 },
+  sleepy:     { expression: VRMExpressionPresetName.Relaxed,   expressionIntensity: 0.7,  vrmaUrl: '/models/animations/Sleepy.vrma',    loop: false, blendSpeed: 2.0 },
+  thinking:   { expression: VRMExpressionPresetName.Neutral,   expressionIntensity: 0.2,  vrmaUrl: '/models/animations/Thinking.vrma', loop: false, blendSpeed: 3.0 },
+  relax:      { expression: VRMExpressionPresetName.Relaxed,   expressionIntensity: 0.6,  vrmaUrl: '/models/animations/Relax.vrma',     loop: true,  blendSpeed: 2.0 },
+  goodbye:    { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 0.5,  vrmaUrl: '/models/animations/Goodbye.vrma',   loop: false, blendSpeed: 3.0 },
   // ── aliases / legacy names used in brain.ts ───────────────────────────────
-  neutral:       { expression: VRMExpressionPresetName.Neutral,   expressionIntensity: 0.3, vrmaUrl: '/models/animations/Relax.vrma',     loop: true  },
-  celebration:   { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 1.0, vrmaUrl: '/models/animations/Clapping.vrma',  loop: false },
-  encouraging:   { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 0.7, vrmaUrl: '/models/animations/Relax.vrma',     loop: false },
-  strictEvaluation: { expression: VRMExpressionPresetName.Angry,  expressionIntensity: 0.5, vrmaUrl: '/models/animations/Thinking.vrma', loop: false },
-  friendly:      { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 0.6, vrmaUrl: '/models/animations/Clapping.vrma',  loop: false },
+  neutral:       { expression: VRMExpressionPresetName.Neutral,   expressionIntensity: 0.3, vrmaUrl: '/models/animations/Relax.vrma',     loop: true,  blendSpeed: 3.0 },
+  celebration:   { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 1.0, vrmaUrl: '/models/animations/Clapping.vrma',  loop: false, blendSpeed: 7.0 },
+  encouraging:   { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 0.7, vrmaUrl: '/models/animations/Relax.vrma',     loop: false, blendSpeed: 4.0 },
+  strictEvaluation: { expression: VRMExpressionPresetName.Angry,  expressionIntensity: 0.5, vrmaUrl: '/models/animations/Thinking.vrma', loop: false, blendSpeed: 5.0 },
+  friendly:      { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 0.6, vrmaUrl: '/models/animations/Clapping.vrma',  loop: false, blendSpeed: 4.0 },
 };
 
 /**
@@ -76,6 +78,35 @@ export const EMOTION_ANIMATION_MAP = {
   goodbye:    { animation: 'Goodbye',   expression: 'neutral'  },
 } as const;
 
+// ── Emotion → VRM expression preset weights (for smooth blending) ────────────
+const EMOTION_EXPR_WEIGHTS: Record<string, Partial<Record<VRMExpressionPresetName, number>>> = {
+  normal:           { [VRMExpressionPresetName.Neutral]:   0.25 },
+  neutral:          { [VRMExpressionPresetName.Neutral]:   0.25 },
+  happy:            { [VRMExpressionPresetName.Happy]:     0.85 },
+  excited:          { [VRMExpressionPresetName.Happy]:     1.00 },
+  angry:            { [VRMExpressionPresetName.Angry]:     0.90 },
+  sad:              { [VRMExpressionPresetName.Sad]:       0.80 },
+  surprised:        { [VRMExpressionPresetName.Surprised]: 0.90 },
+  blush:            { [VRMExpressionPresetName.Happy]:     0.60 },
+  sleepy:           { [VRMExpressionPresetName.Relaxed]:   0.70 },
+  thinking:         { [VRMExpressionPresetName.Neutral]:   0.20, [VRMExpressionPresetName.Relaxed]: 0.30 },
+  relax:            { [VRMExpressionPresetName.Relaxed]:   0.60 },
+  goodbye:          { [VRMExpressionPresetName.Happy]:     0.50 },
+  celebration:      { [VRMExpressionPresetName.Happy]:     1.00 },
+  encouraging:      { [VRMExpressionPresetName.Happy]:     0.70 },
+  strictEvaluation: { [VRMExpressionPresetName.Angry]:     0.50, [VRMExpressionPresetName.Neutral]: 0.20 },
+  friendly:         { [VRMExpressionPresetName.Happy]:     0.65 },
+};
+
+const ALL_EXPR_PRESETS = [
+  VRMExpressionPresetName.Angry,
+  VRMExpressionPresetName.Happy,
+  VRMExpressionPresetName.Sad,
+  VRMExpressionPresetName.Surprised,
+  VRMExpressionPresetName.Relaxed,
+  VRMExpressionPresetName.Neutral,
+] as const;
+
 export class EmotionManager {
   private _vrm: VRM | null = null;
   /** External mixer shared with VRMAvatar — avoids double-mixer conflict */
@@ -85,6 +116,20 @@ export class EmotionManager {
   private _clipCache: Map<string, THREE.AnimationClip> = new Map();
   private _loader: GLTFLoader;
   private _isLoading = false;
+
+  /** Smooth expression blending: target weights and current interpolated weights */
+  private _exprTarget:  Partial<Record<VRMExpressionPresetName, number>> = {};
+  private _exprCurrent: Map<VRMExpressionPresetName, number> = new Map(
+    ALL_EXPR_PRESETS.map(p => [p, 0] as [VRMExpressionPresetName, number])
+  );
+  /** Blend speed: controls how fast expressions change (higher = faster) */
+  private _blendSpeed = 4.5;
+  private _microExprs: Map<string, { weight: number; target: number; speed: number }> = new Map([
+    ['eyebrowRaise', { weight: 0, target: 0, speed: 8 }],
+    ['squint',       { weight: 0, target: 0, speed: 6 }],
+    ['halfSmile',    { weight: 0, target: 0, speed: 5 }],
+    ['frown',        { weight: 0, target: 0, speed: 4 }],
+  ]);
 
   constructor(vrm?: VRM, mixer?: THREE.AnimationMixer) {
     this._loader = new GLTFLoader();
@@ -105,63 +150,125 @@ export class EmotionManager {
 
   /**
    * Apply one of the 11 emotions.
-   * Sets face expression and plays the VRMA body animation.
+   * Sets TARGET expression weights (smoothly blended in update()) and plays VRMA body animation.
    */
   setEmotion(emotion: string) {
     const cfg = EMOTION_CONFIG[emotion] ?? EMOTION_CONFIG['normal'];
     this._currentEmotion = emotion;
 
-    // ── face expression ───────────────────────────────────────────────────
-    this._applyFaceExpression(cfg.expression, cfg.expressionIntensity);
+    // ── face expression: set target (blended in update loop) ────────────────
+    this._exprTarget = EMOTION_EXPR_WEIGHTS[emotion] ?? EMOTION_EXPR_WEIGHTS['neutral'] ?? {};
 
-    // ── body animation ────────────────────────────────────────────────────
-    // One-shot only — do NOT loop body animations (would override procedural gestures)
+    // ── body animation ────────────────────────────────────────────────────────
     this._playVRMA(cfg.vrmaUrl, false, () => {
-      // After one-shot finishes: reset face to neutral gradually
-      setTimeout(() => this._applyFaceExpression(VRMExpressionPresetName.Neutral, 0.15), 800);
+      // After one-shot finishes: fade back to neutral target
+      this._exprTarget = EMOTION_EXPR_WEIGHTS['neutral'] ?? {};
     });
   }
 
   /**
    * Must be called every frame (delta in seconds).
-   * NOTE: Only call this if using EmotionManager's own internal mixer.
-   * If you passed an external mixer in setVRM(), update that mixer externally.
+   * Blends face expressions smoothly toward the current emotion target.
    */
   update(delta: number) {
     this._mixer?.update(delta);
+    this._blendExpressions(delta);
   }
 
-  /** Fade current face expressions back to neutral over `durationMs` ms. */
-  resetToNeutral(durationMs = 500) {
+  private _blendExpressions(delta: number) {
     if (!this._vrm?.expressionManager) return;
-    const mgr = this._vrm.expressionManager;
-    const presets = [
-      VRMExpressionPresetName.Angry,
-      VRMExpressionPresetName.Happy,
-      VRMExpressionPresetName.Sad,
-      VRMExpressionPresetName.Surprised,
-      VRMExpressionPresetName.Relaxed,
-    ] as const;
-    presets.forEach(p => mgr.setValue(p, 0));
-    mgr.setValue(VRMExpressionPresetName.Neutral, 0.2);
+    const mgr    = this._vrm.expressionManager;
+    const cfg    = EMOTION_CONFIG[this._currentEmotion];
+    const speed  = cfg?.blendSpeed ?? this._blendSpeed;
+    const factor = Math.min(1, delta * speed);
+
+    for (const preset of ALL_EXPR_PRESETS) {
+      const target  = this._exprTarget[preset] ?? 0;
+      const current = this._exprCurrent.get(preset) ?? 0;
+      const next    = current + (target - current) * factor;
+      this._exprCurrent.set(preset, next);
+      mgr.setValue(preset, next);
+    }
+  }
+
+  /** Fade face expressions back to neutral using the smooth blend system. */
+  resetToNeutral(_durationMs = 500) {
+    this._exprTarget = EMOTION_EXPR_WEIGHTS['neutral'] ?? {};
+  }
+
+  // ── Phase 10: Blink-pattern dispatchers ───────────────────────────────────
+  // These dispatch avatar:blink events handled by AvatarCanvas's forcedBlinkRef.
+
+  /** 3 rapid blinks — celebration / high-excitement reactions. */
+  rapidTripleBlink(): void {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('avatar:blink', { detail: { style: 'rapid', count: 3 } }));
+  }
+
+  /** One slow, deliberate blink — thinking / warm / friendly replies. */
+  slowSingleBlink(): void {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('avatar:blink', { detail: { style: 'slow' } }));
+  }
+
+  /** Slow blink combined with head droop — sad / apologetic feedback. */
+  slowMournfulBlink(): void {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('avatar:blink',    { detail: { style: 'slow' } }));
+    window.dispatchEvent(new CustomEvent('avatar:headpose', { detail: { yaw: 0, pitch: 0.12, duration: 2800 } }));
+  }
+
+  /** Two quick blinks in succession — surprised / double-take reaction. */
+  doubleBlink(): void {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('avatar:blink', { detail: { style: 'double', count: 2 } }));
+  }
+
+  /** Dispatch a short micro-expression overlay event to the avatar canvas. */
+  triggerMicroExpression(type: string, intensity = 0.7, durationSec = 0.6): void {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('avatar:micro', {
+      detail: { type, intensity, duration: durationSec },
+    }));
+  }
+
+  /**
+   * Trigger a subtle warm smile micro-expression.
+   * @param intensity - smile weight 0–1 (default 0.6)
+   * @param duration  - hold time in seconds (default 2.0)
+   */
+  warmSmile(intensity = 0.6, duration = 2.0): void {
+    const entry = this._microExprs.get('halfSmile');
+    if (entry) { entry.target = intensity; entry.speed = 5; }
+    setTimeout(() => {
+      const e = this._microExprs.get('halfSmile');
+      if (e) e.target = 0;
+    }, duration * 1000);
+  }
+
+  /**
+   * Trigger thoughtful look: slight squint + eyebrow raise + gentle head tilt.
+   */
+  thoughtfulLook(): void {
+    const squint = this._microExprs.get('squint');
+    const eb     = this._microExprs.get('eyebrowRaise');
+    if (squint) { squint.target = 0.4; squint.speed = 6; }
+    if (eb)     { eb.target = 0.3;     eb.speed = 5;     }
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('avatar:headpose', { detail: { yaw: 0.08, pitch: 0, duration: 2500 } }));
+    }
+    setTimeout(() => {
+      if (squint) squint.target = 0;
+      if (eb)     eb.target = 0;
+    }, 2500);
   }
 
   // ── private ───────────────────────────────────────────────────────────────
 
+  /** @deprecated — use setEmotion() + update(delta) for smooth blending */
   private _applyFaceExpression(preset: VRMExpressionPresetName, intensity: number) {
-    if (!this._vrm?.expressionManager) return;
-    const mgr = this._vrm.expressionManager;
-    // Clear all presets first
-    const ALL = [
-      VRMExpressionPresetName.Angry,
-      VRMExpressionPresetName.Happy,
-      VRMExpressionPresetName.Sad,
-      VRMExpressionPresetName.Surprised,
-      VRMExpressionPresetName.Relaxed,
-      VRMExpressionPresetName.Neutral,
-    ] as const;
-    ALL.forEach(p => mgr.setValue(p, p === VRMExpressionPresetName.Neutral ? 0.1 : 0));
-    mgr.setValue(preset, intensity);
+    // Set target and let the blend loop handle the transition
+    this._exprTarget = { [preset]: intensity };
   }
 
   private async _playVRMA(url: string, loop: boolean, onFinished?: () => void) {

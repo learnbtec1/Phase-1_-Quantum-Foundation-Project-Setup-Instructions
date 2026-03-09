@@ -1,16 +1,20 @@
 # -*- coding: utf-8 -*-
 """
 TTS-with-timing endpoint: POST /api/v1/tts-with-timing
-Synthesize speech with word-level timing for lip-sync.
-Uses Kokoro TTS (local) when available; falls back to edge-tts (Arabic male) or gTTS.
+Synthesize speech with word-level timing for lip-sync and viseme events.
+
+Priority chain:
+  1. Kokoro TTS (local, PCM) — best for non-Arabic
+  2. edge-tts streaming (ar-JO-TaimNeural) — REAL word-boundary timing + viseme events
+  3. gTTS Arabic — last resort (estimated timings only)
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import logging
 import os
-import tempfile
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -23,83 +27,136 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-class TTSRequest(BaseModel):
-    text: str = Field(..., max_length=5000, description="Text to synthesize")
-    voice: Optional[str] = Field(default="am_michael", description="Voice ID (Kokoro: am_michael male)")
-    speed: Optional[float] = Field(default=1.0, ge=0.25, le=4.0, description="Speed multiplier")
+# ── Arabic character → Azure-compatible viseme ID ────────────────────────────
+# IDs follow Microsoft's viseme spec (0=silence, 1-21 = phoneme groups).
+# Each Arabic letter maps to the closest English phoneme group.
+_ARABIC_VISEME: Dict[str, int] = {
+    'ا': 2,  'أ': 2,  'إ': 2,  'آ': 2,   # aleph  → open (ɑ)
+    'ب': 21, 'پ': 21,                      # ba/pa  → p/b/m
+    'ت': 19, 'ط': 19,                      # ta/tta → d/t/n
+    'ث': 17,                                # tha    → ð/θ
+    'ج': 16,                                # jeem   → ʃ/dʒ
+    'ح': 12, 'ه': 12,                      # ha     → h
+    'خ': 20, 'غ': 20, 'ق': 20, 'ك': 20,  # kha/qa → k/g
+    'د': 19, 'ض': 19,                      # dal    → d
+    'ذ': 17, 'ظ': 17,                      # dhal   → ð
+    'ر': 13,                                # ra     → ɹ
+    'ز': 15, 'س': 15, 'ص': 15,            # za/sa  → s/z
+    'ش': 16,                                # shin   → ʃ
+    'ع': 2,                                 # ain    → open vowel
+    'ف': 18,                                # fa     → f/v
+    'ل': 14,                                # lam    → l
+    'م': 21,                                # mim    → p/b/m
+    'ن': 19,                                # nun    → d/t/n
+    'و': 7,                                 # waw    → w/u (rounded)
+    'ي': 6,  'ى': 6,                       # ya     → j/i
+    'ة': 19,                                # ta marbuta → t
+    'ء': 1,                                 # hamza  → slight opening
+}
+
+def _word_first_viseme(word: str) -> int:
+    """Return the viseme ID for the first meaningful character of a word."""
+    for ch in word:
+        if ch in _ARABIC_VISEME:
+            return _ARABIC_VISEME[ch]
+        # Latin / digits — rough mapping
+        if ch.isalpha():
+            return 1  # neutral opening
+    return 0  # silence / punctuation
 
 
-class TTSResponse(BaseModel):
-    audio_base64: str
-    word_timings: List[Dict[str, Any]]
-    sample_rate: int = 24000
-    format: str = "pcm"
+# ── edge-tts streaming (real timing) ─────────────────────────────────────────
+EDGE_TTS_ARABIC_MALE = "ar-JO-TaimNeural"
+
+
+async def _synthesize_edge_tts(text: str) -> Tuple[bytes, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Synthesize via edge-tts streaming.
+    Returns (mp3_bytes, word_timings, viseme_events).
+    word_timings:   [{word, start_time, end_time}]   (times in ms)
+    viseme_events:  [{offset_ms, viseme_id}]
+    """
+    import edge_tts  # already in requirements.txt
+
+    communicate = edge_tts.Communicate(text, EDGE_TTS_ARABIC_MALE)
+    audio_chunks: List[bytes] = []
+    word_bounds: List[Dict[str, Any]] = []
+
+    async for chunk in communicate.stream():
+        ctype = chunk.get("type")
+        if ctype == "audio":
+            audio_chunks.append(chunk["data"])
+        elif ctype == "WordBoundary":
+            # offset/duration are in 100-nanosecond units → convert to ms
+            offset_ms  = chunk.get("offset",   0) / 10_000
+            dur_ms     = chunk.get("duration", 0) / 10_000
+            word_bounds.append({
+                "word":       chunk.get("text", ""),
+                "start_time": offset_ms,
+                "end_time":   offset_ms + dur_ms,
+            })
+
+    if not audio_chunks:
+        raise RuntimeError("edge-tts returned no audio")
+
+    mp3_bytes = b"".join(audio_chunks)
+
+    # Build viseme events: one opening event per word + one silence at word end
+    viseme_events: List[Dict[str, Any]] = []
+    for wb in word_bounds:
+        word    = wb["word"]
+        open_ms = max(0.0, wb["start_time"] - 30)   # 30ms lead-in
+        vid     = _word_first_viseme(word)
+        if vid != 0:
+            viseme_events.append({"offset_ms": open_ms,      "viseme_id": vid})
+        # Close mouth at word end
+        viseme_events.append(    {"offset_ms": wb["end_time"], "viseme_id": 0})
+
+    return mp3_bytes, word_bounds, viseme_events
+
+
+# ── gTTS last-resort fallback ─────────────────────────────────────────────────
+def _synthesize_gtts_sync(text: str) -> bytes:
+    from gtts import gTTS
+    buf = io.BytesIO()
+    gTTS(text=text, lang="ar", slow=False).write_to_fp(buf)
+    return buf.getvalue()
 
 
 def _estimate_word_timings(text: str, ms_per_word: float = 350.0) -> List[Dict[str, Any]]:
-    """Estimate word timings for fallback TTS (no real timings)."""
     words = text.split()
-    if not words:
-        return []
     return [
         {"word": w, "start_time": i * ms_per_word, "end_time": (i + 1) * ms_per_word}
         for i, w in enumerate(words)
     ]
 
 
-# Arabic male voice — Jordanian dialect (اللهجة الأردنية)
-EDGE_TTS_ARABIC_MALE = "ar-JO-TaimNeural"
+# ── Pydantic models ────────────────────────────────────────────────────────────
+class TTSRequest(BaseModel):
+    text:  str           = Field(..., max_length=5000)
+    voice: Optional[str] = Field(default="am_michael")
+    speed: Optional[float] = Field(default=1.0, ge=0.25, le=4.0)
 
 
-def _fallback_tts_sync(text: str, lang: str = "ar") -> Tuple[bytes, List[Dict[str, Any]]]:
-    """
-    Fallback TTS: prefer edge-tts (Jordanian Arabic male), else gTTS (Arabic).
-    Returns (mp3_bytes, word_timings).
-    """
-    # 1) Try edge-tts — Jordanian male (ar-JO-TaimNeural)
-    try:
-        import edge_tts
-        communicate = edge_tts.Communicate(text, EDGE_TTS_ARABIC_MALE)
-        fd, path = tempfile.mkstemp(suffix=".mp3")
-        try:
-            os.close(fd)
-            communicate.save(path)
-            with open(path, "rb") as f:
-                mp3_bytes = f.read()
-            word_timings = _estimate_word_timings(text)
-            return mp3_bytes, word_timings
-        finally:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-    except Exception as e:
-        logger.warning("edge-tts failed (%s), trying gTTS", e)
-
-    # 2) gTTS Arabic (no male/female choice; speaks Arabic)
-    try:
-        from gtts import gTTS
-    except ImportError:
-        raise RuntimeError("TTS fallback failed. Install: pip install edge-tts gtts")
-    buf = io.BytesIO()
-    tts = gTTS(text=text, lang=lang, slow=False)
-    tts.write_to_fp(buf)
-    mp3_bytes = buf.getvalue()
-    word_timings = _estimate_word_timings(text)
-    return mp3_bytes, word_timings
+class TTSResponse(BaseModel):
+    audio_base64:  str
+    word_timings:  List[Dict[str, Any]]
+    viseme_events: List[Dict[str, Any]] = []
+    sample_rate:   int = 24000
+    format:        str = "pcm"
 
 
+# ── Main endpoint ──────────────────────────────────────────────────────────────
 @router.post("/tts-with-timing", response_model=TTSResponse)
 async def tts_with_timing(payload: TTSRequest):
     """
-    Synthesize text to speech with word-level timing.
-    Returns base64-encoded audio (PCM from Kokoro or MP3 from gTTS fallback) and word timings.
+    Synthesize text to speech with word-level timing and viseme events for lip-sync.
     """
     text = (payload.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Empty text")
 
-    # Try Kokoro first
+    # 1) Kokoro (non-Arabic local model)
     if is_available():
         result = await synthesize_with_timing(
             text=text,
@@ -108,32 +165,48 @@ async def tts_with_timing(payload: TTSRequest):
         )
         if result is not None:
             audio_bytes, word_timings = result
-            audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
             return TTSResponse(
-                audio_base64=audio_b64,
+                audio_base64=base64.b64encode(audio_bytes).decode("ascii"),
                 word_timings=word_timings,
+                viseme_events=[],   # Kokoro doesn't emit visemes
                 sample_rate=24000,
                 format="pcm",
             )
-        # Kokoro returned None (e.g. Arabic text) → use fallback
-        logger.info("Kokoro returned None (e.g. Arabic), using gTTS fallback")
+        logger.info("Kokoro returned None (Arabic text) — using edge-tts")
 
-    # Kokoro not available or returned None: use gTTS fallback
-    logger.info("Using gTTS fallback for TTS (Kokoro not available or skipped)")
+    # 2) edge-tts streaming (real word-boundary timing + viseme events)
     try:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        mp3_bytes, word_timings = await loop.run_in_executor(None, _fallback_tts_sync, text)
+        mp3_bytes, word_timings, viseme_events = await _synthesize_edge_tts(text)
+        logger.info(
+            "edge-tts: %d words, %d viseme events",
+            len(word_timings), len(viseme_events),
+        )
+        return TTSResponse(
+            audio_base64=base64.b64encode(mp3_bytes).decode("ascii"),
+            word_timings=word_timings,
+            viseme_events=viseme_events,
+            sample_rate=24000,
+            format="mp3",
+        )
     except Exception as e:
-        logger.exception("gTTS fallback failed: %s", e)
+        logger.warning("edge-tts failed (%s), falling back to gTTS", e)
+
+    # 3) gTTS last resort (estimated timings, no visemes)
+    try:
+        loop = asyncio.get_event_loop()
+        mp3_bytes = await loop.run_in_executor(None, _synthesize_gtts_sync, text)
+    except Exception as e:
+        logger.exception("gTTS fallback also failed: %s", e)
         raise HTTPException(
             status_code=503,
-            detail=f"TTS unavailable: Kokoro not available and gTTS failed: {e!s}",
+            detail=f"TTS unavailable: all engines failed ({e!s})",
         )
-    audio_b64 = base64.b64encode(mp3_bytes).decode("ascii")
+
+    word_timings = _estimate_word_timings(text)
     return TTSResponse(
-        audio_base64=audio_b64,
+        audio_base64=base64.b64encode(mp3_bytes).decode("ascii"),
         word_timings=word_timings,
+        viseme_events=[],
         sample_rate=24000,
         format="mp3",
     )

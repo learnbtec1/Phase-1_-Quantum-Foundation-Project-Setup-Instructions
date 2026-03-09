@@ -20,6 +20,7 @@ from app.api.v1.endpoints.assessment import router as assessment_router
 from app.api.v1.endpoints.chat import router as chat_router
 from app.api.v1.endpoints.stt import router as stt_router
 from app.api.v1.endpoints.tts_timing import router as tts_timing_router
+from app.api.v1.endpoints.agent_ws import router as agent_ws_router
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ app.include_router(assessment_router)
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(stt_router, prefix="/api/v1")
 app.include_router(tts_timing_router, prefix="/api/v1")
+app.include_router(agent_ws_router)  # mounts at /ws/agent (no prefix — path defined by router)
 
 @app.get("/api/health")
 async def api_health():

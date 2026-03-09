@@ -2,6 +2,9 @@
 @tailwind components;
 @tailwind utilities;
 
+/* [COPILOT_CURSOR_FIX] Prevent browsers hiding cursor over WebGL canvas */
+canvas { cursor: default !important; }
+
 :root {
   --color-primary: #06b6d4;
   --color-background: #030712;

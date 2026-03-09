@@ -31,6 +31,12 @@ interface PlagiarismResult {
   sources: string[];
 }
 
+interface StudentSolutionFile {
+  file_label: string;
+  file_content: string;
+  description?: string;
+}
+
 // --- 1. البيانات الأكاديمية ---
 interface AcademicData {
   [className: string]: {
@@ -56,6 +62,59 @@ const ACADEMIC_DATA: AcademicData = {
   },
 };
 
+// [COPILOT_POLICY_START] — Assessment Policy & Local Plagiarism Engine (no external API)
+const ASSESSMENT_POLICY = {
+  maxPlagiarismPercent: 25,
+  minWordCount: 150,
+  rules: [
+    { id: 'P01', text: 'يجب ألا تتجاوز نسبة الاستلال/التشابه 25%' },
+    { id: 'P02', text: 'يجب أن يحتوي الحل على 150 كلمة كحد أدنى' },
+    { id: 'P03', text: 'جميع معايير الاجتياز (P) يجب تحقيقها قبل الانتقال إلى Merit' },
+    { id: 'P04', text: 'يُشترط توفير دليل وتطبيق عملي واضح في الإجابة' },
+    { id: 'P05', text: 'المحتوى المُولَّد بالكامل بواسطة الذكاء الاصطناعي يُعامَل كاستلال' },
+  ],
+};
+
+function buildNgrams(text: string, n = 3): Set<string> {
+  const words = text.toLowerCase().replace(/[^\w\u0600-\u06ff\s]/g, ' ').split(/\s+/).filter(Boolean);
+  const grams = new Set<string>();
+  for (let i = 0; i <= words.length - n; i++) grams.add(words.slice(i, i + n).join(' '));
+  return grams;
+}
+
+function jaccardSim(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  a.forEach(x => { if (b.has(x)) inter++; });
+  return Math.round((inter / (a.size + b.size - inter)) * 100);
+}
+
+function countWords(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+interface PolicyVerdict { pass: boolean; reasons: string[] }
+function computeCompliance(studentText: string, simPct: number): PolicyVerdict {
+  const reasons: string[] = [];
+  let pass = true;
+  if (simPct > ASSESSMENT_POLICY.maxPlagiarismPercent) {
+    reasons.push(`نسبة التشابه (${simPct}%) تتجاوز الحد المسموح (${ASSESSMENT_POLICY.maxPlagiarismPercent}%)`);
+    pass = false;
+  }
+  const wc = countWords(studentText);
+  if (wc < ASSESSMENT_POLICY.minWordCount) {
+    reasons.push(`عدد الكلمات (${wc}) أقل من الحد الأدنى (${ASSESSMENT_POLICY.minWordCount} كلمة)`);
+    pass = false;
+  }
+  if (pass) reasons.push('✓ المستند يستوفي جميع متطلبات السياسة الأكاديمية');
+  return { pass, reasons };
+}
+
+const DEMO_ASSIGNMENT = `ملخص المهمة: الوحدة 9 — بحث وتخطيط حملة تسويقية\nP1: صف مبادئ التسويق وتطبيقاتها.\nP2: صف طرق البحث الأولية والثانوية.\nM1: حلل العوامل المؤثرة على التسويق في منظمة محددة.\nD1: قيّم فعالية التسويق في تحقيق الأهداف التجارية.`;
+const DEMO_STUDENT = `التسويق هو عملية تحديد احتياجات العملاء وتلبيتها. تشمل مبادئ التسويق الأربعة: المنتج والسعر والمكان والترويج. في شركة آبل تعتمد الاستراتيجية على التميز وبناء العلامة التجارية. طرق البحث الأولية تشمل الاستبيانات والمقابلات، بينما تشمل الثانوية التقارير والكتب. يتأثر التسويق بعوامل خارجية كالاقتصاد والتكنولوجيا. تحقيق الأهداف يتطلب قياس فعالية الحملات وعائد الاستثمار باستمرار. التحليل العميق يكشف الفجوات في الاستراتيجية ويفتح آفاق للتطوير. عند المقارنة بالمنافسين يتضح التفوق التنافسي لشركة آبل في التسويق الرقمي والتجربة الاستثنائية للعملاء.`;
+interface HistoryEntry { subject: string; grade: string; similarity: number; ts: string }
+// [COPILOT_POLICY_END]
+
 // --- المكون الرئيسي (يجب أن يكون Default Export) ---
 export default function AssessmentPage() {
   // State
@@ -64,6 +123,7 @@ export default function AssessmentPage() {
   const [selectedSubject, setSelectedSubject] = useState('');
 
   const [studentAnswer, setStudentAnswer] = useState('');
+  const [studentSolutions, setStudentSolutions] = useState<StudentSolutionFile[]>([]);
   const [assignmentContext, setAssignmentContext] = useState('');
   const [filesCount, setFilesCount] = useState(0);
 
@@ -72,6 +132,19 @@ export default function AssessmentPage() {
   const [result, setResult] = useState<EvaluationResult | null>(null);
   const [plagiarismResult, setPlagiarismResult] = useState<PlagiarismResult | null>(null);
   const [showPlagModal, setShowPlagModal] = useState(false);
+  // [COPILOT_POLICY_STATE_START]
+  const [localSimilarity, setLocalSimilarity] = useState<number | null>(null);
+  const [complianceVerdict, setComplianceVerdict] = useState<PolicyVerdict | null>(null);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [showPolicyPanel, setShowPolicyPanel] = useState(false);
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('nexus-assessment-history');
+      if (stored) setHistory(JSON.parse(stored));
+    } catch { /* empty */ }
+  }, []);
+  // [COPILOT_POLICY_STATE_END]
 
   const getErrorMessage = (error: unknown) => {
     if (error instanceof Error) return error.message;
@@ -161,6 +234,7 @@ export default function AssessmentPage() {
   const handleFileUpload = async (files: File[], isStudent: boolean) => {
     let combined = isStudent ? (studentAnswer || "") : "";
     let count = 0;
+    const parsedStudentFiles: StudentSolutionFile[] = [];
 
     for (const file of files) {
       try {
@@ -173,7 +247,14 @@ export default function AssessmentPage() {
         else continue;
 
         if (isStudent) {
-          combined += `\n\n--- FILE START: ${file.name} ---\n${txt}\n--- FILE END ---\n`;
+          const normalizedText = String(txt || '').trim();
+          if (!normalizedText) continue;
+
+          combined += `\n\n--- FILE START: ${file.name} ---\n${normalizedText}\n--- FILE END ---\n`;
+          parsedStudentFiles.push({
+            file_label: file.name,
+            file_content: normalizedText,
+          });
           count++;
         } else {
           setAssignmentContext(txt);
@@ -184,7 +265,12 @@ export default function AssessmentPage() {
     }
 
     if (isStudent) {
+      if (parsedStudentFiles.length === 0) {
+        alert('لم يتم استخراج نص صالح من الملفات المرفوعة.');
+        return;
+      }
       setStudentAnswer(combined);
+      setStudentSolutions(prev => [...prev, ...parsedStudentFiles]);
       setFilesCount(prev => prev + count);
     }
   };
@@ -193,18 +279,121 @@ export default function AssessmentPage() {
   const handleReset = () => {
     if (confirm("هل أنت متأكد؟ سيتم مسح البيانات للبدء من جديد.")) {
       setStudentAnswer("");
+      setStudentSolutions([]);
       setFilesCount(0);
       setResult(null);
       setPlagiarismResult(null);
+      setLocalSimilarity(null);
+      setComplianceVerdict(null);
     }
+  };
+
+  // [COPILOT_DEMO_CHECK_START]
+  const handleRunDemoCheck = () => {
+    setAssignmentContext(DEMO_ASSIGNMENT);
+    setStudentAnswer(DEMO_STUDENT);
+    setStudentSolutions([{ file_label: 'demo.txt', file_content: DEMO_STUDENT }]);
+    setFilesCount(1);
+    setSelectedSubject('4. خطة التسويق');
+    setSelectedClass('الصف العاشر');
+    setSelectedSection('الفصل الأول');
+    const grams1 = buildNgrams(DEMO_STUDENT);
+    const grams2 = buildNgrams(DEMO_ASSIGNMENT);
+    const sim = jaccardSim(grams1, grams2);
+    setLocalSimilarity(sim);
+    setComplianceVerdict(computeCompliance(DEMO_STUDENT, sim));
+  };
+  // [COPILOT_DEMO_CHECK_END]
+
+  const saveToHistory = (grade: string, sim: number) => {
+    const entry: HistoryEntry = {
+      subject: selectedSubject || '—',
+      grade,
+      similarity: sim,
+      ts: new Date().toLocaleString('ar-SA'),
+    };
+    const next = [entry, ...history].slice(0, 20);
+    setHistory(next);
+    try { localStorage.setItem('nexus-assessment-history', JSON.stringify(next)); } catch { /* empty */ }
+  };
+
+  const normalizeIntegratedResult = (payload: any): EvaluationResult => {
+    const rawCriteria = payload?.criteria || {};
+
+    const criteriaArray: Criterion[] = Object.entries(rawCriteria).map(
+      ([code, data]: [string, any]) => ({
+        code,
+        verdict: data?.achieved ? 'Achieved' : 'Not Achieved',
+        reasons: Array.isArray(data?.reasons)
+          ? data.reasons
+          : (data?.feedback ? [data.feedback] : []),
+        evidence: Array.isArray(data?.evidence)
+          ? data.evidence
+          : (data?.evidence_quote
+            ? [{
+              quote: data.evidence_quote,
+              start: data.start_index ?? 0,
+              end: data.end_index ?? 0,
+            }]
+            : []),
+        recommendations: Array.isArray(data?.recommendations) ? data.recommendations : [],
+      })
+    );
+
+    const achievedCount = criteriaArray.filter((c) => c.verdict === 'Achieved').length;
+    const totalCriteria = criteriaArray.length;
+
+    return {
+      success: true,
+      data: {
+        summary: {
+          totalCriteria,
+          achievedCount,
+          achievedPercent: totalCriteria > 0 ? Math.round((achievedCount / totalCriteria) * 100) : 0,
+        },
+        criteria: criteriaArray,
+        final_grade: payload?.final_grade || 'PENDING',
+      },
+      report: payload?.consolidated_summary || payload?.summary || '',
+    };
   };
 
   // --- API Calls ---
   const handleEvaluate = async () => {
-    if (!selectedSubject || !studentAnswer || !assignmentContext) { alert("يرجى تعبئة البيانات ورفع الملفات."); return; }
+    if (!selectedSubject || !assignmentContext || (!studentAnswer && studentSolutions.length === 0)) {
+      alert("يرجى تعبئة البيانات ورفع الملفات.");
+      return;
+    }
+
     setLoading(true); setResult(null);
+
     try {
       const assignmentBrief = `${selectedSubject}\n${assignmentContext}`;
+
+      if (studentSolutions.length > 0) {
+        const res = await fetch('/api/evaluate-multi-file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            assignment_text: assignmentBrief,
+            solutions: studentSolutions,
+            unit_id: '14',
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || data.error || "Evaluation failed");
+
+        const normalized = data?.data?.criteria ? data.data : data;
+        const evalResult = normalizeIntegratedResult(normalized);
+        setResult(evalResult);
+        const sim = jaccardSim(buildNgrams(studentAnswer || studentSolutions.map(f => f.file_content).join(' ')), buildNgrams(assignmentBrief));
+        setLocalSimilarity(sim);
+        setComplianceVerdict(computeCompliance(studentAnswer || '', sim));
+        saveToHistory(evalResult.data.final_grade || 'PENDING', sim);
+        return;
+      }
+
       const res = await fetch('/api/evaluate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -217,6 +406,10 @@ export default function AssessmentPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || data.error || "Evaluation failed");
       setResult(data);
+      const sim = jaccardSim(buildNgrams(studentAnswer), buildNgrams(`${selectedSubject}\n${assignmentContext}`));
+      setLocalSimilarity(sim);
+      setComplianceVerdict(computeCompliance(studentAnswer, sim));
+      saveToHistory(data?.data?.final_grade || 'PENDING', sim);
     } catch (e: unknown) { alert(getErrorMessage(e)); } finally { setLoading(false); }
   };
 
@@ -234,6 +427,16 @@ export default function AssessmentPage() {
   };
 
   const isEvaluationError = result?.data?.final_grade === 'ERROR';
+
+  // [COPILOT_LOCAL_PLAG_HANDLER]
+  const handleLocalCheck = () => {
+    if (!studentAnswer) return;
+    const grams1 = buildNgrams(studentAnswer);
+    const grams2 = assignmentContext ? buildNgrams(assignmentContext) : new Set<string>();
+    const sim = jaccardSim(grams1, grams2);
+    setLocalSimilarity(sim);
+    setComplianceVerdict(computeCompliance(studentAnswer, sim));
+  };
 
   // --- UI Render ---
   return (
