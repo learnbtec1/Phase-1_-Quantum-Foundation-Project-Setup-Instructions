@@ -743,10 +743,14 @@ export default function AvatarViewer({
   useEffect(() => {
     // حدث الكلام
     const onSpeak = (e: Event) => {
-      const text     = (e as CustomEvent<string>).detail ?? '';
-      const duration = Math.max(1800, Math.min(10000, text.length * 80));
+      const d    = (e as CustomEvent).detail;
+      // detail can be a plain string (legacy Chat.tsx dispatch) or an object with .text (tts.ts)
+      const textStr = typeof d === 'string' ? d : String((d as Record<string, unknown>)?.text ?? '');
+      const duration = Math.max(1800, Math.min(10000, textStr.length * 80));
+      // Trigger a teaching gesture correlated to speech length.
+      // Emotion is NOT set here — it is already dispatched by Chat.tsx via dispatchEmotion()
+      // before the speak, so we must not override it with a generic 'encouraging'.
       resolvedRef.current?.triggerGesture('teaching', 0.7, duration);
-      resolvedRef.current?.setEmotion('encouraging', 0.85, duration);
     };
 
     // نود طفيف عند استقبال رد

@@ -65,8 +65,8 @@ export default function AvatarAgentClient() {
   const [history,    setHistory]    = useState<HistoryEntry[]>([]);
   const [isSitting,  setIsSitting]  = useState(false);
   const [showHistory,setShowHistory]= useState(false);
-  const inputRef   = useRef<HTMLInputElement>(null);
-  const historyRef = useRef<HTMLDivElement>(null);
+  const inputRef       = useRef<HTMLInputElement>(null);
+  const historyRef     = useRef<HTMLDivElement>(null);
 
   // Accumulate session history from transcript + dialogue
   useEffect(() => {
@@ -97,15 +97,25 @@ export default function AvatarAgentClient() {
   const emo = EMOTION_DISPLAY[emotion] ?? EMOTION_DISPLAY.neutral;
 
   // ── Avatar direct-control commands ──────────────────────────────────────
-  const cmdWalk  = () => { emitAvatarCmd('avatar:walk',    { duration: 4 });                    console.log('[AvatarCmd] walk'); };
-  const cmdWave  = () => { emitAvatarCmd('avatar:gesture', { type:'wave', side:'right', duration:3 }); console.log('[AvatarCmd] wave'); };
-  const cmdNod   = () => { emitAvatarCmd('avatar:nod',     { duration: 1.5, intensity: 0.35 }); console.log('[AvatarCmd] nod'); };
-  const cmdThink = () => { emitAvatarCmd('avatar:emotion', { emotion:'thinking' });              console.log('[AvatarCmd] think'); };
-  const cmdSit   = () => {
+  const cmdWalk      = () => { emitAvatarCmd('avatar:walk',    { duration: 4 });                           console.log('[AvatarCmd] walk'); };
+  const cmdWave      = () => { emitAvatarCmd('avatar:gesture', { type:'wave', side:'right', duration:3 }); console.log('[AvatarCmd] wave'); };
+  const cmdNod       = () => { emitAvatarCmd('avatar:nod',     { duration: 1.5, intensity: 0.35 });        console.log('[AvatarCmd] nod'); };
+  const cmdThink     = () => { emitAvatarCmd('avatar:emotion', { emotion:'thinking' });                    console.log('[AvatarCmd] think'); };
+  const cmdSit       = () => {
     setIsSitting(v => !v);
     emitAvatarCmd('avatar:sit', { sitting: !isSitting });
     console.log('[AvatarCmd] sit:', !isSitting);
   };
+  const cmdClap      = () => { emitAvatarCmd('avatar:play',    { clip:'clap' });      console.log('[AvatarCmd] clap'); };
+  const cmdSad       = () => { emitAvatarCmd('avatar:play',    { clip:'sad' });       console.log('[AvatarCmd] sad'); };
+  const cmdAngry     = () => { emitAvatarCmd('avatar:play',    { clip:'angry' });     console.log('[AvatarCmd] angry'); };
+  const cmdCheer     = () => { emitAvatarCmd('avatar:play',    { clip:'cheer' });     console.log('[AvatarCmd] cheer'); };
+  const cmdGoodbye   = () => { emitAvatarCmd('avatar:play',    { clip:'goodbye' });   console.log('[AvatarCmd] goodbye'); };
+  const cmdPoint     = () => { emitAvatarCmd('avatar:play',    { clip:'point' });     console.log('[AvatarCmd] point'); };
+  const cmdSurprise  = () => { emitAvatarCmd('avatar:play',    { clip:'surprise' });  console.log('[AvatarCmd] surprise'); };
+  const cmdPace      = () => { emitAvatarCmd('avatar:play',    { clip:'pace' });      console.log('[AvatarCmd] pace'); };
+  const cmdSitPoint  = () => { emitAvatarCmd('avatar:play',    { clip:'sitPoint' });  console.log('[AvatarCmd] sitPoint'); };
+  const cmdJumpHigh  = () => { emitAvatarCmd('avatar:play',    { clip:'jumpHigh' });  console.log('[AvatarCmd] jumpHigh'); };
   const cmdClear = () => {
     clearHistory();
     setHistory([]);
@@ -194,11 +204,21 @@ export default function AvatarAgentClient() {
         {/* Avatar direct-control buttons */}
         <div className="flex gap-2 text-xs justify-center flex-wrap">
           {([
-            { label: '🚶 مشي',  fn: cmdWalk,  title: 'يمشي في مكانه' },
-            { label: '👋 تحية', fn: cmdWave,  title: 'يلوّح' },
-            { label: '🙏 إيماءة', fn: cmdNod, title: 'إيماءة رأس' },
-            { label: '💭 تفكير', fn: cmdThink,title: 'تعبير تفكير' },
+            { label: '🚶 مشي',       fn: cmdWalk,     title: 'يمشي' },
+            { label: '👋 تحية',      fn: cmdWave,     title: 'يلوّح' },
+            { label: '🙏 إيماءة',    fn: cmdNod,      title: 'إيماءة رأس' },
+            { label: '💭 تفكير',    fn: cmdThink,    title: 'تعبير تفكير' },
             { label: isSitting ? '🧍 وقوف' : '🪑 جلوس', fn: cmdSit, title: isSitting ? 'يقف' : 'يجلس' },
+            { label: '👏 تصفيق',    fn: cmdClap,     title: 'يصفق' },
+            { label: '😢 حزن',      fn: cmdSad,      title: 'حزين' },
+            { label: '😡 غضب',      fn: cmdAngry,    title: 'غاضب' },
+            { label: '🎉 ابتهاج',   fn: cmdCheer,    title: 'يبتهج' },
+            { label: '👋 وداع',     fn: cmdGoodbye,  title: 'يودّع' },
+            { label: '👉 إشارة',    fn: cmdPoint,    title: 'يشير' },
+            { label: '😲 مفاجأة',   fn: cmdSurprise, title: 'مفاجأة' },
+            { label: '📱 مكالمة',   fn: cmdPace,     title: 'يتمشى ويتحدث بالهاتف' },
+            { label: '🪑 إشارة جالس', fn: cmdSitPoint, title: 'جالس ويشير' },
+            { label: '⬆️ قفز عالي', fn: cmdJumpHigh, title: 'يقفز عالياً' },
           ] as { label: string; fn: () => void; title: string }[]).map(({ label, fn, title }) => (
             <button
               key={label}

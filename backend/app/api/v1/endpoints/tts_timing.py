@@ -20,6 +20,7 @@ from typing import Optional, List, Dict, Any, Tuple
 
 from fastapi import APIRouter, HTTPException
 
+from app.core.config import settings
 from app.services.kokoro_tts import is_available, synthesize_with_timing
 
 logger = logging.getLogger(__name__)
@@ -65,20 +66,81 @@ def _word_first_viseme(word: str) -> int:
     return 0  # silence / punctuation
 
 
-# ── edge-tts streaming (real timing) ─────────────────────────────────────────
-EDGE_TTS_ARABIC_MALE = "ar-JO-TaimNeural"
+# ════════════════════════════════════════════════════════════════════════════
+# تعريفات اللهجة الأردنية — Jordanian Arabic Dialect Voice Profile
+# ════════════════════════════════════════════════════════════════════════════
+#
+# الصوت الذكوري  : ar-JO-TaimNeural   → شخصية د. حمزة
+# الصوت الأنثوي : ar-JO-SanaNeural   → شخصية فورينا
+#
+# خصائص اللهجة الأردنية في edge-tts:
+#   • rate  : إزاحة النسبة المئوية عن الإيقاع الطبيعي للصوت  (e.g. '+5%', '-10%')
+#   • pitch : إزاحة طبقة الصوت بوحدة Hz  (e.g. '+4Hz', '-6Hz')
+#
+# جدول المشاعر الستة للمدرّس (tutor emotions) + مشاعر موسّعة:
+#   neutral     — رزين هادئ         → إيقاع طبيعي
+#   friendly    — ودود دافئ          → أسرع قليلاً + طبقة أعلى
+#   thinking    — متأمّل متمهّل       → أبطأ + طبقة أخفض
+#   encouraging — تشجيعي حماسي       → أسرع + طبقة أعلى
+#   strict      — حازم رسمي          → أبطأ + طبقة أخفض
+#   celebrate   — احتفالي فرحاني     → أسرع بكثير + طبقة أعلى بكثير
+# ════════════════════════════════════════════════════════════════════════════
+
+# الأصوات الأردنية — مصدرها الإعدادات (قابلة للتغيير عبر .env)
+EDGE_TTS_ARABIC_MALE   = settings.TTS_ARABIC_VOICE          # ar-JO-TaimNeural
+EDGE_TTS_ARABIC_FEMALE = settings.TTS_ARABIC_VOICE_FEMALE   # ar-JO-SanaNeural
+
+# ── بروفايل اللهجة الأردنية: المشاعر الستة الأساسية + مشاعر موسّعة ──────────
+# rate/pitch مُعايَرة خصيصاً لصوت ar-JO-TaimNeural لأفضل طبيعية في العربية الأردنية
+_EMOTION_PROSODY: Dict[str, Dict[str, str]] = {
+    # ── المشاعر الستة الأساسية للمدرّس (tutor core emotions) ──
+    'neutral':          {'rate': '+0%',  'pitch': '+0Hz'},   # هادئ — النغمة الطبيعية للهجة
+    'friendly':         {'rate': '+4%',  'pitch': '+5Hz'},   # ودود — دفء أردني مميّز
+    'thinking':         {'rate': '-14%', 'pitch': '-5Hz'},   # تفكير — متأمّل، مع توقف طبيعي
+    'encouraging':      {'rate': '+10%', 'pitch': '+7Hz'},   # تشجيع — حماسي وواضح
+    'strict':           {'rate': '-8%',  'pitch': '-8Hz'},   # حازم — سلطة أستاذية هادئة
+    'celebrate':        {'rate': '+18%', 'pitch': '+12Hz'},  # احتفال — فرح أردني تعبيري
+    # ── مشاعر موسّعة (للتوافق مع استجابات LLM الأخرى) ──────
+    'celebrating':      {'rate': '+18%', 'pitch': '+12Hz'},
+    'excited':          {'rate': '+12%', 'pitch': '+9Hz'},
+    'happy':            {'rate': '+6%',  'pitch': '+5Hz'},
+    'proud':            {'rate': '+5%',  'pitch': '+4Hz'},
+    'surprised':        {'rate': '+6%',  'pitch': '+8Hz'},
+    'curious':          {'rate': '+3%',  'pitch': '+3Hz'},
+    'attentive':        {'rate': '+1%',  'pitch': '+2Hz'},
+    'empathetic':       {'rate': '-10%', 'pitch': '-4Hz'},
+    'concerned':        {'rate': '-10%', 'pitch': '-5Hz'},
+    'sad':              {'rate': '-14%', 'pitch': '-9Hz'},
+    'anxious':          {'rate': '-6%',  'pitch': '-3Hz'},
+    'strictevaluation': {'rate': '-8%',  'pitch': '-8Hz'},
+}
+# الإيقاع الافتراضي عند مجيء مشاعر غير معروفة → طبيعي هادئ
+_DEFAULT_PROSODY: Dict[str, str] = {'rate': '+0%', 'pitch': '+0Hz'}
 
 
-async def _synthesize_edge_tts(text: str) -> Tuple[bytes, List[Dict[str, Any]], List[Dict[str, Any]]]:
+async def _synthesize_edge_tts(
+    text: str,
+    rate: str = '+0%',
+    pitch: str = '+0Hz',
+    voice: Optional[str] = None,
+) -> Tuple[bytes, List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Synthesize via edge-tts streaming.
+    Synthesize via edge-tts streaming with optional prosody.
     Returns (mp3_bytes, word_timings, viseme_events).
     word_timings:   [{word, start_time, end_time}]   (times in ms)
     viseme_events:  [{offset_ms, viseme_id}]
     """
     import edge_tts  # already in requirements.txt
 
-    communicate = edge_tts.Communicate(text, EDGE_TTS_ARABIC_MALE)
+    _voice = voice or EDGE_TTS_ARABIC_MALE
+    # boundary='WordBoundary' is REQUIRED to receive per-word timing events.
+    # The default 'SentenceBoundary' only emits sentence-level events and
+    # produces 0 word timings — which breaks lip-sync viseme scheduling.
+    communicate = edge_tts.Communicate(
+        text, _voice,
+        rate=rate, pitch=pitch,
+        boundary='WordBoundary',
+    )
     audio_chunks: List[bytes] = []
     word_bounds: List[Dict[str, Any]] = []
 
@@ -86,7 +148,7 @@ async def _synthesize_edge_tts(text: str) -> Tuple[bytes, List[Dict[str, Any]], 
         ctype = chunk.get("type")
         if ctype == "audio":
             audio_chunks.append(chunk["data"])
-        elif ctype == "WordBoundary":
+        elif ctype in ("WordBoundary", "SentenceBoundary"):
             # offset/duration are in 100-nanosecond units → convert to ms
             offset_ms  = chunk.get("offset",   0) / 10_000
             dur_ms     = chunk.get("duration", 0) / 10_000
@@ -133,9 +195,12 @@ def _estimate_word_timings(text: str, ms_per_word: float = 350.0) -> List[Dict[s
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
 class TTSRequest(BaseModel):
-    text:  str           = Field(..., max_length=5000)
-    voice: Optional[str] = Field(default="am_michael")
-    speed: Optional[float] = Field(default=1.0, ge=0.25, le=4.0)
+    text:    str           = Field(..., max_length=5000)
+    voice:   Optional[str] = Field(default="am_michael")
+    speed:   Optional[float] = Field(default=1.0, ge=0.25, le=4.0)
+    emotion: Optional[str] = Field(default="neutral")
+    pitch:   Optional[str] = Field(default=None)   # explicit Hz override e.g. "+5Hz"
+    ar_voice: Optional[str] = Field(default=None)  # Jordanian voice override: "male" | "female" | full voice name
 
 
 class TTSResponse(BaseModel):
@@ -156,7 +221,24 @@ async def tts_with_timing(payload: TTSRequest):
     if not text:
         raise HTTPException(status_code=400, detail="Empty text")
 
-    # 1) Kokoro (non-Arabic local model)
+    # Resolve prosody from emotion (or use explicit pitch override)
+    prosody = _EMOTION_PROSODY.get(
+        (payload.emotion or 'neutral').lower(),
+        _DEFAULT_PROSODY,
+    )
+    tts_rate  = prosody['rate']
+    tts_pitch = payload.pitch if payload.pitch else prosody['pitch']
+
+    # Resolve Jordanian Arabic voice
+    _ar_voice_req = (payload.ar_voice or '').strip().lower()
+    if _ar_voice_req == 'female':
+        ar_voice_name = EDGE_TTS_ARABIC_FEMALE
+    elif _ar_voice_req in ('male', ''):
+        ar_voice_name = EDGE_TTS_ARABIC_MALE
+    else:
+        ar_voice_name = payload.ar_voice  # accept full voice name as-is
+
+    # 1) Kokoro (non-Arabic local model — speed param only, prosody not supported)
     if is_available():
         result = await synthesize_with_timing(
             text=text,
@@ -174,9 +256,11 @@ async def tts_with_timing(payload: TTSRequest):
             )
         logger.info("Kokoro returned None (Arabic text) — using edge-tts")
 
-    # 2) edge-tts streaming (real word-boundary timing + viseme events)
+    # 2) edge-tts streaming (real word-boundary timing + viseme events + prosody)
     try:
-        mp3_bytes, word_timings, viseme_events = await _synthesize_edge_tts(text)
+        mp3_bytes, word_timings, viseme_events = await _synthesize_edge_tts(
+            text, rate=tts_rate, pitch=tts_pitch, voice=ar_voice_name
+        )
         logger.info(
             "edge-tts: %d words, %d viseme events",
             len(word_timings), len(viseme_events),

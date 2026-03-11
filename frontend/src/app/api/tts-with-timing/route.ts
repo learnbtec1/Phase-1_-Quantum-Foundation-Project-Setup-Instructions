@@ -33,8 +33,12 @@ export async function POST(req: NextRequest) {
         headers: { "Content-Type": "application/json", "X-Request-ID": reqId },
         body: JSON.stringify({
           text,
-          voice: payload?.voice ?? "af_sarah",
-          speed: payload?.speed ?? 1,
+          voice:    payload?.voice ?? "af_sarah",
+          speed:    payload?.speed ?? 1,
+          emotion:  payload?.emotion ?? "neutral",
+          ...(payload?.pitch    ? { pitch:    payload.pitch }    : {}),
+          // Forward Jordanian voice selector: "male" | "female" | full voice name
+          ...(payload?.ar_voice ? { ar_voice: payload.ar_voice } : {}),
         }),
         signal: controller.signal,
       });

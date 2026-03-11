@@ -9,23 +9,55 @@ import { azureVisemeToWeights } from '@/ai/lipsync/azureViseme';
 export type { WordTiming };
 
 export interface SpeakOptions {
-  emotion?:  string;   // Phase 8: maps to TTS speed for prosody
+  emotion?:  string;   // Phase 4: maps to edge-tts prosody via backend
   rate?:     number;   // Hybrid Persona Kernel: direct speed override (1.0 = normal)
+  pitch?:    string;   // Phase 4: explicit Hz offset e.g. "+5Hz" (overrides emotion default)
+  /** Override Jordanian Arabic voice: "male" (ar-JO-TaimNeural) | "female" (ar-JO-SanaNeural) */
+  arVoice?:  'male' | 'female';
   onStart?: () => void;
   onEnd?:   () => void;
 }
 
-// Phase 8: Emotion → speech-rate mapping (Kokoro `speed` param)
+/** Detect Arabic unicode block (U+0600–U+06FF) */
+const _ARABIC_RE = /[\u0600-\u06FF]/;
+
+// ══════════════════════════════════════════════════════════════════════════════
+// تعريفات اللهجة الأردنية — Jordanian Arabic Dialect Profile
+// ══════════════════════════════════════════════════════════════════════════════
+//
+//  الصوت الذكوري  : ar-JO-TaimNeural  →  شخصية د. حمزة  (TTS_ARABIC_VOICE)
+//  الصوت الأنثوي  : ar-JO-SanaNeural  →  شخصية فورينا   (TTS_ARABIC_VOICE_FEMALE)
+//
+//  المشاعر الستة الأساسية للمدرّس مع سرعتها المناسبة للعربية الأردنية:
+//    neutral     →  هادئ رزين         ×0.93  (أهدأ قليلاً للوضوح)
+//    friendly    →  ودود دافئ         ×0.97  (طبيعي ومرحّب)
+//    thinking    →  متأمّل متمهّل      ×0.82  (توقف واضح)
+//    encouraging →  تشجيعي حماسي     ×1.07  (حيوي ورافع للمعنويات)
+//    strict      →  حازم رسمي         ×0.88  (سلطة هادئة)
+//    celebrate   →  احتفالي فرحاني    ×1.14  (فرح أردني تعبيري)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** Kokoro speed multiplier per tutor emotion — Arabic Jordanian dialect tuned */
 const EMOTION_SPEED: Record<string, number> = {
-  celebration: 1.10,
+  // ── المشاعر الستة الأساسية للمدرّس ──────────────────────────────────────
+  neutral:     0.93,   // هادئ رزين
+  friendly:    0.97,   // ودود دافئ
+  thinking:    0.82,   // متأمّل متمهّل
+  encouraging: 1.07,   // تشجيعي حماسي
+  strict:      0.88,   // حازم رسمي
+  celebrate:   1.14,   // احتفالي فرحاني
+  // ── مشاعر موسّعة (توافق استجابات LLM الأخرى) ───────────────────────────
+  celebrating: 1.14,
   excited:     1.10,
-  happy:       1.05,
-  encouraging: 1.02,
-  friendly:    0.98,
-  neutral:     0.97,
-  thinking:    0.90,
-  sad:         0.88,
-  empathy:     0.92,
+  happy:       1.04,
+  proud:       1.02,
+  surprised:   1.05,
+  curious:     0.99,
+  attentive:   0.95,
+  empathetic:  0.85,
+  concerned:   0.85,
+  sad:         0.80,
+  anxious:     0.91,
 };
 
 let currentAudio: HTMLAudioElement | null = null;
@@ -109,7 +141,12 @@ export async function speakWithTTS(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text,
-        speed: options?.rate ?? EMOTION_SPEED[options?.emotion ?? ''] ?? 0.97,
+        speed:   options?.rate ?? EMOTION_SPEED[options?.emotion ?? ''] ?? 0.97,
+        emotion: options?.emotion ?? 'neutral',
+        ...(options?.pitch   ? { pitch:    options.pitch }                   : {}),
+        // Auto-select Jordanian Arabic voice when text contains Arabic script.
+        // Caller can override with arVoice: 'female' for the فورينا character.
+        ar_voice: options?.arVoice ?? (_ARABIC_RE.test(text) ? 'male' : undefined),
       }),
     });
 
@@ -216,7 +253,19 @@ export async function speakWithTTS(
     await audio.play();
     return true;
   } catch {
+    // audio.play() may reject with NotAllowedError (autoplay policy) or
+    // any of the earlier awaits may throw. In every case we must dispatch
+    // avatar:speak:end so the UI never gets stuck with a permanently-open
+    // mouth after avatar:speak:start was already dispatched.
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+    }
+    options?.onEnd?.();
     if (mySid === _ttsSessionId) {
+      // Revoke the blob URL that was allocated before play() was called.
+      if (currentUrl) {
+        try { URL.revokeObjectURL(currentUrl); } catch { /* ignore */ }
+      }
       currentAudio = null;
       currentUrl   = null;
     }

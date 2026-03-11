@@ -1,0 +1,67 @@
+
+> nexus-platform-v3@3.0.0 build
+> next build --webpack
+
+▲ Next.js 16.1.6 (webpack)
+- Environments: .env.local
+- Experiments (use with caution):
+  · cssChunking: "loose"
+
+  Creating an optimized production build ...
+✓ Compiled successfully in 3.0s
+  Running TypeScript ...
+  Collecting page data using 15 workers ...
+  Generating static pages using 15 workers (0/39) ...
+  Generating static pages using 15 workers (9/39) 
+  Generating static pages using 15 workers (19/39) 
+  Generating static pages using 15 workers (29/39) 
+✓ Generating static pages using 15 workers (39/39) in 523.8ms
+  Finalizing page optimization ...
+  Collecting build traces ...
+
+Route (app)
+┌ ○ /
+├ ○ /_not-found
+├ ○ /ai-teacher
+├ ○ /ai-tutor
+├ ƒ /api/ai
+├ ƒ /api/ai/ingest
+├ ƒ /api/ai/query
+├ ƒ /api/avatar-config
+├ ƒ /api/chat
+├ ƒ /api/evaluate
+├ ƒ /api/evaluate-multi-file
+├ ƒ /api/health
+├ ƒ /api/openai-grade
+├ ƒ /api/plagiarism
+├ ƒ /api/stt
+├ ƒ /api/test
+├ ƒ /api/tts
+├ ƒ /api/tts-with-timing
+├ ƒ /api/tutor/chat
+├ ƒ /api/voice-arabic
+├ ○ /assessment
+├ ○ /assessments
+├ ○ /auth/login
+├ ○ /avatar-agent
+├ ○ /competition
+├ ○ /competition-dashboard
+├ ○ /competition-login
+├ ○ /dashboard
+├ ○ /dashboard-2d
+├ ○ /evaluate
+├ ○ /farm
+├ ○ /login
+├ ○ /plagiarism
+├ ○ /simulation
+├ ○ /strict-evaluation
+├ ○ /student
+├ ○ /unit-1-agriculture
+└ ○ /vr-experience
+
+
+ƒ Proxy (Middleware)
+
+○  (Static)   prerendered as static content
+ƒ  (Dynamic)  server-rendered on demand
+

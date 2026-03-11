@@ -112,8 +112,8 @@ def _parse_reply(text: str) -> dict:
 async def agent_ws(websocket: WebSocket):
     """
     Real-time avatar agent:
-      audio → Whisper STT → Dr. Hamza LLM → Kokoro TTS → avatar
-      text  →               Dr. Hamza LLM → Kokoro TTS → avatar
+      audio → Whisper STT → Dr. Hamza LLM → tts_arabic TTS → avatar
+      text  →               Dr. Hamza LLM → tts_arabic TTS → avatar
     """
     await websocket.accept()
     logger.info("Agent WebSocket connected: %s", websocket.client)
@@ -176,16 +176,17 @@ async def agent_ws(websocket: WebSocket):
         if len(history) > 6:
             history[:] = history[-6:]
 
-        # Try Kokoro TTS
-        audio_b64 = ""
-        sample_rate = 24000
+        # ── tts_arabic local Arabic TTS ─────────────────────────────────────
+        # Returns raw int16 PCM bytes at 22050 Hz.  Frontend's playPCMAudio()
+        # wraps them into a WAV Blob via pcmToWavBlob — no ffmpeg needed.
+        audio_b64  = ""
+        audio_fmt  = "pcm"
         try:
-            from app.services.kokoro_tts import synthesize_with_timing, is_available as tts_available
-            if tts_available() and parsed['dialogue']:
-                result = await synthesize_with_timing(parsed['dialogue'])
-                if result:
-                    audio_bytes, _ = result
-                    audio_b64 = base64.b64encode(audio_bytes).decode('ascii')
+            from app.services.lahajati_tts import synthesize as tts_synthesize
+            if parsed['dialogue']:
+                pcm_bytes = await tts_synthesize(parsed['dialogue'])
+                if pcm_bytes:
+                    audio_b64 = base64.b64encode(pcm_bytes).decode('ascii')
         except Exception as e:
             logger.warning("[AgentWS] TTS error (will send tts_unavailable): %s", e)
 
@@ -198,7 +199,8 @@ async def agent_ws(websocket: WebSocket):
                 "action":       parsed['action'],
                 "emotion":      parsed['emotion'],
                 "audio_base64": audio_b64,
-                "sample_rate":  sample_rate,
+                "audio_format": audio_fmt,   # "pcm" — frontend's pcmToWavBlob wraps it
+                "sample_rate":  22050,        # tts_arabic fixed output rate
             })
         else:
             await send({

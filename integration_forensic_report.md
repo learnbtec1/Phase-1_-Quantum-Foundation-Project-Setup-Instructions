@@ -1,7 +1,20 @@
 # Integration Forensic Report — Dr. Hamza Digital Human v2
-**Branch**: `integration/human-v2`  
-**Date**: 2025-07-29  
+**Branch**: `integration/human-v2` → `feature/human-avatar`
+**Date**: 2025-07-29 (updated)
 **TypeScript Errors**: 0 ✅
+
+---
+
+## Latest Update — AvatarAgentClient Enhanced UI + sit/stand Support
+
+### Changes in this pass
+| File | Change |
+|------|--------|
+| `AvatarAgentClient.tsx` | Full HUD rewrite: command bar (Walk/Wave/Nod/Think/Sit), persona badge, scaffolding indicator, session history drawer, quick prompt chips, emotion badge with 20-emotion colour map |
+| `AvatarCanvas.tsx` | Added `avatar:sit` / `avatar:stand` event handlers: spine tilt + head pitch for sit posture, reset for stand; BRAIN logs |
+| `integration_forensic_report.md` | This update |
+
+### TypeScript re-verify: ✅ 0 errors
 
 ---
 

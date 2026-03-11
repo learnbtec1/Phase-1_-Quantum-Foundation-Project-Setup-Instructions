@@ -4,6 +4,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import styles from './Chat.module.css';
 import { inferResponsePlan } from '@/ai/avatar/brain';
 import { reactToUserInput, dispatchGestureFromActionText, dispatchEmotion } from '@/ai/avatar/actions';
+import { speakWithTTS } from '@/ai/io/tts';
 
 export interface Message {
   id: string;
@@ -14,6 +15,7 @@ export interface Message {
 export default function Chat() {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const spokenAssistantIdsRef = useRef<Set<string>>(new Set());
+  const historyRef = useRef<Array<{ user: string; assistant: string }>>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -64,7 +66,7 @@ export default function Chat() {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: text, history: historyRef.current }),
       });
       const data = await res.json();
 
@@ -92,6 +94,12 @@ export default function Chat() {
         window.dispatchEvent(new CustomEvent('chat:received'));
         if (!spokenAssistantIdsRef.current.has(assistantMessage.id)) {
           spokenAssistantIdsRef.current.add(assistantMessage.id);
+
+          // Update short-term history (Phase 6 — last 20 turns)
+          historyRef.current = [
+            ...historyRef.current.slice(-19),
+            { user: text, assistant: cleanDialogue },
+          ];
 
           // 1. Emotion
           dispatchEmotion(parsedEmotion);
@@ -154,10 +162,12 @@ export default function Chat() {
             }
           }
 
-          // 7. Speak — dispatch clean dialogue only
-          console.log('%c[Phase3] 📢 avatar:speak', 'color:lime;font-weight:bold',
-            '| emotion:', parsedEmotion, '| text:', cleanDialogue.slice(0, 80));
-          window.dispatchEvent(new CustomEvent('avatar:speak', { detail: cleanDialogue }));
+          // 7. Speak — call TTS directly with emotion + rate for full prosody (Phase 4)
+          console.log('%c[Phase4] 📢 speakWithTTS', 'color:lime;font-weight:bold',
+            '| emotion:', parsedEmotion, '| rate:', data.rate, '| text:', cleanDialogue.slice(0, 80));
+          const rateOverride = typeof data.rate === 'number' ? (data.rate as number) : undefined;
+          // Dr. Hamza always responds in Arabic (ar-JO-TaimNeural Jordanian dialect)
+          speakWithTTS(cleanDialogue, { emotion: parsedEmotion, rate: rateOverride, arVoice: 'male' });
         }
       }
     } catch {

@@ -99,6 +99,7 @@ export function useVAD({
 
   const isSupported =
     typeof navigator !== 'undefined' &&
+    typeof window !== 'undefined' &&
     !!navigator.mediaDevices?.getUserMedia &&
     !!window.MediaRecorder;
 

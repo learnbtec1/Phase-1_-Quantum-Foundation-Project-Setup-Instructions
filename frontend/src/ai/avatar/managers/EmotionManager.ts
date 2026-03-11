@@ -21,7 +21,14 @@ export type AvatarEmotion =
   | 'normal' | 'angry' | 'sad' | 'happy' | 'excited'
   | 'blush' | 'surprised' | 'sleepy' | 'thinking' | 'relax' | 'goodbye'
   // aliases from the rest of the codebase
-  | 'neutral' | 'celebration' | 'encouraging' | 'strictEvaluation' | 'friendly';
+  | 'neutral' | 'celebration' | 'encouraging' | 'strictEvaluation' | 'friendly'
+  // situational / new animations
+  | 'sitting_idle' | 'sitting_talking' | 'pacing' | 'cheering'
+  | 'idle1' | 'idle2' | 'idle3' | 'idle4'
+  | 'look_around' | 'jump_high'
+  // full 30-file animation library
+  | 'waving' | 'typing' | 'pointing' | 'beckoning' | 'agreeing' | 'acknowledging'
+  | 'sitting_talking_2' | 'look_around_2';
 
 interface EmotionConfig {
   /** VRM expression preset name  */
@@ -59,6 +66,26 @@ export const EMOTION_CONFIG: Record<string, EmotionConfig> = {
   encouraging:   { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 0.7, vrmaUrl: '/models/animations/Relax.vrma',     loop: false, blendSpeed: 4.0 },
   strictEvaluation: { expression: VRMExpressionPresetName.Angry,  expressionIntensity: 0.5, vrmaUrl: '/models/animations/Thinking.vrma', loop: false, blendSpeed: 5.0 },
   friendly:      { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 0.6, vrmaUrl: '/models/animations/Clapping.vrma',  loop: false, blendSpeed: 4.0 },
+  // ── situational / new animations ─────────────────────────────────────────
+  sitting_idle:    { expression: VRMExpressionPresetName.Relaxed,   expressionIntensity: 0.5, vrmaUrl: '/models/animations/sitting.vrma',                        loop: true,  blendSpeed: 2.0 },
+  sitting_talking: { expression: VRMExpressionPresetName.Neutral,   expressionIntensity: 0.3, vrmaUrl: '/models/animations/SittingTalking.vrma',                loop: true,  blendSpeed: 3.0 },
+  pacing:          { expression: VRMExpressionPresetName.Neutral,   expressionIntensity: 0.4, vrmaUrl: '/models/animations/Pacing And Talking On A Phone.vrma', loop: true,  blendSpeed: 2.0 },
+  cheering:        { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 1.0, vrmaUrl: '/models/animations/Standing Cheering.vrma',             loop: false, blendSpeed: 5.0 },
+  idle1:           { expression: VRMExpressionPresetName.Neutral,   expressionIntensity: 0.2, vrmaUrl: '/models/animations/Idle1.vrma',                          loop: true,  blendSpeed: 2.5 },
+  idle2:           { expression: VRMExpressionPresetName.Neutral,   expressionIntensity: 0.2, vrmaUrl: '/models/animations/Idle2.vrma',                          loop: true,  blendSpeed: 2.5 },
+  idle3:           { expression: VRMExpressionPresetName.Relaxed,   expressionIntensity: 0.3, vrmaUrl: '/models/animations/Idle3.vrma',                          loop: true,  blendSpeed: 2.5 },
+  idle4:           { expression: VRMExpressionPresetName.Relaxed,   expressionIntensity: 0.3, vrmaUrl: '/models/animations/Idle4.vrma',                          loop: true,  blendSpeed: 2.5 },
+  look_around:     { expression: VRMExpressionPresetName.Surprised, expressionIntensity: 0.4, vrmaUrl: '/models/animations/LookAround.vrma',                    loop: false, blendSpeed: 4.0 },
+  jump_high:       { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 0.9, vrmaUrl: '/models/animations/JumpHigh.vrma',                       loop: false, blendSpeed: 7.0 },
+  // ── full 30-file animation library ────────────────────────────────────────
+  waving:              { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 0.7, vrmaUrl: '/models/animations/Waving.vrma',                       loop: false, blendSpeed: 4.0 },
+  typing:              { expression: VRMExpressionPresetName.Neutral,   expressionIntensity: 0.2, vrmaUrl: '/models/animations/Typing.vrma',                       loop: true,  blendSpeed: 2.0 },
+  pointing:            { expression: VRMExpressionPresetName.Neutral,   expressionIntensity: 0.3, vrmaUrl: '/models/animations/Pointing.vrma',                     loop: false, blendSpeed: 3.5 },
+  beckoning:           { expression: VRMExpressionPresetName.Happy,     expressionIntensity: 0.5, vrmaUrl: '/models/animations/Beckoning.vrma',                    loop: false, blendSpeed: 3.0 },
+  agreeing:            { expression: VRMExpressionPresetName.Neutral,   expressionIntensity: 0.3, vrmaUrl: '/models/animations/Agreeing.vrma',                     loop: false, blendSpeed: 4.0 },
+  acknowledging:       { expression: VRMExpressionPresetName.Neutral,   expressionIntensity: 0.3, vrmaUrl: '/models/animations/Acknowledging.vrma',                loop: false, blendSpeed: 4.0 },
+  sitting_talking_2:   { expression: VRMExpressionPresetName.Neutral,   expressionIntensity: 0.3, vrmaUrl: '/models/animations/Sitting  and talking.vrma',         loop: true,  blendSpeed: 3.0 },
+  look_around_2:       { expression: VRMExpressionPresetName.Surprised, expressionIntensity: 0.3, vrmaUrl: '/models/animations/LookAround2.vrma',                  loop: false, blendSpeed: 4.0 },
 };
 
 /**
@@ -75,7 +102,27 @@ export const EMOTION_ANIMATION_MAP = {
   sleepy:     { animation: 'Sleepy',    expression: 'relaxed'  },
   thinking:   { animation: 'Thinking',  expression: 'neutral'  },
   relax:      { animation: 'Relax',     expression: 'relaxed'  },
-  goodbye:    { animation: 'Goodbye',   expression: 'neutral'  },
+  goodbye:         { animation: 'Goodbye',                       expression: 'neutral'   },
+  // ── situational / new ────────────────────────────────────────────────────
+  sitting_idle:    { animation: 'sitting',                        expression: 'relaxed'   },
+  sitting_talking: { animation: 'SittingTalking',                 expression: 'neutral'   },
+  pacing:          { animation: 'Pacing And Talking On A Phone',  expression: 'neutral'   },
+  cheering:        { animation: 'Standing Cheering',              expression: 'happy'     },
+  idle1:           { animation: 'Idle1',                          expression: 'neutral'   },
+  idle2:           { animation: 'Idle2',                          expression: 'neutral'   },
+  idle3:           { animation: 'Idle3',                          expression: 'relaxed'   },
+  idle4:           { animation: 'Idle4',                          expression: 'relaxed'   },
+  look_around:     { animation: 'LookAround',                     expression: 'surprised' },
+  jump_high:       { animation: 'JumpHigh',                       expression: 'happy'     },
+  // ── full 30-file animation library ────────────────────────────────────────
+  waving:              { animation: 'Waving',                     expression: 'happy'     },
+  typing:              { animation: 'Typing',                     expression: 'neutral'   },
+  pointing:            { animation: 'Pointing',                   expression: 'neutral'   },
+  beckoning:           { animation: 'Beckoning',                  expression: 'happy'     },
+  agreeing:            { animation: 'Agreeing',                   expression: 'neutral'   },
+  acknowledging:       { animation: 'Acknowledging',              expression: 'neutral'   },
+  sitting_talking_2:   { animation: 'Sitting  and talking',       expression: 'neutral'   },
+  look_around_2:       { animation: 'LookAround2',                expression: 'neutral'   },
 } as const;
 
 // ── Emotion → VRM expression preset weights (for smooth blending) ────────────
@@ -96,6 +143,26 @@ const EMOTION_EXPR_WEIGHTS: Record<string, Partial<Record<VRMExpressionPresetNam
   encouraging:      { [VRMExpressionPresetName.Happy]:     0.70 },
   strictEvaluation: { [VRMExpressionPresetName.Angry]:     0.50, [VRMExpressionPresetName.Neutral]: 0.20 },
   friendly:         { [VRMExpressionPresetName.Happy]:     0.65 },
+  // ── situational / new ────────────────────────────────────────────────────
+  sitting_idle:     { [VRMExpressionPresetName.Relaxed]:   0.50 },
+  sitting_talking:  { [VRMExpressionPresetName.Neutral]:   0.30 },
+  pacing:           { [VRMExpressionPresetName.Neutral]:   0.40 },
+  cheering:         { [VRMExpressionPresetName.Happy]:     1.00 },
+  idle1:            { [VRMExpressionPresetName.Neutral]:   0.20 },
+  idle2:            { [VRMExpressionPresetName.Neutral]:   0.20 },
+  idle3:            { [VRMExpressionPresetName.Relaxed]:   0.30 },
+  idle4:            { [VRMExpressionPresetName.Relaxed]:   0.30 },
+  look_around:      { [VRMExpressionPresetName.Surprised]: 0.40 },
+  jump_high:        { [VRMExpressionPresetName.Happy]:     0.90 },
+  // ── full 30-file animation library ────────────────────────────────────────
+  waving:           { [VRMExpressionPresetName.Happy]:     0.70 },
+  typing:           { [VRMExpressionPresetName.Neutral]:   0.20 },
+  pointing:         { [VRMExpressionPresetName.Neutral]:   0.30 },
+  beckoning:        { [VRMExpressionPresetName.Happy]:     0.50 },
+  agreeing:         { [VRMExpressionPresetName.Neutral]:   0.30 },
+  acknowledging:    { [VRMExpressionPresetName.Neutral]:   0.30 },
+  sitting_talking_2:{ [VRMExpressionPresetName.Neutral]:   0.30 },
+  look_around_2:    { [VRMExpressionPresetName.Surprised]: 0.30 },
 };
 
 const ALL_EXPR_PRESETS = [
@@ -124,6 +191,21 @@ export class EmotionManager {
   );
   /** Blend speed: controls how fast expressions change (higher = faster) */
   private _blendSpeed = 4.5;
+
+  // ── Idle cycling ─────────────────────────────────────────────────────────
+  /** Emotions that engage random idle-cycling through idle1–4 */
+  private readonly _IDLE_TRIGGER_SET = new Set([
+    'neutral', 'normal', 'relax', 'idle1', 'idle2', 'idle3', 'idle4',
+  ]);
+  /** Pool of looping idle animations to cycle through at random intervals */
+  private readonly _IDLE_POOL: AvatarEmotion[] = ['idle1', 'idle2', 'idle3', 'idle4'];
+  private _idleCycling     = false;
+  private _idleElapsed     = 0;   // seconds since last idle switch
+  private _idleTarget      = 7;   // seconds until next switch (re-randomised)
+  private _idleIntervalMin = 5;   // minimum seconds between switches
+  private _idleIntervalMax = 10;  // maximum seconds between switches
+  // ─────────────────────────────────────────────────────────────────────────
+
   private _microExprs: Map<string, { weight: number; target: number; speed: number }> = new Map([
     ['eyebrowRaise', { weight: 0, target: 0, speed: 8 }],
     ['squint',       { weight: 0, target: 0, speed: 6 }],
@@ -139,9 +221,11 @@ export class EmotionManager {
 
   setVRM(vrm: VRM, mixer?: THREE.AnimationMixer) {
     this._vrm = vrm;
-    // Use the provided external mixer — or create one only if none was given
-    // NOTE: do NOT auto-start Idle loop here; that would override procedural gestures
     this._mixer = mixer ?? new THREE.AnimationMixer(vrm.scene);
+    // Guarantee the avatar is never frozen: start the idle loop as soon as VRM is ready.
+    // _playVRMA is async but safe to fire-and-forget here.
+    const idleCfg = EMOTION_CONFIG['neutral'];
+    void this._playVRMA(idleCfg.vrmaUrl, true);
   }
 
   get currentEmotion(): string {
@@ -159,11 +243,36 @@ export class EmotionManager {
     // ── face expression: set target (blended in update loop) ────────────────
     this._exprTarget = EMOTION_EXPR_WEIGHTS[emotion] ?? EMOTION_EXPR_WEIGHTS['neutral'] ?? {};
 
+    // ── idle cycling: activate when entering a neutral / idle state ──────────
+    const wasIdling = this._idleCycling;
+    this._idleCycling = this._IDLE_TRIGGER_SET.has(emotion);
+    if (this._idleCycling && !wasIdling) {
+      // Entering idle — start a fresh random cycle timer
+      this._idleElapsed = 0;
+      this._idleTarget  = this._idleIntervalMin +
+        Math.random() * (this._idleIntervalMax - this._idleIntervalMin);
+    }
+
     // ── body animation ────────────────────────────────────────────────────────
-    this._playVRMA(cfg.vrmaUrl, false, () => {
-      // After one-shot finishes: fade back to neutral target
-      this._exprTarget = EMOTION_EXPR_WEIGHTS['neutral'] ?? {};
-    });
+    if (cfg.loop) {
+      // Looping animations: play indefinitely (no onFinished callback needed)
+      void this._playVRMA(cfg.vrmaUrl, true);
+    } else {
+      // One-shot animations: fade back to neutral expression when done
+      this._playVRMA(cfg.vrmaUrl, false, () => {
+        this._exprTarget = EMOTION_EXPR_WEIGHTS['neutral'] ?? {};
+      });
+    }
+  }
+
+  /**
+   * Configure the idle animation cycling interval.
+   * @param minSec Minimum seconds between idle switches (default 5)
+   * @param maxSec Maximum seconds between idle switches (default 10)
+   */
+  setIdleInterval(minSec: number, maxSec: number): void {
+    this._idleIntervalMin = minSec;
+    this._idleIntervalMax = maxSec;
   }
 
   /**
@@ -173,6 +282,29 @@ export class EmotionManager {
   update(delta: number) {
     this._mixer?.update(delta);
     this._blendExpressions(delta);
+    this._updateIdleCycle(delta);
+  }
+
+  /** Randomly rotate through idle1–4 while the avatar is in an idle state. */
+  private _updateIdleCycle(delta: number): void {
+    if (!this._idleCycling) return;
+    this._idleElapsed += delta;
+    if (this._idleElapsed < this._idleTarget) return;
+
+    // Time to switch — reset timer with a new random interval
+    this._idleElapsed = 0;
+    this._idleTarget  = this._idleIntervalMin +
+      Math.random() * (this._idleIntervalMax - this._idleIntervalMin);
+
+    // Pick a random idle different from the one currently playing
+    const pool = this._IDLE_POOL.filter(e => e !== this._currentEmotion);
+    const next  = pool[Math.floor(Math.random() * pool.length)] ?? 'idle1';
+    const cfg   = EMOTION_CONFIG[next];
+    if (!cfg) return;
+
+    this._currentEmotion = next;
+    this._exprTarget     = EMOTION_EXPR_WEIGHTS[next] ?? {};
+    void this._playVRMA(cfg.vrmaUrl, true);
   }
 
   private _blendExpressions(delta: number) {
@@ -274,11 +406,6 @@ export class EmotionManager {
   private async _playVRMA(url: string, loop: boolean, onFinished?: () => void) {
     if (!this._vrm || !this._mixer) return;
 
-    // Stop current action
-    if (this._currentAction) {
-      this._currentAction.fadeOut(0.3);
-    }
-
     let clip = this._clipCache.get(url);
 
     if (!clip) {
@@ -301,20 +428,37 @@ export class EmotionManager {
 
     if (!clip || !this._mixer) return;
 
+    const previousAction = this._currentAction;
     const action = this._mixer.clipAction(clip);
+    const FADE_DURATION = 0.5; // seconds — fluid crossfade window
+
     action.reset();
     action.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, loop ? Infinity : 1);
     action.clampWhenFinished = !loop;
-    action.fadeIn(0.3);
+
+    if (previousAction && previousAction !== action) {
+      // crossFadeFrom keeps BOTH actions weighted continuously — no skeleton gap.
+      action.crossFadeFrom(previousAction, FADE_DURATION, true);
+    } else {
+      // First action ever: fade in from zero weight.
+      action.fadeIn(FADE_DURATION);
+    }
+
     action.play();
     this._currentAction = action;
 
-    if (!loop && onFinished) {
-      const onFinish = () => {
-        this._mixer?.removeEventListener('finished', onFinish);
-        onFinished();
+    if (!loop) {
+      const onFinish = (_e: { type: string; action: THREE.AnimationAction }) => {
+        if (_e.action !== action) return; // guard: only react to OUR action
+        this._mixer?.removeEventListener('finished', onFinish as never);
+        onFinished?.();
+        // CRITICAL: return to idle loop so the avatar never freezes after a one-shot.
+        const idleUrl = EMOTION_CONFIG['neutral'].vrmaUrl;
+        if (url !== idleUrl) {
+          void this._playVRMA(idleUrl, true);
+        }
       };
-      this._mixer.addEventListener('finished', onFinish);
+      this._mixer.addEventListener('finished', onFinish as never);
     }
   }
 

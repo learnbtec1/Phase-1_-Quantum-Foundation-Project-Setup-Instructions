@@ -45,7 +45,7 @@ export interface AgentAgentOptions {
   wsUrl?:         string;
   /** Attempt automatic reconnect after disconnect. Default: true */
   autoReconnect?: boolean;
-  /** BCP-47 language tag for TTS / VAD. Default: 'ar-SA' */
+  /** BCP-47 language tag for TTS / VAD. Default: 'ar-JO' (Jordanian) */
   lang?:          string;
 }
 
@@ -88,6 +88,46 @@ function emitListeningEvent(active: boolean): void {
 
 /** Detect Arabic script in a string. */
 const hasArabic = (s: string): boolean => /[\u0600-\u06FF]/.test(s);
+
+/** Convert ArrayBuffer audio bytes to Base64 using browser btoa. */
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+
+  return btoa(binary);
+}
+
+/** Convert Blob audio to Base64 using FileReader Data URL parsing. */
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error('Failed to read audio blob'));
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== 'string') {
+        reject(new Error('Unexpected FileReader result while converting audio blob'));
+        return;
+      }
+
+      const commaIdx = result.indexOf(',');
+      resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** Accept Blob or ArrayBuffer and always return Base64 audio data. */
+async function audioInputToBase64(input: Blob | ArrayBuffer): Promise<string> {
+  if (input instanceof Blob) {
+    return blobToBase64(input);
+  }
+  return arrayBufferToBase64(input);
+}
 
 /**
  * Map Verona / backend emotion string to the canonical EmotionLabel type.
@@ -148,12 +188,21 @@ function pcmToWavBlob(pcm: Uint8Array, sampleRate: number): Blob {
   return new Blob([buf], { type: 'audio/wav' });
 }
 
+// ─── Constants ─────────────────────────────────────────────────────────────────
+
+/** Milliseconds of silence before the avatar proactively greets the student. */
+const IDLE_TIMEOUT = 8_000;
+
+/** System prompt the avatar sends after the idle threshold is reached. */
+const PROACTIVE_PROMPT =
+  '[SYSTEM_EVENT: The student has been silent. Please proactively greet them, or ask an engaging ice-breaker question related to the lesson.]';
+
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
 export function useAgentAgent({
-  wsUrl         = 'ws://localhost:8000/ws/agent',
+  wsUrl         = 'ws://127.0.0.1:8000/ws/agent',
   autoReconnect = true,
-  lang          = 'ar-SA',
+  lang          = 'ar-JO',   // Jordanian Arabic dialect — Dr. Hamza
 }: AgentAgentOptions = {}): AgentAgentState {
 
   // ── React state ─────────────────────────────────────────────────────────
@@ -164,6 +213,8 @@ export function useAgentAgent({
   const [lastDialogue,   setLastDialogue]   = useState('');
   const [emotion,        setEmotion]        = useState('neutral');
   const [error,          setError]          = useState<string | null>(null);
+  /** True after the one-time proactive greeting has been sent this session. */
+  const [hasInitiated,   setHasInitiated]   = useState(false);
 
   // ── Refs ─────────────────────────────────────────────────────────────────
   const wsRef           = useRef<WebSocket | null>(null);
@@ -171,6 +222,9 @@ export function useAgentAgent({
   const mountedRef      = useRef(true);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const isListeningRef  = useRef(false);
+  const idleTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Tracks avatar-speaking state via window events — kept as a ref to avoid re-renders. */
+  const isSpeakingRef   = useRef(false);
 
   // ── Audio ────────────────────────────────────────────────────────────────
 
@@ -184,6 +238,49 @@ export function useAgentAgent({
       window.speechSynthesis.cancel();
     }
   }, []);
+
+  /**
+   * Play base64-encoded MP3 bytes (from Lahajati.ai Jordanian Arabic TTS).
+   * Creates a native audio/mpeg Blob URL — no PCM wrapping needed.
+   * Falls back to Web Speech on autoplay policy rejection or decode error.
+   */
+  const playMp3Audio = useCallback(async (
+    base64:       string,
+    fallbackText: string,
+  ): Promise<void> => {
+    stopAudio();
+    try {
+      const raw   = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+      const blob  = new Blob([raw], { type: 'audio/mpeg' });
+      const url   = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      currentAudioRef.current = audio;
+
+      audio.onplay  = () => {
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('avatar:speak:start'));
+        }
+        useBrainStore.getState().setTalking(true);
+      };
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        currentAudioRef.current = null;
+        useBrainStore.getState().setTalking(false);
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+        }
+      };
+      audio.onerror = () => {
+        URL.revokeObjectURL(url);
+        speakWebSpeech(fallbackText, lang);
+      };
+
+      await audio.play();
+    } catch (err) {
+      console.warn('[useAgentAgent] playMp3Audio failed:', err);
+      speakWebSpeech(fallbackText, lang);
+    }
+  }, [stopAudio, lang]);
 
   /**
    * Decode base64-encoded raw PCM bytes (Kokoro int16 mono) and play as WAV.
@@ -308,11 +405,18 @@ export function useAgentAgent({
         });
 
         // 4. Audio output
-        //    - PCM audio from backend → play directly (preferred)
+        //    - MP3 from Lahajati.ai (audio_format=="mp3") → play as Blob URL
+        //    - Legacy PCM from Kokoro → wrap in WAV and play (fallback path)
         //    - tts_unavailable or no audio → fall back to AgentDirector TTS
         if (type === 'speech' && frame.audio_base64) {
-          const sampleRate = (frame.sample_rate ?? 24000) as number;
-          playPCMAudio(frame.audio_base64 as string, sampleRate, dialogue);
+          const fmt = (frame.audio_format ?? 'pcm') as string;
+          if (fmt === 'mp3') {
+            playMp3Audio(frame.audio_base64 as string, dialogue);
+          } else {
+            // tts_arabic backend produces PCM at 22 050 Hz; honour explicit sample_rate if present
+            const sampleRate = (frame.sample_rate ?? 22050) as number;
+            playPCMAudio(frame.audio_base64 as string, sampleRate, dialogue);
+          }
         } else {
           // AgentDirector.scheduleTTS uses speakWithTTS (Kokoro /api/tts-with-timing)
           // with correct voice params; final fallback to Web Speech is inside speakWithTTS.
@@ -327,7 +431,8 @@ export function useAgentAgent({
 
       // ── Backend error ─────────────────────────────────────────────────
       case 'error': {
-        const msg = ((frame.message ?? frame.detail ?? 'Unknown backend error') as string);
+        const errorObj = frame.error as Record<string, unknown> | undefined;
+        const msg = ((errorObj?.message ?? frame.message ?? frame.detail ?? 'Unknown backend error') as string);
         setError(msg);
         setIsProcessing(false);
         console.error('[useAgentAgent] Backend error:', msg);
@@ -337,7 +442,7 @@ export function useAgentAgent({
       default:
         console.log('[useAgentAgent] Unhandled frame type:', type);
     }
-  }, [lang, playPCMAudio]);
+  }, [lang, playPCMAudio, playMp3Audio]);
 
   // ── WebSocket connection ───────────────────────────────────────────────────
 
@@ -386,19 +491,31 @@ export function useAgentAgent({
 
   // ── VAD integration ──────────────────────────────────────────────────────
 
+  // Memoised so vadStart / startListening / toggleListening stay stable across renders.
+  // wsRef.current is accessed at call-time (not captured); state setters from useState
+  // are guaranteed stable by React, so empty deps are correct here.
+  const onSpeechEnd = useCallback(async (blob: Blob): Promise<void> => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.warn('[useAgentAgent] WS not ready — dropping audio blob');
+      return;
+    }
+    setIsProcessing(true);
+    try {
+      const audioBase64 = await audioInputToBase64(blob);
+      const payload = { type: 'audio', data: audioBase64 };
+      ws.send(JSON.stringify(payload));
+      console.log('[useAgentAgent] Sent VAD audio payload as JSON base64:', audioBase64.length, 'chars');
+    } catch (e) {
+      setIsProcessing(false);
+      setError('Failed to encode microphone audio');
+      console.error('[useAgentAgent] Audio encoding error:', e);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const { isRecording, startListening: vadStart, stopListening: vadStop } = useVAD({
     lang,
-    onSpeechEnd: async (blob: Blob) => {
-      const ws = wsRef.current;
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        console.warn('[useAgentAgent] WS not ready — dropping audio blob');
-        return;
-      }
-      setIsProcessing(true);
-      const buf = await blob.arrayBuffer();
-      ws.send(buf);
-      console.log('[useAgentAgent] Sent VAD audio blob:', buf.byteLength, 'bytes');
-    },
+    onSpeechEnd,
   });
 
   // ── Public API ────────────────────────────────────────────────────────────
@@ -458,8 +575,51 @@ export function useAgentAgent({
     setLastDialogue('');
     setEmotion('neutral');
     setError(null);
+    setHasInitiated(false); // Allow one new proactive greeting after history reset
     console.log('[useAgentAgent] History cleared');
   }, [stopAudio]);
+
+  // ── Avatar speaking tracker (keeps isSpeakingRef in sync via window events) ──
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onStart = (): void => { isSpeakingRef.current = true; };
+    const onEnd   = (): void => { isSpeakingRef.current = false; };
+    window.addEventListener('avatar:speak:start', onStart);
+    window.addEventListener('avatar:speak:end',   onEnd);
+    return () => {
+      window.removeEventListener('avatar:speak:start', onStart);
+      window.removeEventListener('avatar:speak:end',   onEnd);
+    };
+  }, []);
+
+  // ── Smart heartbeat — proactive greeting after IDLE_TIMEOUT of silence ───
+
+  useEffect(() => {
+    // Clear any previously scheduled timer on every dependency change
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+
+    // Block conditions: already greeted, not yet connected, busy, or user is speaking
+    if (hasInitiated || !isConnected || isProcessing || isRecording) return;
+
+    idleTimerRef.current = setTimeout(() => {
+      // Re-check live state via refs before firing (guards against stale closure)
+      if (!mountedRef.current || isSpeakingRef.current) return;
+      sendText(PROACTIVE_PROMPT);
+      setHasInitiated(true);
+      console.log('[useAgentAgent] Smart heartbeat fired — proactive greeting sent');
+    }, IDLE_TIMEOUT);
+
+    return () => {
+      if (idleTimerRef.current) {
+        clearTimeout(idleTimerRef.current);
+        idleTimerRef.current = null;
+      }
+    };
+  }, [isConnected, isProcessing, isRecording, hasInitiated, sendText]);
 
   // ── Mount / unmount ───────────────────────────────────────────────────────
 
@@ -517,11 +677,11 @@ export function useAgentAgent({
  * Selects a voice that matches `lang` to avoid wrong-language synthesis.
  * Dispatches avatar:speak:start / avatar:speak:end for lip-sync integration.
  */
-function speakWebSpeech(text: string, lang = 'ar-SA'): void {
+function speakWebSpeech(text: string, lang = 'ar-JO'): void {
   if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
   window.speechSynthesis.cancel();
 
-  const effectiveLang = lang || (hasArabic(text) ? 'ar-SA' : 'en-US');
+  const effectiveLang = lang || (hasArabic(text) ? 'ar-JO' : 'en-US');
   const langBase      = effectiveLang.split('-')[0];
   let   spoken        = false;
 

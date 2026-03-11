@@ -486,6 +486,9 @@ export class AgentDirector {
 
         const success = await speakWithTTS(text, {
           emotion: emotionLabel,
+          // Dr. Hamza always speaks in Jordanian Arabic (ar-JO-TaimNeural).
+          // If the text is English this is harmless — edge-tts ignores it for Latin text.
+          arVoice: 'male',
           onStart: () => {
             emit('avatar:speak:start', {});
             console.log('[AgentDirector] TTS speak:start');

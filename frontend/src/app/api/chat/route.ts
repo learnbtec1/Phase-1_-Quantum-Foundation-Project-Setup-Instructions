@@ -317,7 +317,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const base = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+    const base = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
     const upstream = process.env.CHAT_BACKEND_URL || `${base.replace(/\/$/, "")}/api/v1/chat`;
 
     const controller = new AbortController();

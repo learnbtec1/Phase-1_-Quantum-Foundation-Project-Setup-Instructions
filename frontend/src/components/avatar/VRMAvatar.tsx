@@ -39,10 +39,6 @@ const IDLE_SWAY_AMOUNT = 0.04;
 const BREATHE_AMPLITUDE = 0;
 const WAVE_DURATION = 4;
 const HEAD_LERP = 0.28;
-const ARM_IDLE_SWAY = 0.08;
-const ARM_HAND_SWAY = 0.12;
-const ARM_WAVE_RAISE = 1.1;
-const ARM_WAVE_BEND = 0.8;
 
 /** DEBUG: set true to verify useFrame runs (avatar rotates slowly); set false for production */
 const DEBUG_ROTATION = false;
@@ -102,43 +98,6 @@ function useHeadTracking(
   });
 }
 
-function eulerToQuatArray(euler: THREE.Euler): [number, number, number, number] {
-  const q = new THREE.Quaternion().setFromEuler(euler);
-  return [q.x, q.y, q.z, q.w];
-}
-
-const ARM_BONE_NAMES = ['leftUpperArm', 'leftLowerArm', 'leftHand', 'rightUpperArm', 'rightLowerArm', 'rightHand'] as const;
-
-const SKELETON_ARM_PATTERNS: Record<string, RegExp> = {
-  rightUpperArm: /J_Bip_R_UpperArm|RightUpperArm|Right Arm|rightUpperArm|mixamorigRightArm|RightArm|R_UpperArm|ذراع_يمين|الذراع_الأيمن|عضد_يمين|ذراع يمين|الذراع الأيمن|العضد_الأيمن|右腕|右腕上/i,
-  rightLowerArm: /J_Bip_R_LowerArm|RightLowerArm|Right Forearm|rightLowerArm|mixamorigRightForeArm|RightForeArm|R_LowerArm|ساعد_يمين|الساعد_الأيمن|ساعد يمين|الساعد الأيمن|右ひじ|右前腕/i,
-  rightHand: /J_Bip_R_Hand|RightHand|Right Hand|rightHand|mixamorigRightHand|R_Hand|يد_يمين|اليد_اليمنى|يد يمين|اليد اليمنى|右手/i,
-  leftUpperArm: /J_Bip_L_UpperArm|LeftUpperArm|Left Arm|leftUpperArm|mixamorigLeftArm|LeftArm|L_UpperArm|ذراع_يسار|الذراع_الأيسر|عضد_يسار|ذراع يسار|الذراع الأيسر|العضد_الأيسر|左腕|左腕上/i,
-  leftLowerArm: /J_Bip_L_LowerArm|LeftLowerArm|Left Forearm|leftLowerArm|mixamorigLeftForeArm|LeftForeArm|L_LowerArm|ساعد_يسار|الساعد_الأيسر|ساعد يسار|الساعد الأيسر|左ひじ|左前腕/i,
-  leftHand: /J_Bip_L_Hand|LeftHand|Left Hand|leftHand|mixamorigLeftHand|L_Hand|يد_يسار|اليد_اليسرى|يد يسار|اليد اليسرى|左手/i,
-};
-
-const LEG_BONE_NAMES = ['leftUpperLeg', 'leftLowerLeg', 'leftFoot', 'rightUpperLeg', 'rightLowerLeg', 'rightFoot'] as const;
-
-const SKELETON_LEG_PATTERNS: Record<string, RegExp> = {
-  rightUpperLeg: /J_Bip_R_UpperLeg|RightUpperLeg|Right Thigh|rightUpperLeg|mixamorigRightUpLeg|RightUpLeg|R_UpperLeg|فخذ_يمين|الفخذ_الأيمن|فخذ يمين|الفخذ الأيمن|右足上|右腿|右太腿|右足D|右CF_1/i,
-  rightLowerLeg: /J_Bip_R_LowerLeg|RightLowerLeg|Right Shin|rightLowerLeg|mixamorigRightLeg|RightLeg|R_LowerLeg|ساق_يمين|الساق_الأيمن|ساق يمين|الساق الأيمن|右ひざ|右膝|右下腿|右足E|右CF_2/i,
-  rightFoot: /J_Bip_R_Foot|RightFoot|rightFoot|mixamorigRightFoot|R_Foot|قدم_يمين|القدم_اليمنى|قدم يمين|القدم اليمنى|右足首|右足先|右足捩|右CF_3/i,
-  leftUpperLeg: /J_Bip_L_UpperLeg|LeftUpperLeg|Left Thigh|leftUpperLeg|mixamorigLeftUpLeg|LeftUpLeg|L_UpperLeg|فخذ_يسار|الفخذ_الأيسر|فخذ يسار|الفخذ الأيسر|左足上|左腿|左太腿|左足D|左CF_1/i,
-  leftLowerLeg: /J_Bip_L_LowerLeg|LeftLowerLeg|Left Shin|leftLowerLeg|mixamorigLeftLeg|LeftLeg|L_LowerLeg|ساق_يسار|الساق_الأيسر|ساق يسار|الساق الأيسر|左ひざ|左膝|左下腿|左足E|左CF_2/i,
-  leftFoot: /J_Bip_L_Foot|LeftFoot|leftFoot|mixamorigLeftFoot|L_Foot|قدم_يسار|القدم_اليسرى|قدم يسار|القدم اليسرى|左足首|左足先|左足捩|左CF_3/i,
-};
-
-const SKELETON_TRUNK_PATTERNS: Record<string, RegExp> = {
-  hips: /J_Bip_C_Hips|Hips|hips|mixamorigHips|حوض|الوركان|الحوض|腰/i,
-  spine: /J_Bip_C_Spine|Spine$|spine$|mixamorigSpine$|Spine1?$|عمود_فقري|العمود_الفقري|فقرات|脊椎|脊柱/i,
-  chest: /J_Bip_C_Chest|Spine1|chest|mixamorigSpine1|صدر|الصدر|القفص_الصدري|胸/i,
-  neck: /J_Bip_C_Neck|Neck|neck|mixamorigNeck|رقبة|الرقبة|العنق|عنق|首/i,
-  head: /J_Bip_C_Head|Head|head|mixamorigHead|رأس|الرأس|頭/i,
-  rightShoulder: /J_Bip_R_Shoulder|RightShoulder|Right Shoulder|mixamorigRightShoulder|كتف_يمين|الكتف_الأيمن|كتف يمين|右肩/i,
-  leftShoulder: /J_Bip_L_Shoulder|LeftShoulder|Left Shoulder|mixamorigLeftShoulder|كتف_يسار|الكتف_الأيسر|كتف يسار|左肩/i,
-};
-
 const VRM_BONE_LABELS_AR: Record<string, string> = {
   hips: 'الوركان (Hips)',
   spine: 'العمود الفقري (Spine)',
@@ -193,253 +152,6 @@ const VRM_BONE_LABELS_AR: Record<string, string> = {
   rightLittleIntermediate: 'خنصر يمين — وسط',
   rightLittleDistal: 'خنصر يمين — طرف',
 };
-
-export type ExtendedGestureType = 'wave' | 'point' | 'openHand' | 'beat' | 'head_down';
-export interface GestureState {
-  active: boolean;
-  type: ExtendedGestureType;
-  side: 'left' | 'right' | 'both';
-  startMs: number;
-  durationMs: number;
-  intensity: number;
-}
-
-function applyPointGesture(
-  pose: Record<string, { rotation?: [number, number, number, number] }>,
-  side: 'left' | 'right' | 'both',
-  progress: number,
-  euler: THREE.Euler
-) {
-  const curve = progress < 0.15
-    ? progress / 0.15
-    : progress > 0.85
-      ? (1 - progress) / 0.15
-      : 1;
-  const applyToSide = (prefix: string) => {
-    euler.set(-0.55 * curve, 0, prefix === 'right' ? 0.1 * curve : -0.1 * curve, 'YXZ');
-    pose[`${prefix}UpperArm`] = { rotation: eulerToQuatArray(euler) };
-    euler.set(-0.35 * curve, 0, 0, 'YXZ');
-    pose[`${prefix}LowerArm`] = { rotation: eulerToQuatArray(euler) };
-    euler.set(0, 0, 0, 'YXZ');
-    pose[`${prefix}Hand`] = { rotation: eulerToQuatArray(euler) };
-  };
-  if (side === 'right' || side === 'both') applyToSide('right');
-  if (side === 'left' || side === 'both') applyToSide('left');
-}
-
-function applyOpenHandGesture(
-  pose: Record<string, { rotation?: [number, number, number, number] }>,
-  side: 'left' | 'right' | 'both',
-  progress: number,
-  euler: THREE.Euler
-) {
-  const curve = Math.sin(progress * Math.PI);
-  const applyToSide = (prefix: string) => {
-    const dir = prefix === 'right' ? 1 : -1;
-    euler.set(-0.45 * curve, dir * 0.15 * curve, dir * 0.08 * curve, 'YXZ');
-    pose[`${prefix}UpperArm`] = { rotation: eulerToQuatArray(euler) };
-    euler.set(-0.25 * curve, 0, 0, 'YXZ');
-    pose[`${prefix}LowerArm`] = { rotation: eulerToQuatArray(euler) };
-    euler.set(0, dir * 0.25 * curve, 0, 'YXZ');
-    pose[`${prefix}Hand`] = { rotation: eulerToQuatArray(euler) };
-  };
-  if (side === 'right' || side === 'both') applyToSide('right');
-  if (side === 'left' || side === 'both') applyToSide('left');
-}
-
-function applyBeatGesture(
-  pose: Record<string, { rotation?: [number, number, number, number] }>,
-  side: 'left' | 'right' | 'both',
-  progress: number,
-  intensity: number,
-  euler: THREE.Euler
-) {
-  const envelope = Math.sin(progress * Math.PI);
-  const beat = Math.sin(progress * Math.PI * 5) * intensity * 0.28 * envelope;
-  const raise = envelope * 0.35;
-  const applyToSide = (prefix: string) => {
-    const dir = prefix === 'right' ? 1 : -1;
-    euler.set(-(raise + beat * 0.5), 0, dir * 0.12, 'YXZ');
-    pose[`${prefix}UpperArm`] = { rotation: eulerToQuatArray(euler) };
-    euler.set(-0.2 + beat, 0, 0, 'YXZ');
-    pose[`${prefix}LowerArm`] = { rotation: eulerToQuatArray(euler) };
-    euler.set(0, 0, beat * 0.6, 'YXZ');
-    pose[`${prefix}Hand`] = { rotation: eulerToQuatArray(euler) };
-  };
-  if (side === 'right' || side === 'both') applyToSide('right');
-  if (side === 'left' || side === 'both') applyToSide('left');
-}
-
-function useArmPose(
-  vrmRef: React.RefObject<VRM | null>,
-  waveUntilRef: React.RefObject<number>,
-  gestureStateRef?: React.RefObject<GestureState | null>,
-  walkStateRef?: React.RefObject<{ isWalking: boolean; walkPhase: number } | null>
-) {
-  const eulerTemp = useRef(new THREE.Euler(0, 0, 0, 'YXZ'));
-  const availableBonesRef = useRef<Set<string>>(new Set());
-  const skeletonBoneMapRef = useRef<Map<string, THREE.Bone>>(new Map());
-
-  useFrame((state) => {
-    const v = vrmRef.current;
-    const humanoid = v?.humanoid;
-    if (!v?.scene) return;
-
-    if (availableBonesRef.current.size === 0 || skeletonBoneMapRef.current.size === 0) {
-      const humanoidBoneNames = [...ARM_BONE_NAMES, ...LEG_BONE_NAMES] as string[];
-      let humanoidFound = 0;
-      humanoidBoneNames.forEach((name) => {
-        const node = humanoid?.getRawBoneNode(name as never) ?? humanoid?.getNormalizedBoneNode(name as never);
-        if (node) {
-          skeletonBoneMapRef.current.set(name, node as THREE.Bone);
-          availableBonesRef.current.add(name);
-          humanoidFound++;
-        }
-      });
-
-      if (humanoidFound > 0 && process.env.NODE_ENV === 'development') {
-        const report = [...skeletonBoneMapRef.current.entries()]
-          .map(([k, b]) => `  ${VRM_BONE_LABELS_AR[k] ?? k}  →  ${b.name}`)
-          .join('\n');
-        console.debug('%c[أفاتار] ✅ عظام humanoid محمّلة:', 'color:#4fc3f7;font-weight:bold', `\n${report}`);
-      }
-
-      if (humanoidFound < ARM_BONE_NAMES.length) {
-        const allPatterns = { ...SKELETON_ARM_PATTERNS, ...SKELETON_LEG_PATTERNS, ...SKELETON_TRUNK_PATTERNS };
-        v.scene.traverse((o) => {
-          const mesh = o as THREE.SkinnedMesh;
-          if (mesh.skeleton) {
-            mesh.skeleton.bones.forEach((bone) => {
-              for (const [vrName, pattern] of Object.entries(allPatterns)) {
-                if (pattern.test(bone.name) && !skeletonBoneMapRef.current.has(vrName)) {
-                  skeletonBoneMapRef.current.set(vrName, bone);
-                  availableBonesRef.current.add(vrName);
-                }
-              }
-            });
-          }
-        });
-        if (process.env.NODE_ENV === 'development' && skeletonBoneMapRef.current.size > 0) {
-          const report = [...skeletonBoneMapRef.current.entries()]
-            .map(([k, b]) => `  ${VRM_BONE_LABELS_AR[k] ?? k}  →  "${b.name}"`)
-            .join('\n');
-          console.debug('%c[أفاتار] ⚙️ عظام مُكتشفة بنمط المطابقة:', 'color:#ffb74d;font-weight:bold', `\n${report}`);
-        }
-      }
-    }
-
-    const t = state.clock.elapsedTime;
-    const now = Date.now();
-    const isWaving = !!waveUntilRef.current && now < waveUntilRef.current;
-    const waveElapsed = isWaving ? (waveUntilRef.current - now) / 1000 : 0;
-    const waveProgress = isWaving ? 1 - waveElapsed / WAVE_DURATION : 0;
-    const alwaysWave = false;
-
-    const gs = gestureStateRef?.current;
-    if (gs?.active && now > gs.startMs + gs.durationMs) {
-      gs.active = false;
-    }
-    const hasExtGesture = gs?.active && gs.type !== 'wave';
-
-    const pose: Record<string, { rotation?: [number, number, number, number] }> = {};
-
-    if (hasExtGesture && gs) {
-      const progress = Math.min(1, (now - gs.startMs) / gs.durationMs);
-      switch (gs.type) {
-        case 'point': applyPointGesture(pose, gs.side, progress, eulerTemp.current); break;
-        case 'openHand': applyOpenHandGesture(pose, gs.side, progress, eulerTemp.current); break;
-        case 'beat': applyBeatGesture(pose, gs.side, progress, gs.intensity, eulerTemp.current); break;
-        default: break;
-      }
-    } else if ((isWaving && waveProgress > 0) || alwaysWave) {
-      const prog = isWaving ? waveProgress : (t % 3) / 3;
-      const waveAngle = Math.sin(prog * Math.PI * 3) * 1.2;
-      eulerTemp.current.set(-0.9, 0.2, waveAngle, 'XYZ');
-      pose.rightUpperArm = { rotation: eulerToQuatArray(eulerTemp.current) };
-      eulerTemp.current.set(-0.7, 0, waveAngle * 1.2, 'XYZ');
-      pose.rightLowerArm = { rotation: eulerToQuatArray(eulerTemp.current) };
-      eulerTemp.current.set(0, 0, waveAngle * 2.2, 'XYZ');
-      pose.rightHand = { rotation: eulerToQuatArray(eulerTemp.current) };
-      eulerTemp.current.set(0, 0, 0, 'XYZ');
-      pose.leftUpperArm = { rotation: eulerToQuatArray(eulerTemp.current) };
-      pose.leftLowerArm = { rotation: eulerToQuatArray(eulerTemp.current) };
-      pose.leftHand = { rotation: eulerToQuatArray(eulerTemp.current) };
-    } else {
-      const sway = Math.sin(t * 0.4) * ARM_IDLE_SWAY;
-      const swayL = Math.sin(t * 0.55 + 1) * ARM_IDLE_SWAY * 0.6;
-      const handSway = Math.sin(t * 0.6) * ARM_HAND_SWAY;
-      const handSwayR = Math.sin(t * 0.5 + 0.5) * ARM_HAND_SWAY * 0.8;
-      eulerTemp.current.set(sway, swayL, 0, 'YXZ');
-      pose.leftUpperArm = { rotation: eulerToQuatArray(eulerTemp.current) };
-      eulerTemp.current.set(swayL * 0.3, 0, 0, 'YXZ');
-      pose.leftLowerArm = { rotation: eulerToQuatArray(eulerTemp.current) };
-      eulerTemp.current.set(0, 0, handSway, 'YXZ');
-      pose.leftHand = { rotation: eulerToQuatArray(eulerTemp.current) };
-      eulerTemp.current.set(swayL, sway * 0.8, 0, 'YXZ');
-      pose.rightUpperArm = { rotation: eulerToQuatArray(eulerTemp.current) };
-      eulerTemp.current.set(sway * 0.3, 0, 0, 'YXZ');
-      pose.rightLowerArm = { rotation: eulerToQuatArray(eulerTemp.current) };
-      eulerTemp.current.set(0, 0, handSwayR, 'YXZ');
-      pose.rightHand = { rotation: eulerToQuatArray(eulerTemp.current) };
-    }
-
-    const walkState = walkStateRef?.current;
-    if (walkState?.isWalking) {
-      const phase = walkState.walkPhase;
-      const rightSwing = Math.sin(phase) * 0.45;
-      const leftSwing = Math.sin(phase + Math.PI) * 0.45;
-      const rightKnee = Math.max(0, Math.sin(phase)) * 0.5;
-      const leftKnee = Math.max(0, Math.sin(phase + Math.PI)) * 0.5;
-      eulerTemp.current.set(rightSwing, 0, 0, 'YXZ');
-      pose.rightUpperLeg = { rotation: eulerToQuatArray(eulerTemp.current) };
-      eulerTemp.current.set(rightKnee, 0, 0, 'YXZ');
-      pose.rightLowerLeg = { rotation: eulerToQuatArray(eulerTemp.current) };
-      eulerTemp.current.set(Math.abs(rightSwing) * 0.15, 0, 0, 'YXZ');
-      pose.rightFoot = { rotation: eulerToQuatArray(eulerTemp.current) };
-      eulerTemp.current.set(leftSwing, 0, 0, 'YXZ');
-      pose.leftUpperLeg = { rotation: eulerToQuatArray(eulerTemp.current) };
-      eulerTemp.current.set(leftKnee, 0, 0, 'YXZ');
-      pose.leftLowerLeg = { rotation: eulerToQuatArray(eulerTemp.current) };
-      eulerTemp.current.set(Math.abs(leftSwing) * 0.15, 0, 0, 'YXZ');
-      pose.leftFoot = { rotation: eulerToQuatArray(eulerTemp.current) };
-    }
-
-    const toApply = availableBonesRef.current.size > 0
-      ? Object.fromEntries(Object.entries(pose).filter(([name]) => availableBonesRef.current.has(name)))
-      : pose;
-    if (Object.keys(toApply).length === 0) return;
-
-    const applyRotation = (name: string, rot: [number, number, number, number]) => {
-      const skelBone = skeletonBoneMapRef.current.get(name);
-      if (skelBone) {
-        skelBone.quaternion.set(rot[0], rot[1], rot[2], rot[3]);
-        return;
-      }
-      const node = humanoid?.getRawBoneNode(name as never) ?? humanoid?.getNormalizedBoneNode(name as never);
-      if (node) node.quaternion.set(rot[0], rot[1], rot[2], rot[3]);
-    };
-
-    if (skeletonBoneMapRef.current.size > 0) {
-      for (const [name, data] of Object.entries(toApply) as [string, { rotation?: [number, number, number, number] }][]) {
-        const rot = data?.rotation;
-        if (rot?.length === 4) applyRotation(name, rot);
-      }
-    } else if (humanoid) {
-      try {
-        humanoid.setNormalizedPose(toApply);
-      } catch {
-        try {
-          humanoid.setRawPose(toApply);
-        } catch {
-          for (const [name, data] of Object.entries(toApply) as [string, { rotation?: [number, number, number, number] }][]) {
-            const rot = data?.rotation;
-            if (rot?.length === 4) applyRotation(name, rot);
-          }
-        }
-      }
-    }
-  }, 1);
-}
 
 function useProceduralBlink(vrmRef: React.RefObject<VRM | null>) {
   const nextBlinkRef = useRef(Date.now() + (BLINK_INTERVAL_MIN + Math.random() * (BLINK_INTERVAL_MAX - BLINK_INTERVAL_MIN)) * 1000);
@@ -609,9 +321,6 @@ function VRMModel({
   const lipSyncFlagSetRef = useRef(false);
   const emotionRef = useRef<string>('neutral');
   const postureLeanRef = useRef(0);
-  const waveUntilRef = useRef(0);
-
-  const gestureStateRef = useRef<GestureState | null>(null);
 
   const emotionManagerRef = useRef<EmotionManager | null>(null);
   const phonemeManagerRef = useRef<PhonemeManager | null>(null);
@@ -641,11 +350,9 @@ function VRMModel({
 
   const listeningRef = useListeningState();
   useHeadTracking(groupRef, listeningRef, {
-    waveUntilRef,
     postureLeanRef,
     isTalkingRef,
   });
-  useArmPose(vrmRef, waveUntilRef, gestureStateRef, activeWalkRef);
   useProceduralBlink(vrmRef);
 
   useEffect(() => {
@@ -700,15 +407,15 @@ function VRMModel({
       const type = (e as CustomEvent<{ type?: string }>).detail?.type;
       switch (type) {
         case 'greeting':
-          waveUntilRef.current = Date.now() + 2200;
+          emotionManagerRef.current?.setEmotion('goodbye');
           emotionRef.current = 'friendly';
           break;
         case 'praise':
-          gestureStateRef.current = { active: true, type: 'beat', side: 'both', startMs: Date.now(), durationMs: 1400, intensity: 0.5 };
+          emotionManagerRef.current?.setEmotion('friendly');
           emotionRef.current = 'encouraging';
           break;
         case 'farewell':
-          waveUntilRef.current = Date.now() + 2500;
+          emotionManagerRef.current?.setEmotion('goodbye');
           emotionRef.current = 'friendly';
           break;
         case 'question':
@@ -733,32 +440,27 @@ function VRMModel({
         console.log('[EVT][RIG]', 'avatar:gesture', { keys: Object.keys(d ?? {}), sample: d });
       }
       if (!d?.type) return;
-      const type = d.type as ExtendedGestureType;
-      const side = (d.side ?? 'right') as 'left' | 'right' | 'both';
+      const type = d.type;
       const duration = d.duration ?? 2.5;
       const intensity = d.intensity ?? 1;
       if (type === 'wave') {
-        waveUntilRef.current = Date.now() + duration * 1000;
+        // Wave → play Goodbye.vrma via EmotionManager
+        emotionManagerRef.current?.setEmotion('goodbye');
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('avatar:waved', { detail: {} }));
         }
+      } else if (type === 'beat' || type === 'openHand') {
+        emotionManagerRef.current?.setEmotion('friendly');
+      } else if (type === 'point') {
+        emotionManagerRef.current?.setEmotion('thinking');
       } else if (type === 'head_down') {
-        // head_down: tilt head down via lookAt target Y offset
+        // head_down: lookAt Y offset (no bone manipulation)
         const origY = lookAtTargetRef.current.y;
         lookAtTargetRef.current.y -= intensity * 0.25;
         setTimeout(() => { lookAtTargetRef.current.y = origY; }, duration * 1000);
-      } else {
-        gestureStateRef.current = {
-          active: true,
-          type,
-          side,
-          startMs: Date.now(),
-          durationMs: duration * 1000,
-          intensity,
-        };
       }
       if (process.env.NODE_ENV === 'development') {
-        console.debug(`[VRMAvatar] Gesture triggered: ${type} (${side}) ${duration}s`);
+        console.debug(`[VRMAvatar] Gesture → EmotionManager: ${type} ${duration}s`);
       }
     };
     let headTurnTimeout: NodeJS.Timeout | null = null;
@@ -852,7 +554,7 @@ function VRMModel({
           mixerRef.current = new THREE.AnimationMixer(vrmModel.scene);
           emotionManagerRef.current = new EmotionManager(vrmModel, mixerRef.current);
           phonemeManagerRef.current = new PhonemeManager(vrmModel);
-          waveUntilRef.current = Date.now() + WAVE_DURATION * 1000;
+          emotionManagerRef.current?.setEmotion('friendly');
           console.log('[VRM] managers ready — Emotion ✅  Phoneme ✅  expressionMgr:', !!vrmModel.expressionManager);
         } catch (managerErr) {
           console.warn('[VRM] manager init failed (non-fatal — avatar still renders):', managerErr);
@@ -905,28 +607,9 @@ function VRMModel({
     emotionRef.current = parsedEmotion !== 'neutral' ? parsedEmotion : plan.emotion;
     postureLeanRef.current = plan.posture.lean === 'listen' ? 0.03 : plan.posture.lean === 'emphasize' ? -0.02 : 0;
     console.log('[V29] 💬 doSpeak → emotion:', emotionRef.current, '| text:', text.slice(0, 60));
+    // EmotionManager plays the .vrma clip for the detected emotion (celebration, friendly, etc.)
+    // No separate gesture dispatch needed — the animation IS the gesture.
     emotionManagerRef.current?.setEmotion(emotionRef.current);
-    const emotionGestureMap: Record<string, { type: ExtendedGestureType; side: 'left' | 'right' | 'both'; duration: number; intensity: number }> = {
-      celebration: { type: 'wave', side: 'both', duration: 2.5, intensity: 1 },
-      encouraging: { type: 'openHand', side: 'right', duration: 1.8, intensity: 0.9 },
-      strictEvaluation: { type: 'point', side: 'right', duration: 1.5, intensity: 1 },
-      friendly: { type: 'beat', side: 'both', duration: 1.4, intensity: 0.7 },
-    };
-    const gestureConfig = emotionGestureMap[plan.emotion];
-    if (gestureConfig) {
-      if (gestureConfig.type === 'wave') {
-        waveUntilRef.current = Date.now() + gestureConfig.duration * 1000;
-      } else {
-        gestureStateRef.current = {
-          active: true,
-          type: gestureConfig.type,
-          side: gestureConfig.side,
-          startMs: Date.now(),
-          durationMs: gestureConfig.duration * 1000,
-          intensity: gestureConfig.intensity,
-        };
-      }
-    }
     const ttsOnStart = () => {
       isTalkingRef.current = true;
       talkStartRef.current = 0;
@@ -1008,7 +691,11 @@ function VRMModel({
         '| isWalking:', activeWalkRef.current?.isWalking,
       );
     }
-    if (mixerRef.current) mixerRef.current.update(delta);
+    // EmotionManager.update() ticks the shared AnimationMixer AND blends face
+    // expressions. Do NOT also call mixerRef.current.update(delta) here —
+    // it is the same mixer instance; calling it twice advances all VRMA clips
+    // at 2× speed.
+    emotionManagerRef.current?.update(delta);
     const currentVrm = vrmRef.current;
     if (currentVrm) {
       const lookAt = (currentVrm as { lookAt?: { autoUpdate?: boolean; lookAt: (p: THREE.Vector3) => void } }).lookAt;
@@ -1077,7 +764,7 @@ function VRMModel({
 
   const handlePointerDown = useCallback((e: { stopPropagation: () => void }) => {
     e.stopPropagation();
-    waveUntilRef.current = Date.now() + WAVE_DURATION * 1000;
+    emotionManagerRef.current?.setEmotion('goodbye');
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('avatar:waved', { detail: {} }));
     }

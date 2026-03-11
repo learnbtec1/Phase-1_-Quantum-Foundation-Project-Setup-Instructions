@@ -46,7 +46,7 @@ export default function EvaluatePage() {
     // ── BOOT: fire AFTER VRM loads + event listeners are registered (fixes timing race) ──
     // eslint-disable-next-line no-console
     console.log('%c[HUMANIZE][BOOT] avatar ready → firing boot greeting', 'color:lime;font-weight:bold');
-    const greetingText = 'أهلاً وسهلاً! أنا د. حمزة، معلمك في BTEC Business. كيف أقدر أساعدك اليوم؟';
+    const greetingText = 'يا هلا والله! أنا د. حمزة، معلمك في BTEC Business. شو بدنا نتعلم اليوم؟';
     setMessages((prev) =>
       prev.length === 0 ? [{ role: 'assistant', content: greetingText }] : prev,
     );

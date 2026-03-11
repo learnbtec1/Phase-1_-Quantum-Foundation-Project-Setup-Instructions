@@ -81,8 +81,8 @@ const DEFAULTS: Required<RigOptions> = {
   gazeSpringZeta:  0.80,
   gazeSpringOmega: 7.0,
 
-  breathHzMin: 0.12,
-  breathHzMax: 0.18,
+  breathHzMin: 0.133,  // 8 BPM — lower bound of natural breathing
+  breathHzMax: 0.200,  // 12 BPM — upper bound of natural breathing
 
   blinkPerMinMin: 22,
   blinkPerMinMax: 32,
@@ -113,6 +113,8 @@ export class HumanizationRig {
   private head?: THREE.Object3D;
   private neck?: THREE.Object3D;
   private spine?: THREE.Object3D;
+  private chest?: THREE.Object3D;
+  private upperChest?: THREE.Object3D;
   private rightHand?: THREE.Object3D;
   private leftHand?: THREE.Object3D;
 
@@ -147,6 +149,9 @@ export class HumanizationRig {
   // Expression system detection (VRM1 vs VRM0)
   private hasExpressionMgr = false;
 
+  // Diagnostic: one-shot log after first second
+  private debugLogDone = false;
+
   // ─── Constructor ────────────────────────────────────────────────────────────
 
   constructor(vrm: VRM, options?: RigOptions) {
@@ -169,6 +174,18 @@ export class HumanizationRig {
     // Clamp dt to avoid explosion after tab-backgrounding
     const d = Math.min(dt, 1 / 15);
     this.t += d;
+
+    // One-shot diagnostic after first second of activity
+    if (!this.debugLogDone && this.t > 1.0) {
+      const bpm = Math.round(this.breathFreq * 60);
+      console.log('[HUMANIZE][BREATH]', {
+        bpm,
+        hasSpine: !!this.spine,
+        hasChest: !!this.chest,
+        hasUpperChest: !!this.upperChest,
+      });
+      this.debugLogDone = true;
+    }
 
     if (this.opts.enableBreath)                 this.updateBreath(d);
     if (this.opts.enableBlink)                  this.updateBlink(d);
@@ -263,9 +280,23 @@ export class HumanizationRig {
       randRange(this.opts.breathHzMin, this.opts.breathHzMax),
       dt * 0.04
     );
-    const amp    = 0.018 + Math.sin(this.t * 0.11) * 0.004;
-    const breath = Math.sin(this.t * Math.PI * 2 * this.breathFreq) * amp;
-    if (this.spine) this.spine.position.y = breath;
+    const omega = Math.PI * 2 * this.breathFreq;
+    // Amplitude 0.011–0.015 rad (≈0.6–0.9°) — subtle rib expansion
+    // spine > chest > upperChest matches natural ribcage biomechanics
+    const amp = 0.013 + Math.sin(this.t * 0.11) * 0.002; // 0.011–0.015 rad
+
+    // Spine (belly/diaphragm): leads the cycle at full amplitude (spec: 0.012–0.015 rad)
+    if (this.spine) {
+      this.spine.rotation.x = Math.sin(this.t * omega) * amp;
+    }
+    // Chest: ~160 ms phase lag, ~77% amplitude (spec: 0.009–0.012 rad)
+    if (this.chest) {
+      this.chest.rotation.x = Math.sin(this.t * omega - 0.35) * amp * 0.77;
+    }
+    // Upper chest: ~300 ms phase lag, ~55% amplitude (spec: 0.006–0.009 rad)
+    if (this.upperChest) {
+      this.upperChest.rotation.x = Math.sin(this.t * omega - 0.70) * amp * 0.55;
+    }
   }
 
   private scheduleNextBlink(now: number) {
@@ -448,6 +479,8 @@ export class HumanizationRig {
     this.head      = get('head');
     this.neck      = get('neck');
     this.spine     = get('spine');
+    this.chest     = get('chest');
+    this.upperChest = get('upperChest');
     this.leftHand  = get('leftHand');
     this.rightHand = get('rightHand');
   }

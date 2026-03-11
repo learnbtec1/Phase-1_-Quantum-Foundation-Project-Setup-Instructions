@@ -17,3 +17,5 @@ __pycache__
 *.pyc
 .venv
 venv
+venv311/
+backend/venv311/

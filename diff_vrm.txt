@@ -1,0 +1,1855 @@
+diff --git a/frontend/src/components/avatar/VRMAvatar.tsx b/frontend/src/components/avatar/VRMAvatar.tsx
+index 5d71740b..a1cab21f 100644
+--- a/frontend/src/components/avatar/VRMAvatar.tsx
++++ b/frontend/src/components/avatar/VRMAvatar.tsx
+@@ -10,41 +10,39 @@ import { Howl } from 'howler';
+ import { speakWithTTS, stopTTS, type WordTiming } from '@/ai/io/tts';
+ import { inferResponsePlan, parseVeronaResponse } from '@/ai/avatar/brain';
+ import { dispatchGestureFromActionText } from '@/ai/avatar/actions';
+-import { EMOTION_BLENDSHAPES } from '@/ai/avatar/state';
+-import { proceduralViseme, decayViseme, type VisemeWeights } from '@/ai/lipsync/viseme';
+-import { timingsToVisemeAt, lerpViseme } from '@/ai/lipsync/timing';
+ import { EmotionManager } from '@/ai/avatar/managers/EmotionManager';
+ import { PhonemeManager } from '@/ai/avatar/managers/PhonemeManager';
+-const VRM_URL = '/models/teach.vrm';
++
++const VRM_URL = '/models/Smart.vrm';
+ const HUM_URL = '/audio/voices/teacher/hum.mp3';
+ const HUM_URL_ALT = '/audio/ambience/boardroom.mp3';
+ 
+-const BS_AA = 'aa';
+-const BS_IH = 'ih';
+-const BS_OU = 'ou';
+-
+-const HEAD_YAW_LIMIT = 0.5;
+-const HEAD_PITCH_LIMIT = 0.35;
+-const HEAD_SENSITIVITY_YAW = 0.65;
+-const HEAD_SENSITIVITY_PITCH = 0.5;
+-const NOD_DURATION = 1.2;
+-const NOD_INTENSITY = 0.15; // كان 0.35 — خفّفنا حركة الرأس عند استلام الرد
+-const USER_SENT_ACK_DURATION = 0.6;
+-const USER_SENT_ACK_INTENSITY = 0.08; // كان 0.2 — خفّفنا حركة الرأس عند إرسال الرسالة
++const AVATAR_BASE_Y = -0.5;
+ const BLINK_INTERVAL_MIN = 2.2;
+ const BLINK_INTERVAL_MAX = 4.5;
+-const AVATAR_BASE_Y = -0.5;
+-const IDLE_SWAY_AMOUNT = 0.04; // كان 0.1 — خفّفنا التمايل الخفيف
+-const BREATHE_AMPLITUDE = 0; // Breathing handled by HumanizationRig chest-bone rotation — do not move whole group
+ const WAVE_DURATION = 4;
+-const HEAD_LERP = 0.28;
+ const ARM_IDLE_SWAY = 0.08;
+ const ARM_HAND_SWAY = 0.12;
+-const ARM_WAVE_RAISE = 1.1;
+-const ARM_WAVE_BEND = 0.8;
+ 
+-/** DEBUG: set true to verify useFrame runs (avatar rotates slowly); set false for production */
+-const DEBUG_ROTATION = false;
++// ── Perlin-like smooth noise (deterministic sum of sines — zero dependency) ────
++function smoothNoise(t: number, seed = 0): number {
++  return (
++    Math.sin(t * 0.37 + seed * 1.3) * 0.5 +
++    Math.sin(t * 0.73 + seed * 2.1) * 0.3 +
++    Math.sin(t * 1.17 + seed * 0.7) * 0.2
++  );
++}
++
++// ── Trunk bone regex patterns (hoisted here so hooks below can reference them) ──
++const SKELETON_TRUNK_PATTERNS: Record<string, RegExp> = {
++  hips:          /J_Bip_C_Hips|Hips|hips|mixamorigHips|حوض|الوركان|الحوض|腰/i,
++  spine:         /J_Bip_C_Spine|Spine$|spine$|mixamorigSpine$|Spine1?$|عمود_فقري|العمود_الفقري|فقرات|脊椎|脊柱/i,
++  chest:         /J_Bip_C_Chest|Spine1|chest|mixamorigSpine1|صدر|الصدر|القفص_الصدري|胸/i,
++  neck:          /J_Bip_C_Neck|Neck|neck|mixamorigNeck|رقبة|الرقبة|العنق|عنق|首/i,
++  head:          /J_Bip_C_Head|Head|head|mixamorigHead|رأس|الرأس|頭/i,
++  rightShoulder: /J_Bip_R_Shoulder|RightShoulder|Right Shoulder|mixamorigRightShoulder|كتف_يمين|الكتف_الأيمن|كتف يمين|右肩/i,
++  leftShoulder:  /J_Bip_L_Shoulder|LeftShoulder|Left Shoulder|mixamorigLeftShoulder|كتف_يسار|الكتف_الأيسر|كتف يسار|左肩/i,
++};
+ 
+ function useChatReceivedTimestamp() {
+   const receivedAtRef = useRef<number>(0);
+@@ -71,11 +69,8 @@ function useListeningState() {
+   useEffect(() => {
+     const _evtSeen_ls = new Set<string>();
+     const onListening = (e: Event) => {
+-      // RIG contract: reads detail.active (boolean)
+       if (process.env.NODE_ENV === 'development' && !_evtSeen_ls.has('avatar:listening')) {
+         _evtSeen_ls.add('avatar:listening');
+-        // eslint-disable-next-line no-console
+-        console.log('[EVT][RIG]', 'avatar:listening', { keys: Object.keys((e as CustomEvent).detail ?? {}), sample: (e as CustomEvent).detail });
+       }
+       listeningRef.current = (e as CustomEvent<{ active?: boolean }>).detail?.active ?? false;
+     };
+@@ -85,26 +80,17 @@ function useListeningState() {
+   return listeningRef;
+ }
+ 
+-/**
+- * Head tracking: only position (breathing) — NO body rotation.
+- * Head/eye direction is handled by VRM lookAt in the main useFrame.
+- */
+ function useHeadTracking(
+   groupRef: React.RefObject<THREE.Group | null>,
+   _listeningRef?: React.RefObject<boolean>,
+-  opts?: { waveUntilRef?: React.RefObject<number>; postureLeanRef?: React.RefObject<number>; isTalkingRef?: React.RefObject<boolean> }
++  opts?: { waveUntilRef?: React.RefObject<number>; postureLeanRef?: React.RefObject<number>; isTalkingRef?: React.RefObject<boolean>; fittedBaseYRef?: React.RefObject<number> }
+ ) {
+-  const yOscLoggedRef = useRef(false);
+   useFrame(() => {
+-    // First-frame diagnostic: confirm whole-body Y oscillation is absent
+-    if (!yOscLoggedRef.current) {
+-      console.log('[HUMANIZE][IDLE] Whole-body Y oscillation: disabled');
+-      yOscLoggedRef.current = true;
+-    }
+     const g = groupRef.current;
+     if (!g) return;
+-    // Feet stay planted — breathing/sway handled by HumanizationRig bone rotations.
+-    g.position.set(0, AVATAR_BASE_Y, 0.2);
++    // Use safe-fit Y once VRM is loaded; fall back to static constant before load
++    const baseY = opts?.fittedBaseYRef?.current ?? AVATAR_BASE_Y;
++    g.position.set(0, baseY, 0.2);
+     g.updateMatrix();
+   });
+ }
+@@ -114,72 +100,270 @@ function eulerToQuatArray(euler: THREE.Euler): [number, number, number, number]
+   return [q.x, q.y, q.z, q.w];
+ }
+ 
++// ────────────────────────────────────────────────────────────────────────────
++// LIFE NOISE — Persistent Skeletal Realism  [PHASE 4: BONE-CACHE EDITION]
++// Zero traverse. Zero regex. Bones injected from pre-cached vrmBonesRef.
++// Spine/Chest: 0.05 amplitude. Neck: 0.015 sway. Hips: heartbeat preserved.
++// ────────────────────────────────────────────────────────────────────────────
++function useLifeNoise(
++  vrmBonesRef: React.RefObject<Record<string, THREE.Object3D>>,
++  _isTalkingRef?: React.RefObject<boolean>,
++  _listeningRef?: React.RefObject<boolean>,
++) {
++  // LERP targets — 300ms smooth transitions, no lazy resolve, no traverse
++  const currentSpineQ = useRef(new THREE.Quaternion());
++  const currentNeckQ  = useRef(new THREE.Quaternion());
++  const currentHipsQ  = useRef(new THREE.Quaternion());
++  const targetSpineQ  = useRef(new THREE.Quaternion());
++  const targetNeckQ   = useRef(new THREE.Quaternion());
++  const targetHipsQ   = useRef(new THREE.Quaternion());
++  const eulerTmp = useRef(new THREE.Euler(0, 0, 0, 'YXZ'));
++
++  useFrame((state, delta) => {
++    const bones = vrmBonesRef.current;
++    // Direct bone access — zero cost (pre-cached at load time)
++    const spine = bones['spine'] as THREE.Bone | undefined;
++    const chest = bones['chest'] as THREE.Bone | undefined ?? bones['upperChest'] as THREE.Bone | undefined;
++    const neck  = bones['neck']  as THREE.Bone | undefined;
++    const hips  = bones['hips']  as THREE.Bone | undefined;
++
++    const t = state.clock.elapsedTime;
++
++    // ── Spine / Chest: 0.05 amplitude breathing + sway ───────────────────
++    const amp = 0.05;
++    const spineX = smoothNoise(t, 0) * amp + Math.sin(t * 0.28) * amp * 0.4;
++    const spineZ = smoothNoise(t, 3) * amp * 0.5;
++    eulerTmp.current.set(spineX, 0, spineZ, 'YXZ');
++    targetSpineQ.current.setFromEuler(eulerTmp.current);
++
++    // ── Neck: 0.015 micro-sway — subtle, human ───────────────────────────
++    const neckX = smoothNoise(t, 7)  * 0.015;
++    const neckY = smoothNoise(t, 11) * 0.015;
++    eulerTmp.current.set(neckX, neckY, 0, 'YXZ');
++    targetNeckQ.current.setFromEuler(eulerTmp.current);
++
++    // ── Hips: weight-shift + 5-second heartbeat cycle ────────────────────
++    const hipsZ = smoothNoise(t, 13) * 0.008
++      + Math.sin(t * Math.PI * 0.4) * 0.015;
++    const hipsX = smoothNoise(t, 17) * 0.006;
++    eulerTmp.current.set(hipsX, 0, hipsZ, 'YXZ');
++    targetHipsQ.current.setFromEuler(eulerTmp.current);
++
++    // LERP all at ~300ms
++    const alpha = Math.min(1, delta / 0.30);
++    currentSpineQ.current.slerp(targetSpineQ.current, alpha);
++    currentNeckQ.current.slerp(targetNeckQ.current, alpha);
++    currentHipsQ.current.slerp(targetHipsQ.current, alpha);
++
++    // Force-write every frame — no early return
++    if (spine)  spine.quaternion.copy(currentSpineQ.current);
++    if (chest)  chest.quaternion.copy(currentSpineQ.current);
++    if (neck)   neck.quaternion.copy(currentNeckQ.current);
++    if (hips)   hips.quaternion.copy(currentHipsQ.current);
++  }, 2); // priority 2 — runs after arm pose (priority 1)
++}
++
++// ────────────────────────────────────────────────────────────────────────────
++// EYE SACCADES — Micro-random eye movements every 2–4s
++// Dr. Hamza never stares fixedly; his eyes shift as if processing thought.
++// ────────────────────────────────────────────────────────────────────────────
++function useEyeSaccades(
++  vrmRef: React.RefObject<VRM | null>,
++  lookAtTargetRef: React.RefObject<THREE.Vector3>,
++  listeningRef: React.RefObject<boolean>,
++) {
++  const nextSaccadeRef  = useRef(Date.now() + 2000 + Math.random() * 2000);
++  const saccadeTargetRef = useRef(new THREE.Vector3());
++  const baseTargetRef    = useRef(new THREE.Vector3());
++  const lerpAlphaRef     = useRef(0);
++  const inSaccadeRef     = useRef(false);
++
++  useFrame((_, delta) => {
++    const v = vrmRef.current;
++    if (!v) return;
++
++    const now = Date.now();
++
++    if (inSaccadeRef.current) {
++      lerpAlphaRef.current = Math.min(1, lerpAlphaRef.current + delta * 6);
++      lookAtTargetRef.current.lerp(saccadeTargetRef.current, lerpAlphaRef.current);
++      if (lerpAlphaRef.current >= 1) {
++        inSaccadeRef.current = false;
++        // Hold for 600–1200ms then return
++        const holdMs = 600 + Math.random() * 600;
++        setTimeout(() => {
++          saccadeTargetRef.current.copy(baseTargetRef.current);
++          lerpAlphaRef.current = 0;
++          inSaccadeRef.current = true;
++          nextSaccadeRef.current = Date.now() + 2000 + Math.random() * 2000;
++        }, holdMs);
++      }
++    } else if (now >= nextSaccadeRef.current) {
++      // While listening: keep eye contact (small saccades only)
++      const range = listeningRef.current ? 0.04 : 0.12;
++      baseTargetRef.current.copy(lookAtTargetRef.current);
++      saccadeTargetRef.current.set(
++        lookAtTargetRef.current.x + (Math.random() - 0.5) * range,
++        lookAtTargetRef.current.y + (Math.random() - 0.5) * range * 0.6,
++        lookAtTargetRef.current.z,
++      );
++      lerpAlphaRef.current = 0;
++      inSaccadeRef.current = true;
++    }
++  }, 3); // priority 3 — runs after life noise
++}
++
++// ────────────────────────────────────────────────────────────────────────────
++// ATTENTIVE LISTENING POSTURE — Z-axis lean + eye contact lock
++// ────────────────────────────────────────────────────────────────────────────
++function useAttentiveListeningPosture(
++  groupRef: React.RefObject<THREE.Group | null>,
++  listeningRef: React.RefObject<boolean>,
++) {
++  const currentLeanRef = useRef(0);
++  const TARGET_LEAN     = 0.05;
++  const LERP_SPEED      = 1.8; // seconds to reach full lean
++
++  useFrame((_, delta) => {
++    const g = groupRef.current;
++    if (!g) return;
++    const targetLean = listeningRef.current ? TARGET_LEAN : 0;
++    currentLeanRef.current += (targetLean - currentLeanRef.current) * Math.min(1, delta * LERP_SPEED);
++    g.position.z = 0.2 + currentLeanRef.current;
++  }, 4);
++}
++
++// ────────────────────────────────────────────────────────────────────────────
++// PHONEME WATCHDOG — Drives AA/IH/OU blendshapes from audio amplitude
++// Zero-latency fallback when word-timings are missing.
++// ────────────────────────────────────────────────────────────────────────────
++function usePhonemeWatchdog(
++  vrmRef: React.RefObject<VRM | null>,
++  isTalkingRef: React.RefObject<boolean>,
++  audioContextRef: React.RefObject<AudioContext | null>,
++  analyserRef: React.RefObject<AnalyserNode | null>,
++) {
++  const proceduralPhaseRef = useRef(0);
++  const aaCurrentRef  = useRef(0);
++  const ihCurrentRef  = useRef(0);
++  const ouCurrentRef  = useRef(0);
++  const pcmRef = useRef<Uint8Array<ArrayBuffer>>(new Uint8Array(64) as Uint8Array<ArrayBuffer>);
++
++  useFrame((_, delta) => {
++    const v = vrmRef.current;
++    const em = v?.expressionManager;
++    if (!em || !isTalkingRef.current) {
++      // Decay to closed mouth when not talking
++      aaCurrentRef.current *= (1 - Math.min(1, delta * 8));
++      ihCurrentRef.current *= (1 - Math.min(1, delta * 8));
++      ouCurrentRef.current *= (1 - Math.min(1, delta * 8));
++      if (aaCurrentRef.current > 0.001) {
++        try { em?.setValue('aa' as never, aaCurrentRef.current); } catch {}
++        try { em?.setValue('ih' as never, ihCurrentRef.current); } catch {}
++        try { em?.setValue('ou' as never, ouCurrentRef.current); } catch {}
++      }
++      return;
++    }
++
++    let amplitude = 0;
++
++    // Try Web Audio API amplitude first (real-time, 0ms latency)
++    if (analyserRef.current) {
++      analyserRef.current.getByteTimeDomainData(pcmRef.current);
++      let sum = 0;
++      for (let i = 0; i < pcmRef.current.length; i++) {
++        const v = (pcmRef.current[i] - 128) / 128;
++        sum += v * v;
++      }
++      amplitude = Math.sqrt(sum / pcmRef.current.length);
++    } else {
++      // Procedural fallback — natural syllabic rhythm at ~5 syl/sec
++      proceduralPhaseRef.current += delta * 5.5;
++      amplitude = Math.max(0, Math.sin(proceduralPhaseRef.current)) * 0.55;
++    }
++
++    // Map amplitude to AA/IH/OU with natural distribution
++    const aa = Math.min(1, amplitude * 1.2);
++    const ih = Math.min(1, amplitude * 0.7);
++    const ou = Math.min(1, amplitude * 0.5);
++
++    // Smooth toward targets (0ms latency open, 80ms latency close)
++    const openAlpha  = Math.min(1, delta * 25);
++    const closeAlpha = Math.min(1, delta * 12);
++    const alphaAA = aa > aaCurrentRef.current ? openAlpha : closeAlpha;
++    const alphaIH = ih > ihCurrentRef.current ? openAlpha : closeAlpha;
++    const alphaOU = ou > ouCurrentRef.current ? openAlpha : closeAlpha;
++
++    aaCurrentRef.current += (aa - aaCurrentRef.current) * alphaAA;
++    ihCurrentRef.current += (ih - ihCurrentRef.current) * alphaIH;
++    ouCurrentRef.current += (ou - ouCurrentRef.current) * alphaOU;
++
++    try { em.setValue('aa' as never, aaCurrentRef.current); } catch {}
++    try { em.setValue('ih' as never, ihCurrentRef.current); } catch {}
++    try { em.setValue('ou' as never, ouCurrentRef.current); } catch {}
++  }, 0); // priority 0 — highest, runs first
++}
++
+ const ARM_BONE_NAMES = ['leftUpperArm', 'leftLowerArm', 'leftHand', 'rightUpperArm', 'rightLowerArm', 'rightHand'] as const;
+ 
+-/**
+- * ─── أنماط تحديد العظام ───────────────────────────────────────────────────────
+- * يدعم الأفاتار أسماء العظام بثلاث لغات:
+- *  ① العربية  : الذراع الأيمن، الساعد الأيسر، اليد اليمنى... إلخ
+- *  ② الإنجليزية: RightArm, LeftForeArm, Hips... (Mixamo / Avaturn / Unity)
+- *  ③ اليابانية : 右腕، 左ひじ、右足... (VRChat / VRM 0.x)
+- *
+- * المسار الأساسي: إذا توفّر الـ humanoid API في VRM يُستخدم مباشرةً.
+- * المسار الاحتياطي: المطابقة بالنمط على عظام الهيكل العظمي.
+- */
+-
+-// الأذرع والأيدي — Arms & Hands
+ const SKELETON_ARM_PATTERNS: Record<string, RegExp> = {
+-  // الذراع الأيمن العلوي (العضد الأيمن)
+   rightUpperArm: /J_Bip_R_UpperArm|RightUpperArm|Right Arm|rightUpperArm|mixamorigRightArm|RightArm|R_UpperArm|ذراع_يمين|الذراع_الأيمن|عضد_يمين|ذراع يمين|الذراع الأيمن|العضد_الأيمن|右腕|右腕上/i,
+-  // الساعد الأيمن (ذراع أيمن سفلي)
+   rightLowerArm: /J_Bip_R_LowerArm|RightLowerArm|Right Forearm|rightLowerArm|mixamorigRightForeArm|RightForeArm|R_LowerArm|ساعد_يمين|الساعد_الأيمن|ساعد يمين|الساعد الأيمن|右ひじ|右前腕/i,
+-  // اليد اليمنى
+   rightHand: /J_Bip_R_Hand|RightHand|Right Hand|rightHand|mixamorigRightHand|R_Hand|يد_يمين|اليد_اليمنى|يد يمين|اليد اليمنى|右手/i,
+-  // الذراع الأيسر العلوي (العضد الأيسر)
+   leftUpperArm: /J_Bip_L_UpperArm|LeftUpperArm|Left Arm|leftUpperArm|mixamorigLeftArm|LeftArm|L_UpperArm|ذراع_يسار|الذراع_الأيسر|عضد_يسار|ذراع يسار|الذراع الأيسر|العضد_الأيسر|左腕|左腕上/i,
+-  // الساعد الأيسر
+   leftLowerArm: /J_Bip_L_LowerArm|LeftLowerArm|Left Forearm|leftLowerArm|mixamorigLeftForeArm|LeftForeArm|L_LowerArm|ساعد_يسار|الساعد_الأيسر|ساعد يسار|الساعد الأيسر|左ひじ|左前腕/i,
+-  // اليد اليسرى
+   leftHand: /J_Bip_L_Hand|LeftHand|Left Hand|leftHand|mixamorigLeftHand|L_Hand|يد_يسار|اليد_اليسرى|يد يسار|اليد اليسرى|左手/i,
+ };
+ 
+ const LEG_BONE_NAMES = ['leftUpperLeg', 'leftLowerLeg', 'leftFoot', 'rightUpperLeg', 'rightLowerLeg', 'rightFoot'] as const;
+ 
+-// الأرجل والقدمان — Legs & Feet
+ const SKELETON_LEG_PATTERNS: Record<string, RegExp> = {
+-  // الفخذ الأيمن (الساق العليا اليمنى)
+   rightUpperLeg: /J_Bip_R_UpperLeg|RightUpperLeg|Right Thigh|rightUpperLeg|mixamorigRightUpLeg|RightUpLeg|R_UpperLeg|فخذ_يمين|الفخذ_الأيمن|فخذ يمين|الفخذ الأيمن|右足上|右腿|右太腿|右足D|右CF_1/i,
+-  // الساق الأيمن (الساق السفلى اليمنى)
+   rightLowerLeg: /J_Bip_R_LowerLeg|RightLowerLeg|Right Shin|rightLowerLeg|mixamorigRightLeg|RightLeg|R_LowerLeg|ساق_يمين|الساق_الأيمن|ساق يمين|الساق الأيمن|右ひざ|右膝|右下腿|右足E|右CF_2/i,
+-  // القدم اليمنى
+   rightFoot: /J_Bip_R_Foot|RightFoot|rightFoot|mixamorigRightFoot|R_Foot|قدم_يمين|القدم_اليمنى|قدم يمين|القدم اليمنى|右足首|右足先|右足捩|右CF_3/i,
+-  // الفخذ الأيسر
+   leftUpperLeg: /J_Bip_L_UpperLeg|LeftUpperLeg|Left Thigh|leftUpperLeg|mixamorigLeftUpLeg|LeftUpLeg|L_UpperLeg|فخذ_يسار|الفخذ_الأيسر|فخذ يسار|الفخذ الأيسر|左足上|左腿|左太腿|左足D|左CF_1/i,
+-  // الساق الأيسر
+   leftLowerLeg: /J_Bip_L_LowerLeg|LeftLowerLeg|Left Shin|leftLowerLeg|mixamorigLeftLeg|LeftLeg|L_LowerLeg|ساق_يسار|الساق_الأيسر|ساق يسار|الساق الأيسر|左ひざ|左膝|左下腿|左足E|左CF_2/i,
+-  // القدم اليسرى
+   leftFoot: /J_Bip_L_Foot|LeftFoot|leftFoot|mixamorigLeftFoot|L_Foot|قدم_يسار|القدم_اليسرى|قدم يسار|القدم اليسرى|左足首|左足先|左足捩|左CF_3/i,
+ };
+ 
+-// الجذع والرأس — Trunk & Head (مستخدم في الـ humanoid lookup)
+-const SKELETON_TRUNK_PATTERNS: Record<string, RegExp> = {
+-  // الوركان (نقطة المنشأ للهيكل العظمي)
+-  hips: /J_Bip_C_Hips|Hips|hips|mixamorigHips|حوض|الوركان|الحوض|腰/i,
+-  // العمود الفقري
+-  spine: /J_Bip_C_Spine|Spine$|spine$|mixamorigSpine$|Spine1?$|عمود_فقري|العمود_الفقري|فقرات|脊椎|脊柱/i,
+-  // الصدر
+-  chest: /J_Bip_C_Chest|Spine1|chest|mixamorigSpine1|صدر|الصدر|القفص_الصدري|胸/i,
+-  // الرقبة
+-  neck: /J_Bip_C_Neck|Neck|neck|mixamorigNeck|رقبة|الرقبة|العنق|عنق|首/i,
+-  // الرأس
+-  head: /J_Bip_C_Head|Head|head|mixamorigHead|رأس|الرأس|頭/i,
+-  // الكتف الأيمن
+-  rightShoulder: /J_Bip_R_Shoulder|RightShoulder|Right Shoulder|mixamorigRightShoulder|كتف_يمين|الكتف_الأيمن|كتف يمين|右肩/i,
+-  // الكتف الأيسر
+-  leftShoulder: /J_Bip_L_Shoulder|LeftShoulder|Left Shoulder|mixamorigLeftShoulder|كتف_يسار|الكتف_الأيسر|كتف يسار|左肩/i,
++// ── Finger bone fuzzy-regex patterns ─────────────────────────────────────────
++// Covers VRM 0.x (J_Bip), VRM 1.x standard names, Mixamo, Blender, Arabic, CJK.
++// Each pattern matches Proximal/Intermediate/Distal phalanges via numbered suffix.
++const SKELETON_FINGER_PATTERNS: Record<string, RegExp> = {
++  // ── Right hand ──────────────────────────────────────────────────────────────
++  rightThumbProximal:       /J_Bip_R_Thumb1|RightHandThumb1|r[._\- ]?thumb[._\- ]?1|r[._\- ]?thumb[._\- ]?proximal|mixamorigRightHandThumb1|إبهام.يمين.1|右親指1/i,
++  rightThumbIntermediate:   /J_Bip_R_Thumb2|RightHandThumb2|r[._\- ]?thumb[._\- ]?2|r[._\- ]?thumb[._\- ]?inter|mixamorigRightHandThumb2|إبهام.يمين.2|右親指2/i,
++  rightThumbDistal:         /J_Bip_R_Thumb3|RightHandThumb3|r[._\- ]?thumb[._\- ]?3|r[._\- ]?thumb[._\- ]?distal|mixamorigRightHandThumb3|إبهام.يمين.3|右親指3/i,
++  rightIndexProximal:       /J_Bip_R_Index1|RightHandIndex1|r[._\- ]?index[._\- ]?1|r[._\- ]?index[._\- ]?proximal|mixamorigRightHandIndex1|سبابة.يمين.1|右人差指1/i,
++  rightIndexIntermediate:   /J_Bip_R_Index2|RightHandIndex2|r[._\- ]?index[._\- ]?2|r[._\- ]?index[._\- ]?inter|mixamorigRightHandIndex2|سبابة.يمين.2|右人差指2/i,
++  rightIndexDistal:         /J_Bip_R_Index3|RightHandIndex3|r[._\- ]?index[._\- ]?3|r[._\- ]?index[._\- ]?distal|mixamorigRightHandIndex3|سبابة.يمين.3|右人差指3/i,
++  rightMiddleProximal:      /J_Bip_R_Middle1|RightHandMiddle1|r[._\- ]?middle[._\- ]?1|r[._\- ]?middle[._\- ]?proximal|mixamorigRightHandMiddle1|وسطى.يمين.1|右中指1/i,
++  rightMiddleIntermediate:  /J_Bip_R_Middle2|RightHandMiddle2|r[._\- ]?middle[._\- ]?2|r[._\- ]?middle[._\- ]?inter|mixamorigRightHandMiddle2|وسطى.يمين.2|右中指2/i,
++  rightMiddleDistal:        /J_Bip_R_Middle3|RightHandMiddle3|r[._\- ]?middle[._\- ]?3|r[._\- ]?middle[._\- ]?distal|mixamorigRightHandMiddle3|وسطى.يمين.3|右中指3/i,
++  rightRingProximal:        /J_Bip_R_Ring1|RightHandRing1|r[._\- ]?ring[._\- ]?1|r[._\- ]?ring[._\- ]?proximal|mixamorigRightHandRing1|بنصر.يمين.1|右薬指1/i,
++  rightRingIntermediate:    /J_Bip_R_Ring2|RightHandRing2|r[._\- ]?ring[._\- ]?2|r[._\- ]?ring[._\- ]?inter|mixamorigRightHandRing2|بنصر.يمين.2|右薬指2/i,
++  rightRingDistal:          /J_Bip_R_Ring3|RightHandRing3|r[._\- ]?ring[._\- ]?3|r[._\- ]?ring[._\- ]?distal|mixamorigRightHandRing3|بنصر.يمين.3|右薬指3/i,
++  rightLittleProximal:      /J_Bip_R_Little1|RightHandPinky1|r[._\- ]?(?:little|pinky)[._\- ]?1|r[._\- ]?(?:little|pinky)[._\- ]?proximal|mixamorigRightHandPinky1|خنصر.يمين.1|右小指1/i,
++  rightLittleIntermediate:  /J_Bip_R_Little2|RightHandPinky2|r[._\- ]?(?:little|pinky)[._\- ]?2|r[._\- ]?(?:little|pinky)[._\- ]?inter|mixamorigRightHandPinky2|خنصر.يمين.2|右小指2/i,
++  rightLittleDistal:        /J_Bip_R_Little3|RightHandPinky3|r[._\- ]?(?:little|pinky)[._\- ]?3|r[._\- ]?(?:little|pinky)[._\- ]?distal|mixamorigRightHandPinky3|خنصر.يمين.3|右小指3/i,
++  // ── Left hand ───────────────────────────────────────────────────────────────
++  leftThumbProximal:        /J_Bip_L_Thumb1|LeftHandThumb1|l[._\- ]?thumb[._\- ]?1|l[._\- ]?thumb[._\- ]?proximal|mixamorigLeftHandThumb1|إبهام.يسار.1|左親指1/i,
++  leftThumbIntermediate:    /J_Bip_L_Thumb2|LeftHandThumb2|l[._\- ]?thumb[._\- ]?2|l[._\- ]?thumb[._\- ]?inter|mixamorigLeftHandThumb2|إبهام.يسار.2|左親指2/i,
++  leftThumbDistal:          /J_Bip_L_Thumb3|LeftHandThumb3|l[._\- ]?thumb[._\- ]?3|l[._\- ]?thumb[._\- ]?distal|mixamorigLeftHandThumb3|إبهام.يسار.3|左親指3/i,
++  leftIndexProximal:        /J_Bip_L_Index1|LeftHandIndex1|l[._\- ]?index[._\- ]?1|l[._\- ]?index[._\- ]?proximal|mixamorigLeftHandIndex1|سبابة.يسار.1|左人差指1/i,
++  leftIndexIntermediate:    /J_Bip_L_Index2|LeftHandIndex2|l[._\- ]?index[._\- ]?2|l[._\- ]?index[._\- ]?inter|mixamorigLeftHandIndex2|سبابة.يسار.2|左人差指2/i,
++  leftIndexDistal:          /J_Bip_L_Index3|LeftHandIndex3|l[._\- ]?index[._\- ]?3|l[._\- ]?index[._\- ]?distal|mixamorigLeftHandIndex3|سبابة.يسار.3|左人差指3/i,
++  leftMiddleProximal:       /J_Bip_L_Middle1|LeftHandMiddle1|l[._\- ]?middle[._\- ]?1|l[._\- ]?middle[._\- ]?proximal|mixamorigLeftHandMiddle1|وسطى.يسار.1|左中指1/i,
++  leftMiddleIntermediate:   /J_Bip_L_Middle2|LeftHandMiddle2|l[._\- ]?middle[._\- ]?2|l[._\- ]?middle[._\- ]?inter|mixamorigLeftHandMiddle2|وسطى.يسار.2|左中指2/i,
++  leftMiddleDistal:         /J_Bip_L_Middle3|LeftHandMiddle3|l[._\- ]?middle[._\- ]?3|l[._\- ]?middle[._\- ]?distal|mixamorigLeftHandMiddle3|وسطى.يسار.3|左中指3/i,
++  leftRingProximal:         /J_Bip_L_Ring1|LeftHandRing1|l[._\- ]?ring[._\- ]?1|l[._\- ]?ring[._\- ]?proximal|mixamorigLeftHandRing1|بنصر.يسار.1|左薬指1/i,
++  leftRingIntermediate:     /J_Bip_L_Ring2|LeftHandRing2|l[._\- ]?ring[._\- ]?2|l[._\- ]?ring[._\- ]?inter|mixamorigLeftHandRing2|بنصر.يسار.2|左薬指2/i,
++  leftRingDistal:           /J_Bip_L_Ring3|LeftHandRing3|l[._\- ]?ring[._\- ]?3|l[._\- ]?ring[._\- ]?distal|mixamorigLeftHandRing3|بنصر.يسار.3|左薬指3/i,
++  leftLittleProximal:       /J_Bip_L_Little1|LeftHandPinky1|l[._\- ]?(?:little|pinky)[._\- ]?1|l[._\- ]?(?:little|pinky)[._\- ]?proximal|mixamorigLeftHandPinky1|خنصر.يسار.1|左小指1/i,
++  leftLittleIntermediate:   /J_Bip_L_Little2|LeftHandPinky2|l[._\- ]?(?:little|pinky)[._\- ]?2|l[._\- ]?(?:little|pinky)[._\- ]?inter|mixamorigLeftHandPinky2|خنصر.يسار.2|左小指2/i,
++  leftLittleDistal:         /J_Bip_L_Little3|LeftHandPinky3|l[._\- ]?(?:little|pinky)[._\- ]?3|l[._\- ]?(?:little|pinky)[._\- ]?distal|mixamorigLeftHandPinky3|خنصر.يسار.3|左小指3/i,
+ };
+ 
+-/** الأسماء العربية لعظام VRM humanoid — للطباعة في الكونسول */
+ const VRM_BONE_LABELS_AR: Record<string, string> = {
+   hips: 'الوركان (Hips)',
+   spine: 'العمود الفقري (Spine)',
+@@ -195,50 +379,9 @@ const VRM_BONE_LABELS_AR: Record<string, string> = {
+   rightUpperArm: 'الذراع الأيمن العلوي (العضد)',
+   rightLowerArm: 'الساعد الأيمن',
+   rightHand: 'اليد اليمنى',
+-  leftUpperLeg: 'الفخذ الأيسر',
+-  leftLowerLeg: 'الساق الأيسر',
+-  leftFoot: 'القدم اليسرى',
+-  leftToes: 'أصابع القدم اليسرى',
+-  rightUpperLeg: 'الفخذ الأيمن',
+-  rightLowerLeg: 'الساق الأيمن',
+-  rightFoot: 'القدم اليمنى',
+-  rightToes: 'أصابع القدم اليمنى',
+-  // الأصابع — اليد اليسرى
+-  leftThumbProximal: 'إبهام يسار — قاعدة',
+-  leftThumbIntermediate: 'إبهام يسار — وسط',
+-  leftThumbDistal: 'إبهام يسار — طرف',
+-  leftIndexProximal: 'سبابة يسار — قاعدة',
+-  leftIndexIntermediate: 'سبابة يسار — وسط',
+-  leftIndexDistal: 'سبابة يسار — طرف',
+-  leftMiddleProximal: 'وسطى يسار — قاعدة',
+-  leftMiddleIntermediate: 'وسطى يسار — وسط',
+-  leftMiddleDistal: 'وسطى يسار — طرف',
+-  leftRingProximal: 'بنصر يسار — قاعدة',
+-  leftRingIntermediate: 'بنصر يسار — وسط',
+-  leftRingDistal: 'بنصر يسار — طرف',
+-  leftLittleProximal: 'خنصر يسار — قاعدة',
+-  leftLittleIntermediate: 'خنصر يسار — وسط',
+-  leftLittleDistal: 'خنصر يسار — طرف',
+-  // الأصابع — اليد اليمنى
+-  rightThumbProximal: 'إبهام يمين — قاعدة',
+-  rightThumbIntermediate: 'إبهام يمين — وسط',
+-  rightThumbDistal: 'إبهام يمين — طرف',
+-  rightIndexProximal: 'سبابة يمين — قاعدة',
+-  rightIndexIntermediate: 'سبابة يمين — وسط',
+-  rightIndexDistal: 'سبابة يمين — طرف',
+-  rightMiddleProximal: 'وسطى يمين — قاعدة',
+-  rightMiddleIntermediate: 'وسطى يمين — وسط',
+-  rightMiddleDistal: 'وسطى يمين — طرف',
+-  rightRingProximal: 'بنصر يمين — قاعدة',
+-  rightRingIntermediate: 'بنصر يمين — وسط',
+-  rightRingDistal: 'بنصر يمين — طرف',
+-  rightLittleProximal: 'خنصر يمين — قاعدة',
+-  rightLittleIntermediate: 'خنصر يمين — وسط',
+-  rightLittleDistal: 'خنصر يمين — طرف',
+ };
+ 
+-// ─── Extended gesture state ──────────────────────────────────────────────────
+-export type ExtendedGestureType = 'wave' | 'point' | 'openHand' | 'beat';
++export type ExtendedGestureType = 'wave' | 'point' | 'openHand' | 'beat' | 'head_down';
+ export interface GestureState {
+   active: boolean;
+   type: ExtendedGestureType;
+@@ -248,17 +391,8 @@ export interface GestureState {
+   intensity: number;
+ }
+ 
+-function applyPointGesture(
+-  pose: Record<string, { rotation?: [number, number, number, number] }>,
+-  side: 'left' | 'right' | 'both',
+-  progress: number,
+-  euler: THREE.Euler
+-) {
+-  const curve = progress < 0.15
+-    ? progress / 0.15
+-    : progress > 0.85
+-      ? (1 - progress) / 0.15
+-      : 1;
++function applyPointGesture(pose: any, side: string, progress: number, euler: THREE.Euler) {
++  const curve = progress < 0.15 ? progress / 0.15 : progress > 0.85 ? (1 - progress) / 0.15 : 1;
+   const applyToSide = (prefix: string) => {
+     euler.set(-0.55 * curve, 0, prefix === 'right' ? 0.1 * curve : -0.1 * curve, 'YXZ');
+     pose[`${prefix}UpperArm`] = { rotation: eulerToQuatArray(euler) };
+@@ -271,12 +405,7 @@ function applyPointGesture(
+   if (side === 'left' || side === 'both') applyToSide('left');
+ }
+ 
+-function applyOpenHandGesture(
+-  pose: Record<string, { rotation?: [number, number, number, number] }>,
+-  side: 'left' | 'right' | 'both',
+-  progress: number,
+-  euler: THREE.Euler
+-) {
++function applyOpenHandGesture(pose: any, side: string, progress: number, euler: THREE.Euler) {
+   const curve = Math.sin(progress * Math.PI);
+   const applyToSide = (prefix: string) => {
+     const dir = prefix === 'right' ? 1 : -1;
+@@ -291,13 +420,7 @@ function applyOpenHandGesture(
+   if (side === 'left' || side === 'both') applyToSide('left');
+ }
+ 
+-function applyBeatGesture(
+-  pose: Record<string, { rotation?: [number, number, number, number] }>,
+-  side: 'left' | 'right' | 'both',
+-  progress: number,
+-  intensity: number,
+-  euler: THREE.Euler
+-) {
++function applyBeatGesture(pose: any, side: string, progress: number, intensity: number, euler: THREE.Euler) {
+   const envelope = Math.sin(progress * Math.PI);
+   const beat = Math.sin(progress * Math.PI * 5) * intensity * 0.28 * envelope;
+   const raise = envelope * 0.35;
+@@ -318,60 +441,56 @@ function useArmPose(
+   vrmRef: React.RefObject<VRM | null>,
+   waveUntilRef: React.RefObject<number>,
+   gestureStateRef?: React.RefObject<GestureState | null>,
+-  walkStateRef?: React.RefObject<{ isWalking: boolean; walkPhase: number } | null>
++  walkStateRef?: React.RefObject<{ isWalking: boolean; walkPhase: number } | null>,
++  vrmBonesRef?: React.RefObject<Record<string, THREE.Object3D>>,
+ ) {
+   const eulerTemp = useRef(new THREE.Euler(0, 0, 0, 'YXZ'));
+   const availableBonesRef = useRef<Set<string>>(new Set());
+   const skeletonBoneMapRef = useRef<Map<string, THREE.Bone>>(new Map());
++  // Persistent current quaternions per bone — enables 300ms slerp transitions
++  const bonePoseCurrentRef = useRef<Map<string, THREE.Quaternion>>(new Map());
++  const quatTmp = useRef(new THREE.Quaternion());
+ 
+-  useFrame((state) => {
++  useFrame((state, delta) => {
+     const v = vrmRef.current;
+     const humanoid = v?.humanoid;
+     if (!v?.scene) return;
+ 
+     if (availableBonesRef.current.size === 0 || skeletonBoneMapRef.current.size === 0) {
+-      // ── المسار الأساسي: استخدام VRM humanoid API مباشرةً ─────────────────
+-      // هذا المسار هو الأفضل لأن VRM يحتوي على خريطة عظام humanoid جاهزة
+-      const humanoidBoneNames = [...ARM_BONE_NAMES, ...LEG_BONE_NAMES] as string[];
+-      let humanoidFound = 0;
+-      humanoidBoneNames.forEach((name) => {
+-        const node = humanoid?.getRawBoneNode(name as never) ?? humanoid?.getNormalizedBoneNode(name as never);
+-        if (node) {
+-          skeletonBoneMapRef.current.set(name, node as THREE.Bone);
+-          availableBonesRef.current.add(name);
+-          humanoidFound++;
++      // Use pre-cached bones from vrmBonesRef — zero traverse cost
++      const cachedBones = vrmBonesRef?.current ?? {};
++      if (Object.keys(cachedBones).length > 0) {
++        for (const [key, bone] of Object.entries(cachedBones)) {
++          skeletonBoneMapRef.current.set(key, bone as THREE.Bone);
++          availableBonesRef.current.add(key);
+         }
+-      });
+-
+-      if (humanoidFound > 0 && process.env.NODE_ENV === 'development') {
+-        const report = [...skeletonBoneMapRef.current.entries()]
+-          .map(([k, b]) => `  ${VRM_BONE_LABELS_AR[k] ?? k}  →  ${b.name}`)
+-          .join('\n');
+-        console.debug('%c[أفاتار] ✅ عظام humanoid محمّلة:', 'color:#4fc3f7;font-weight:bold', `\n${report}`);
+-      }
+-
+-      // ── المسار الاحتياطي: مطابقة الأنماط على الهيكل العظمي ──────────────
+-      // يستخدم عندما لا تتوفر بيانات humanoid (نماذج VRoid/MMD/مخصصة)
+-      if (humanoidFound < ARM_BONE_NAMES.length) {
+-        const allPatterns = { ...SKELETON_ARM_PATTERNS, ...SKELETON_LEG_PATTERNS, ...SKELETON_TRUNK_PATTERNS };
+-        v.scene.traverse((o) => {
+-          const mesh = o as THREE.SkinnedMesh;
+-          if (mesh.skeleton) {
+-            mesh.skeleton.bones.forEach((bone) => {
+-              for (const [vrName, pattern] of Object.entries(allPatterns)) {
+-                if (pattern.test(bone.name) && !skeletonBoneMapRef.current.has(vrName)) {
+-                  skeletonBoneMapRef.current.set(vrName, bone);
+-                  availableBonesRef.current.add(vrName);
+-                }
+-              }
+-            });
++      } else {
++        // Fallback: first-frame humanoid lookup + traverse (only when no pre-cache)
++        const humanoidBoneNames = [...ARM_BONE_NAMES, ...LEG_BONE_NAMES] as string[];
++        let humanoidFound = 0;
++        humanoidBoneNames.forEach((name) => {
++          const node = humanoid?.getRawBoneNode(name as never) ?? humanoid?.getNormalizedBoneNode(name as never);
++          if (node) {
++            skeletonBoneMapRef.current.set(name, node as THREE.Bone);
++            availableBonesRef.current.add(name);
++            humanoidFound++;
+           }
+         });
+-        if (process.env.NODE_ENV === 'development' && skeletonBoneMapRef.current.size > 0) {
+-          const report = [...skeletonBoneMapRef.current.entries()]
+-            .map(([k, b]) => `  ${VRM_BONE_LABELS_AR[k] ?? k}  →  "${b.name}"`)
+-            .join('\n');
+-          console.debug('%c[أفاتار] ⚙️ عظام مُكتشفة بنمط المطابقة:', 'color:#ffb74d;font-weight:bold', `\n${report}`);
++        if (humanoidFound < ARM_BONE_NAMES.length) {
++          const allPatterns = { ...SKELETON_ARM_PATTERNS, ...SKELETON_LEG_PATTERNS, ...SKELETON_TRUNK_PATTERNS, ...SKELETON_FINGER_PATTERNS };
++          v.scene.traverse((o) => {
++            const mesh = o as THREE.SkinnedMesh;
++            if (mesh.skeleton) {
++              mesh.skeleton.bones.forEach((bone) => {
++                for (const [vrName, pattern] of Object.entries(allPatterns)) {
++                  if (pattern.test(bone.name) && !skeletonBoneMapRef.current.has(vrName)) {
++                    skeletonBoneMapRef.current.set(vrName, bone);
++                    availableBonesRef.current.add(vrName);
++                  }
++                }
++              });
++            }
++          });
+         }
+       }
+     }
+@@ -381,27 +500,20 @@ function useArmPose(
+     const isWaving = !!waveUntilRef.current && now < waveUntilRef.current;
+     const waveElapsed = isWaving ? (waveUntilRef.current - now) / 1000 : 0;
+     const waveProgress = isWaving ? 1 - waveElapsed / WAVE_DURATION : 0;
+-    // NOTE: alwaysWave drives idle greeting animation; extended gestures override it.
+     const alwaysWave = false;
+ 
+-    // Check extended gesture (expires automatically)
+     const gs = gestureStateRef?.current;
+-    if (gs?.active && now > gs.startMs + gs.durationMs) {
+-      gs.active = false;
+-    }
+-    // Extended non-wave gestures take priority over alwaysWave idle animation
++    if (gs?.active && now > gs.startMs + gs.durationMs) gs.active = false;
+     const hasExtGesture = gs?.active && gs.type !== 'wave';
+ 
+     const pose: Record<string, { rotation?: [number, number, number, number] }> = {};
+ 
+     if (hasExtGesture && gs) {
+-      // Non-wave gesture (point / openHand / beat) — takes priority
+       const progress = Math.min(1, (now - gs.startMs) / gs.durationMs);
+       switch (gs.type) {
+         case 'point': applyPointGesture(pose, gs.side, progress, eulerTemp.current); break;
+         case 'openHand': applyOpenHandGesture(pose, gs.side, progress, eulerTemp.current); break;
+         case 'beat': applyBeatGesture(pose, gs.side, progress, gs.intensity, eulerTemp.current); break;
+-        default: break;
+       }
+     } else if ((isWaving && waveProgress > 0) || alwaysWave) {
+       const prog = isWaving ? waveProgress : (t % 3) / 3;
+@@ -435,7 +547,6 @@ function useArmPose(
+       pose.rightHand = { rotation: eulerToQuatArray(eulerTemp.current) };
+     }
+ 
+-    // Leg pose when walking
+     const walkState = walkStateRef?.current;
+     if (walkState?.isWalking) {
+       const phase = walkState.walkPhase;
+@@ -462,14 +573,35 @@ function useArmPose(
+       : pose;
+     if (Object.keys(toApply).length === 0) return;
+ 
++    // 300ms smooth LERP — alpha = 1 means instant snap, ~0.033 means 30fps × 300ms
++    const lerpAlpha = Math.min(1, delta / 0.30);
++
+     const applyRotation = (name: string, rot: [number, number, number, number]) => {
++      // Safety guard — never let a missing bone (e.g. non-standard finger names)
++      // throw or stall the main animation loop.
+       const skelBone = skeletonBoneMapRef.current.get(name);
++      const fallbackNode = skelBone
++        ? null
++        : (humanoid?.getRawBoneNode(name as never)
++            ?? humanoid?.getNormalizedBoneNode(name as never)
++            ?? (humanoid as any)?.humanBones?.[name]?.node
++            ?? null);
++      if (!skelBone && !fallbackNode) return; // bone not available — skip safely
++
++      quatTmp.current.set(rot[0], rot[1], rot[2], rot[3]);
++
++      // Get or seed current pose quaternion
++      if (!bonePoseCurrentRef.current.has(name)) {
++        bonePoseCurrentRef.current.set(name, quatTmp.current.clone());
++      }
++      const current = bonePoseCurrentRef.current.get(name)!;
++      current.slerp(quatTmp.current, lerpAlpha);
++
+       if (skelBone) {
+-        skelBone.quaternion.set(rot[0], rot[1], rot[2], rot[3]);
++        skelBone.quaternion.copy(current);
+         return;
+       }
+-      const node = humanoid?.getRawBoneNode(name as never) ?? humanoid?.getNormalizedBoneNode(name as never);
+-      if (node) node.quaternion.set(rot[0], rot[1], rot[2], rot[3]);
++      if (fallbackNode) fallbackNode.quaternion.copy(current);
+     };
+ 
+     if (skeletonBoneMapRef.current.size > 0) {
+@@ -478,12 +610,8 @@ function useArmPose(
+         if (rot?.length === 4) applyRotation(name, rot);
+       }
+     } else if (humanoid) {
+-      try {
+-        humanoid.setNormalizedPose(toApply);
+-      } catch {
+-        try {
+-          humanoid.setRawPose(toApply);
+-        } catch {
++      try { humanoid.setNormalizedPose(toApply); } catch {
++        try { humanoid.setRawPose(toApply); } catch {
+           for (const [name, data] of Object.entries(toApply) as [string, { rotation?: [number, number, number, number] }][]) {
+             const rot = data?.rotation;
+             if (rot?.length === 4) applyRotation(name, rot);
+@@ -494,19 +622,22 @@ function useArmPose(
+   }, 1);
+ }
+ 
+-function useProceduralBlink(vrmRef: React.RefObject<VRM | null>) {
++function useProceduralBlink(vrmRef: React.RefObject<VRM | null>, isTalkingRef?: React.RefObject<boolean>) {
+   const nextBlinkRef = useRef(Date.now() + (BLINK_INTERVAL_MIN + Math.random() * (BLINK_INTERVAL_MAX - BLINK_INTERVAL_MIN)) * 1000);
+   const blinkPhaseRef = useRef(0);
+   const blinkSupportedRef = useRef<boolean | null>(null);
+ 
+   useFrame((_, delta) => {
++    if (typeof document !== 'undefined' && document.hidden) return;
+     try {
+       const v = vrmRef.current;
+       const em = v?.expressionManager;
+       if (!em) return;
+ 
+-      const now = Date.now();
++      // إيقاف الرمش أثناء الكلام لتجنب تعارض الـ Blendshapes مع الشفاه
++      if (isTalkingRef?.current) return;
+ 
++      const now = Date.now();
+       if (blinkPhaseRef.current > 0) {
+         blinkPhaseRef.current += delta * 14;
+         const phase = blinkPhaseRef.current;
+@@ -528,15 +659,11 @@ function useProceduralBlink(vrmRef: React.RefObject<VRM | null>) {
+         if (phase > Math.PI * 2) {
+           blinkPhaseRef.current = 0;
+           if (blinkSupportedRef.current) {
+-            try {
+-              em.setValue('blink' as never, 0);
+-            } catch {
++            try { em.setValue('blink' as never, 0); } catch {
+               try {
+                 em.setValue('blinkLeft' as never, 0);
+                 em.setValue('blinkRight' as never, 0);
+-              } catch {
+-                /* ignore */
+-              }
++              } catch {}
+             }
+           }
+           nextBlinkRef.current = now + (BLINK_INTERVAL_MIN + Math.random() * (BLINK_INTERVAL_MAX - BLINK_INTERVAL_MIN)) * 1000;
+@@ -544,9 +671,7 @@ function useProceduralBlink(vrmRef: React.RefObject<VRM | null>) {
+       } else if (now >= nextBlinkRef.current) {
+         blinkPhaseRef.current = 0.001;
+       }
+-    } catch {
+-      /* never crash the avatar */
+-    }
++    } catch {}
+   });
+ }
+ 
+@@ -555,67 +680,40 @@ export interface VRMAvatarRef {
+   setEmotion: (emotion: string) => void;
+ }
+ 
+-function fallbackSpeakWebSpeech(
+-  text: string,
+-  onStart?: () => void,
+-  onEnd?: () => void
+-): boolean {
++function fallbackSpeakWebSpeech(text: string, onStart?: () => void, onEnd?: () => void): boolean {
+   if (typeof window === 'undefined' || !window.speechSynthesis) return false;
+   try {
+     window.speechSynthesis.cancel();
+-
+-    // Auto-detect language to prevent Arabic text playing on wrong-language voice (e.g. Japanese).
+-    const lang     = /[\u0600-\u06FF]/.test(text) ? 'ar-SA' : 'en-US';
++    const lang = /[\u0600-\u06FF]/.test(text) ? 'ar-SA' : 'en-US';
+     const langBase = lang.split('-')[0];
+ 
+     let launched = false;
+     const doSpeak = () => {
+       if (launched) return;
+       launched = true;
+-      const voices   = window.speechSynthesis.getVoices();
+-      const preferred =
+-        voices.find(v => v.lang === lang) ??
+-        voices.find(v => v.lang.startsWith(langBase)) ??
+-        null;
++      const voices = window.speechSynthesis.getVoices();
++      const preferred = voices.find(v => v.lang === lang) ?? voices.find(v => v.lang.startsWith(langBase)) ?? null;
+ 
+       if (!preferred) {
+-        // No Arabic voice found — never fall back to a random system voice (e.g. Japanese).
+-        console.warn('[TTS:VRMfallback] No voice for', lang, '— audio skipped');
+         onEnd?.();
+         window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+         return;
+       }
+ 
+-      console.log('[TTS:VRMfallback] ✅ voice selected:', preferred.name, preferred.lang);
+-
+       const u = new SpeechSynthesisUtterance(text);
+       u.lang = lang;
+       u.rate = 0.9;
+       u.voice = preferred;
+-      u.onstart = () => {
+-        onStart?.();
+-        window.dispatchEvent(new CustomEvent('avatar:speak:start'));
+-      };
+-      u.onend = () => {
+-        onEnd?.();
+-        window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+-      };
+-      u.onerror = () => {
+-        onEnd?.();
+-        window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+-      };
++      u.onstart = () => { onStart?.(); window.dispatchEvent(new CustomEvent('avatar:speak:start')); };
++      u.onend = () => { onEnd?.(); window.dispatchEvent(new CustomEvent('avatar:speak:end')); };
++      u.onerror = () => { onEnd?.(); window.dispatchEvent(new CustomEvent('avatar:speak:end')); };
+       window.speechSynthesis.speak(u);
+     };
+ 
+-    if (window.speechSynthesis.getVoices().length > 0) {
+-      doSpeak();
+-    } else {
++    if (window.speechSynthesis.getVoices().length > 0) doSpeak();
++    else {
+       window.speechSynthesis.onvoiceschanged = () => { doSpeak(); };
+-      // Only fire the timeout fallback if voices have loaded by then.
+-      // Empty-voices path → preferred=null → guard miss → browser default (could be Japanese).
+-      setTimeout(() => {
+-        if (window.speechSynthesis.getVoices().length > 0) doSpeak();
+-      }, 800);
++      setTimeout(() => { if (window.speechSynthesis.getVoices().length > 0) doSpeak(); }, 800);
+     }
+     return true;
+   } catch {
+@@ -623,24 +721,25 @@ function fallbackSpeakWebSpeech(
+   }
+ }
+ 
+-// ─── VRMModel ─────────────────────────────────────────────────────────────────
+-// Brief head-pose micro-reactions when a new emotion is received.
+-// dx = lookAt.x offset (positive = right), dy = lookAt.y offset (negative = up).
+ const EMOTION_HEAD_REACTIONS: Readonly<Record<string, { dx?: number; dy?: number; durationMs: number }>> = {
+-  proud:       { dy: -0.22, durationMs: 1400 },   // chin-up
+-  curious:     { dx: -0.18, durationMs: 1600 },   // tilt left (inquisitive)
+-  concerned:   { dy:  0.18, durationMs: 1300 },   // head droop
+-  attentive:   { dy: -0.12, durationMs: 1100 },   // slight look-up (engaged)
+-  surprised:   { dy: -0.24, durationMs:  700 },   // quick head-back
+-  excited:     { dy: -0.14, durationMs:  900 },   // upward energy
++  proud:       { dy: -0.22, durationMs: 1400 },
++  curious:     { dx: -0.18, durationMs: 1600 },
++  concerned:   { dy:  0.18, durationMs: 1300 },
++  attentive:   { dy: -0.12, durationMs: 1100 },
++  surprised:   { dy: -0.24, durationMs:  700 },
++  excited:     { dy: -0.14, durationMs:  900 },
+   celebration: { dy: -0.20, durationMs: 1000 },
+   celebrate:   { dy: -0.20, durationMs: 1000 },
+   happy:       { dy: -0.10, durationMs: 1000 },
+-  thinking:    { dx:  0.16, durationMs: 2000 },   // tilt right while pondering
+-  sad:         { dy:  0.22, durationMs: 2200 },   // head bow
+-  angry:       { dy:  0.08, durationMs: 1200 },   // forward glare
+-  sleepy:      { dy:  0.15, durationMs: 2500 },
+-  goodbye:     { dx: -0.10, durationMs: 1000 },   // tilt left on farewell
++  thinking:    { dx:  0.16, durationMs: 2000 },
++  sad:              { dy:  0.22, durationMs: 2200 },
++  angry:            { dy:  0.08, durationMs: 1200 },
++  sleepy:           { dy:  0.15, durationMs: 2500 },
++  goodbye:          { dx: -0.10, durationMs: 1000 },
++  friendly:         { dy: -0.08, durationMs: 1000 },
++  strictEvaluation: { dy:  0.10, durationMs: 1400 },
++  encouraging:      { dy: -0.12, durationMs: 1000 },
++  neutral:          { dy:  0.00, durationMs:  500 },
+ };
+ 
+ function VRMModel({
+@@ -657,41 +756,37 @@ function VRMModel({
+   walkStateRef?: React.RefObject<{ isWalking: boolean; walkPhase: number } | null>;
+ }) {
+   const [vrm, setVrm] = useState<VRM | null>(null);
+-  // Keep a ref so useFrame / event callbacks always see the latest VRM
+   const vrmRef = useRef<VRM | null>(null);
+   const mixerRef = useRef<THREE.AnimationMixer | null>(null);
+   const groupRef = useRef<THREE.Group>(null);
+ 
+-  // ── Lip-sync + emotion state ──────────────────────────────────────────────────
+   const isTalkingRef = useRef(false);
+   const talkStartRef = useRef(0);
+-  const visemeRef = useRef<VisemeWeights>({ aa: 0, ih: 0, ou: 0 });
+   const timingsRef = useRef<WordTiming[] | null>(null);
+-  const audioStartTimeRef = useRef<number>(0);
+-  const lipSyncFlagSetRef = useRef(false);
+   const emotionRef = useRef<string>('neutral');
+   const postureLeanRef = useRef(0);
+   const waveUntilRef = useRef(0);
+-  // Accumulated blob URLs that need to be revoked to prevent memory leaks
+-  // Note: TTS is now handled by speakWithTTS which manages its own audio lifecycle
+ 
+-  // ── Extended gesture state ─────────────────────────────────────────────────
+   const gestureStateRef = useRef<GestureState | null>(null);
+-
+-  // ── V29 Managers (r3f-vrm + AIMascotKit + svelte-vrm-live) ────────────────
+   const emotionManagerRef = useRef<EmotionManager | null>(null);
+   const phonemeManagerRef = useRef<PhonemeManager | null>(null);
+-  // ── V30 diagnostic frame counter ─────────────────────────────────────────
+   const frameCounterRef = useRef(0);
++  const lookAtTargetRef = useRef(new THREE.Vector3()); // final gaze target — modified by saccades
++  const gazeMouseRef    = useRef(new THREE.Vector3()); // raw mouse world-pos (separate from saccade target)
++  const vrmBonesRef     = useRef<Record<string, THREE.Object3D>>({}); // pre-cached bones — ZERO traverse in useFrame
++  const nodRef = useRef<{ active: boolean; intensity: number; durationMs: number; startMs: number; baseY: number }>(
++    { active: false, intensity: 0.25, durationMs: 450, startMs: 0, baseY: 0 }
++  );
++
++  // ── SAFE-FIT: updated after VRM load; read by useHeadTracking every frame ──
++  const fittedBaseYRef = useRef(AVATAR_BASE_Y);
+ 
+-  // ── Internal walk state — responds to avatar:walk / avatar:stop events ──
+   const internalWalkRef = useRef<{ isWalking: boolean; walkPhase: number }>({ isWalking: false, walkPhase: 0 });
+   const activeWalkRef = walkStateRef ?? internalWalkRef;
+ 
+   useEffect(() => {
+     const onWalk = (e: Event) => {
+       const isWalking = (e as CustomEvent<{ isWalking?: boolean }>).detail?.isWalking ?? true;
+-      console.log('%c[V30] 📨 avatar:walk received', 'color:cyan', '| isWalking:', isWalking, '| activeWalkRef:', activeWalkRef.current);
+       const cur = activeWalkRef.current ?? { isWalking: false, walkPhase: 0 };
+       activeWalkRef.current = { ...cur, isWalking };
+     };
+@@ -708,13 +803,47 @@ function VRMModel({
+   }, [activeWalkRef]);
+ 
+   const listeningRef = useListeningState();
+-  useHeadTracking(groupRef, listeningRef, {
+-    waveUntilRef,
+-    postureLeanRef,
+-    isTalkingRef,
+-  });
+-  useArmPose(vrmRef, waveUntilRef, gestureStateRef, activeWalkRef);
+-  useProceduralBlink(vrmRef);
++  useHeadTracking(groupRef, listeningRef, { waveUntilRef, postureLeanRef, isTalkingRef, fittedBaseYRef });
++  useArmPose(vrmRef, waveUntilRef, gestureStateRef, activeWalkRef, vrmBonesRef);
++  useProceduralBlink(vrmRef, isTalkingRef);
++  // ── Soul hooks (Life Noise + Eye Saccades + Attentive Lean) ──────────────
++  useLifeNoise(vrmBonesRef, isTalkingRef, listeningRef);
++  useEyeSaccades(vrmRef, lookAtTargetRef, listeningRef);
++  useAttentiveListeningPosture(groupRef, listeningRef);
++
++  // ── Priority-5: nod animation — runs before priority-6 gaze ──────────────
++  useFrame(() => {
++    const nod = nodRef.current;
++    if (!nod.active) return;
++    const elapsed = Date.now() - nod.startMs;
++    if (elapsed >= nod.durationMs) {
++      lookAtTargetRef.current.y = nod.baseY;
++      nod.active = false;
++      return;
++    }
++    const t = elapsed / nod.durationMs;
++    lookAtTargetRef.current.y = nod.baseY + Math.sin(t * Math.PI) * nod.intensity * 0.4;
++  }, 5);
++
++  // ── Priority-6: apply final gaze AFTER saccades have modified lookAtTargetRef ──
++  useFrame(() => {
++    const la = (vrmRef.current as { lookAt?: { lookAt: (v: THREE.Vector3) => void } })?.lookAt;
++    la?.lookAt(lookAtTargetRef.current);
++  }, 6);
++
++  // ── Priority-7: watchdog — recentre if avatar ever drifts out of frame ────
++  useFrame(() => {
++    const g = groupRef.current;
++    if (!g) return;
++    if (
++      Math.abs(g.position.x) > 2.5 ||
++      g.position.y < -4 || g.position.y > 5 ||
++      g.position.z < -2 || g.position.z > 4
++    ) {
++      console.warn('[VRM:watchdog] avatar drifted — recentring', g.position.toArray().map(v => v.toFixed(2)));
++      g.position.set(0, fittedBaseYRef.current, 0.2);
++    }
++  }, 7);
+ 
+   useEffect(() => {
+     let timeoutId: ReturnType<typeof setTimeout> | null = null;
+@@ -737,22 +866,15 @@ function VRMModel({
+     };
+   }, []);
+ 
+-  // ── avatar:emotion — set emotion state directly ─────────────────────────
+   useEffect(() => {
+-    const _evtSeen_em = new Set<string>();
+     const onEmotion = (e: Event) => {
+-      const em = (e as CustomEvent<{ emotion?: string }>).detail?.emotion;
+-      // RIG contract: reads detail.emotion (string)
+-      if (process.env.NODE_ENV === 'development' && !_evtSeen_em.has('avatar:emotion')) {
+-        _evtSeen_em.add('avatar:emotion');
+-        console.log('[EVT][RIG]', 'avatar:emotion', { keys: Object.keys((e as CustomEvent).detail ?? {}), sample: (e as CustomEvent).detail });
+-      }
+-      console.log('%c[V30] 📨 avatar:emotion received', 'color:cyan', '| emotion:', em, '| EmotionManager:', emotionManagerRef.current ? '✅ ready' : '❌ NULL');
++      const detail = (e as CustomEvent<{ emotion?: string }>).detail;
++      console.log('[NEURAL_SIGNAL_RECEIVED] emotion:', detail);
++      const em = detail?.emotion;
+       if (em) {
+         emotionRef.current = em;
+         if (em !== 'neutral') postureLeanRef.current = 0.02;
+         emotionManagerRef.current?.setEmotion(em);
+-        // Micro head-pose reaction: brief directional movement matching the emotion
+         const reaction = EMOTION_HEAD_REACTIONS[em];
+         if (reaction) {
+           const orig = lookAtTargetRef.current.clone();
+@@ -766,46 +888,25 @@ function VRMModel({
+     return () => window.removeEventListener('avatar:emotion', onEmotion);
+   }, []);
+ 
+-  // ── avatar:userreact — immediate physical reaction to incoming user message ─
+   useEffect(() => {
+     const onUserReact = (e: Event) => {
+       const type = (e as CustomEvent<{ type?: string }>).detail?.type;
+       switch (type) {
+-        case 'greeting':
+-          waveUntilRef.current = Date.now() + 2200;
+-          emotionRef.current = 'friendly';
+-          break;
+-        case 'praise':
+-          gestureStateRef.current = { active: true, type: 'beat', side: 'both', startMs: Date.now(), durationMs: 1400, intensity: 0.5 };
+-          emotionRef.current = 'encouraging';
+-          break;
+-        case 'farewell':
+-          waveUntilRef.current = Date.now() + 2500;
+-          emotionRef.current = 'friendly';
+-          break;
+-        case 'question':
+-          emotionRef.current = 'thinking';
+-          postureLeanRef.current = 0.04;
+-          break;
+-        case 'listening':
+-          postureLeanRef.current = 0.03;
+-          break;
++        case 'greeting': waveUntilRef.current = Date.now() + 2200; emotionRef.current = 'friendly'; break;
++        case 'praise': gestureStateRef.current = { active: true, type: 'beat', side: 'both', startMs: Date.now(), durationMs: 1400, intensity: 0.5 }; emotionRef.current = 'encouraging'; break;
++        case 'farewell': waveUntilRef.current = Date.now() + 2500; emotionRef.current = 'friendly'; break;
++        case 'question': emotionRef.current = 'thinking'; postureLeanRef.current = 0.04; break;
++        case 'listening': postureLeanRef.current = 0.03; break;
+       }
+     };
+     window.addEventListener('avatar:userreact', onUserReact);
+     return () => window.removeEventListener('avatar:userreact', onUserReact);
+   }, []);
+ 
+-  // ── avatar:gesture/headturn event listener ────────────────────────────────
+   useEffect(() => {
+-    const _evtSeen_gs = new Set<string>();
+     const onGesture = (e: Event) => {
+       const d = (e as CustomEvent<{ type?: string; side?: string; duration?: number; intensity?: number }>).detail;
+-      // RIG contract: reads d.type (camelCase) | tokens: point/openHand/beat
+-      if (process.env.NODE_ENV === 'development' && !_evtSeen_gs.has('avatar:gesture')) {
+-        _evtSeen_gs.add('avatar:gesture');
+-        console.log('[EVT][RIG]', 'avatar:gesture', { keys: Object.keys(d ?? {}), sample: d });
+-      }
++      console.log('[NEURAL_SIGNAL_RECEIVED] gesture:', d);
+       if (!d?.type) return;
+       const type = d.type as ExtendedGestureType;
+       const side = (d.side ?? 'right') as 'left' | 'right' | 'both';
+@@ -813,42 +914,27 @@ function VRMModel({
+       const intensity = d.intensity ?? 1;
+       if (type === 'wave') {
+         waveUntilRef.current = Date.now() + duration * 1000;
+-        if (typeof window !== 'undefined') {
+-          window.dispatchEvent(new CustomEvent('avatar:waved', { detail: {} }));
+-        }
++        if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('avatar:waved', { detail: {} }));
++      } else if (type === 'head_down') {
++        const savedY = lookAtTargetRef.current.y;
++        lookAtTargetRef.current.y += 0.28; // positive dy = look down (same sign as EMOTION_HEAD_REACTIONS 'sad')
++        setTimeout(() => { lookAtTargetRef.current.y = savedY; }, duration * 1000 || 1200);
+       } else {
+-        gestureStateRef.current = {
+-          active: true,
+-          type,
+-          side,
+-          startMs: Date.now(),
+-          durationMs: duration * 1000,
+-          intensity,
+-        };
+-      }
+-      if (process.env.NODE_ENV === 'development') {
+-        console.debug(`[VRMAvatar] Gesture triggered: ${type} (${side}) ${duration}s`);
++        gestureStateRef.current = { active: true, type, side, startMs: Date.now(), durationMs: duration * 1000, intensity };
+       }
+     };
+-    // Head turn event: rotate head (yaw) for a short duration
++    
+     let headTurnTimeout: NodeJS.Timeout | null = null;
+     const onHeadTurn = (e: Event) => {
+       const d = (e as CustomEvent<{ direction?: string; angle?: number; duration?: number }>).detail;
+       const angle = typeof d.angle === 'number' ? d.angle : 0.5;
+       const duration = typeof d.duration === 'number' ? d.duration : 1.2;
+-      // Save original lookAt target
+       const originalTarget = lookAtTargetRef.current.clone();
+-      // Turn head to the right (positive yaw)
+       lookAtTargetRef.current.x += d.direction === 'left' ? -angle : angle;
+-      // Restore after duration
+       if (headTurnTimeout) clearTimeout(headTurnTimeout);
+-      headTurnTimeout = setTimeout(() => {
+-        lookAtTargetRef.current.copy(originalTarget);
+-      }, duration * 1000);
+-      if (process.env.NODE_ENV === 'development') {
+-        console.debug(`[VRMAvatar] Head turn: ${d.direction} angle=${angle} duration=${duration}s`);
+-      }
++      headTurnTimeout = setTimeout(() => { lookAtTargetRef.current.copy(originalTarget); }, duration * 1000);
+     };
++    
+     window.addEventListener('avatar:gesture', onGesture);
+     window.addEventListener('avatar:headturn', onHeadTurn);
+     return () => {
+@@ -858,149 +944,217 @@ function VRMModel({
+     };
+   }, []);
+ 
+-  // ── VRM loader ──────────────────────────────────────────────────────────────
++  // ── avatar:headpose (dispatched by director.ts for sad/proud/etc.) ──────────
++  useEffect(() => {
++    const onHeadPose = (e: Event) => {
++      const d = (e as CustomEvent<{ yaw?: number; pitch?: number; duration?: number }>).detail;
++      if (!d) return;
++      const orig = lookAtTargetRef.current.clone();
++      // yaw > 0 = look right → increase x; pitch > 0 = look down → increase y (matches EMOTION_HEAD_REACTIONS sign)
++      if (d.yaw   !== undefined) lookAtTargetRef.current.x += d.yaw   *  0.9;
++      if (d.pitch !== undefined) lookAtTargetRef.current.y += d.pitch *  0.9;
++      const ms = d.duration ?? 1500;
++      setTimeout(() => lookAtTargetRef.current.copy(orig), ms);
++    };
++    window.addEventListener('avatar:headpose', onHeadPose as EventListener);
++    return () => window.removeEventListener('avatar:headpose', onHeadPose as EventListener);
++  }, []);
++
++  // ── avatar:nod (dispatched by director.ts phrase-timed) ──────────────────
++  useEffect(() => {
++    const onNod = (e: Event) => {
++      const d = (e as CustomEvent<{ intensity?: number; duration?: number }>).detail;
++      nodRef.current = {
++        active:     true,
++        intensity:  d?.intensity ?? 0.25,
++        durationMs: d?.duration  ?? 450,
++        startMs:    Date.now(),
++        baseY:      lookAtTargetRef.current.y,
++      };
++    };
++    window.addEventListener('avatar:nod', onNod as EventListener);
++    return () => window.removeEventListener('avatar:nod', onNod as EventListener);
++  }, []);
++
+   useEffect(() => {
+     let cancelled = false;
+     const loader = new GLTFLoader();
+     loader.register((parser: unknown) => new VRMLoaderPlugin(parser as never));
+ 
+-    const origWarn = console.warn;
+-    console.warn = (...args: unknown[]) => {
+-      if (String(args[0] ?? '').includes('LookAtDegreeMap')) return;
+-      origWarn.apply(console, args);
+-    };
+-
+     loader.load(
+       vrmUrl,
+       (gltf) => {
+         if (cancelled) return;
+-        setTimeout(() => { console.warn = origWarn; }, 0);
+-
+-        // ── STEP 1: Validate VRM data ───────────────────────────────────────
+         const vrmModel = gltf.userData.vrm as VRM;
+         if (!vrmModel?.scene) {
+-          console.warn('[VRMAvatar] No VRM data in gltf.userData.vrm — file may not be a valid VRM');
+           onError?.('Invalid VRM — no scene');
+           return;
+         }
+ 
+-        // ── STEP 2: Optimise geometry (each call isolated, never fatal) ─────
+-        try { VRMUtils.removeUnnecessaryVertices(vrmModel.scene); } catch (e) { console.warn('[VRM] removeUnnecessaryVertices failed (ok):', e); }
+-        try { VRMUtils.combineSkeletons(vrmModel.scene); } catch (e) { console.warn('[VRM] combineSkeletons failed (ok):', e); }
+-        // ⚠️ rotateVRM0 مُزال عن قصد:
+-        // teach.vrm — VRM 0.0, 25 blendshapes, 137 bones, موجّه نحو الكاميرا.
+-        // استدعاء rotateVRM0 يضيف 180° على محور Y → الأفاتار يولّي ظهره للكاميرا → غير مرئي.
+-        // rotateVRM0 مخصص فقط لنماذج VRoid Studio القديمة التي تصدر بـ -Z أمام.
+-
+-        // ── STEP 3: Configure scene meshes ──────────────────────────────────
+-        // كل meshes الأفاتار في teach.vrm هي SkinnedMesh → نتركها جميعاً مرئية
+-        // نخفي فقط Mesh الثابت التي اسمها يحتوي على كلمات بيئية (أثاث، منصة، أرضية)
++        try { VRMUtils.removeUnnecessaryVertices(vrmModel.scene); } catch (e) {}
++        try { VRMUtils.combineSkeletons(vrmModel.scene); } catch (e) {}
++
++        // ── SAFE-FIT: scale scene to ≈1.65 m; anchor feet to y=0 ─────────────
++        try {
++          const fitBox = new THREE.Box3().setFromObject(vrmModel.scene);
++          const fitH = fitBox.getSize(new THREE.Vector3()).y;
++          if (fitH > 0.01) {
++            const TARGET_H = 1.65;
++            const rawFitScale = TARGET_H / fitH;
++            const finalFitScale = Math.max(0.6, Math.min(1.6, rawFitScale));
++            vrmModel.scene.scale.setScalar(finalFitScale);
++            // Recompute after scale to get exact anchor
++            const fittedBox = new THREE.Box3().setFromObject(vrmModel.scene);
++            fittedBaseYRef.current = -fittedBox.min.y;
++            console.info('[VRM:fit] ✓', {
++              rawHeight:  fitH.toFixed(3),
++              scale:      finalFitScale.toFixed(3),
++              feetY:      fittedBox.min.y.toFixed(3),
++              headY:      fittedBox.max.y.toFixed(3),
++              baseY:      fittedBaseYRef.current.toFixed(3),
++            });
++          }
++        } catch (fitErr) { console.warn('[VRM:fit] bounding-box failed:', fitErr); }
++
+         const ENV_NAMES = /floor|stage|desk|chair|table|wall|ceiling|prop|room|env|ground|platform/i;
+-        let meshCount = 0, skinnedCount = 0;
+         vrmModel.scene.traverse((o) => {
+           o.frustumCulled = false;
+           const sm = o as THREE.SkinnedMesh;
+           if ((o as THREE.Mesh).isMesh) {
+-            meshCount++;
+             (o as THREE.Mesh).frustumCulled = false;
+             if (sm.isSkinnedMesh) {
+-              skinnedCount++;
+-              // تأكد أن الـ SkinnedMesh مرئية دائماً
+               (o as THREE.Mesh).visible = true;
+             } else if (ENV_NAMES.test(o.name)) {
+-              // أخفِ فقط المحيط الثابت بالاسم (أثاث، منصة...)
+               (o as THREE.Mesh).visible = false;
+             }
+           }
+         });
+-        console.log(`%c[VRM] ✅ SCENE READY  meshCount=${meshCount}  skinnedMeshes=${skinnedCount}`, 'color:lime;font-weight:bold');
+-
+-        // ── STEP 4: تسليم الـ VRM لـ React — الأفاتار يظهر من هنا ──────────
+-        // (Expose VRM to React — avatar renders from this point)
+-        if (process.env.NODE_ENV === 'development') {
+-          // طباعة جميع عظام الـ humanoid بالعربية للتأكد من التحميل الصحيح
+-          const hb = vrmModel.humanoid;
+-          if (hb) {
+-            const boneReport = Object.keys(VRM_BONE_LABELS_AR)
+-              .map(bName => {
+-                const node = hb.getRawBoneNode(bName as never);
+-                return node ? `  ✅ ${VRM_BONE_LABELS_AR[bName]} → "${node.name}"` : null;
+-              })
+-              .filter(Boolean)
+-              .join('\n');
+-            console.log('%c[أفاتار] 🦴 خريطة العظام الكاملة:', 'color:#a5d6a7;font-weight:bold', `\n${boneReport}`);
+-          }
+-        }
++
+         vrmRef.current = vrmModel;
+         setVrm(vrmModel);
+         onLoad?.();
+ 
+-        // ── STEP 5: Init animation managers (non-fatal — avatar already visible) ─
++        // ── Pre-cache all bones used in useFrame (eliminates per-frame traverse) ──
++        {
++          const h = vrmModel.humanoid;
++          const tryGet = (name: string): THREE.Object3D | null => {
++            // VRM 1.x + three-vrm v2+ compatibility-layer path
++            const v1 = h?.getRawBoneNode?.(name as never) ?? h?.getNormalizedBoneNode?.(name as never);
++            if (v1) return v1;
++            // VRM 0.x raw path: humanoid.humanBones[name].node
++            const hb0 = (h as any)?.humanBones?.[name];
++            return (hb0?.node ?? hb0?.bone) ?? null;
++          };
++          const boneMap: Record<string, THREE.Object3D> = {};
++          const BONE_KEYS = [
++            'hips','spine','chest','upperChest','neck','head',
++            'rightShoulder','leftShoulder',
++            'rightUpperArm','rightLowerArm','rightHand',
++            'leftUpperArm','leftLowerArm','leftHand',
++            // Fingers — VRM 1.x standard names; also resolved via SKELETON_FINGER_PATTERNS regex
++            'rightThumbProximal','rightThumbIntermediate','rightThumbDistal',
++            'rightIndexProximal','rightIndexIntermediate','rightIndexDistal',
++            'rightMiddleProximal','rightMiddleIntermediate','rightMiddleDistal',
++            'rightRingProximal','rightRingIntermediate','rightRingDistal',
++            'rightLittleProximal','rightLittleIntermediate','rightLittleDistal',
++            'leftThumbProximal','leftThumbIntermediate','leftThumbDistal',
++            'leftIndexProximal','leftIndexIntermediate','leftIndexDistal',
++            'leftMiddleProximal','leftMiddleIntermediate','leftMiddleDistal',
++            'leftRingProximal','leftRingIntermediate','leftRingDistal',
++            'leftLittleProximal','leftLittleIntermediate','leftLittleDistal',
++          ];
++          BONE_KEYS.forEach(k => { const b = tryGet(k); if (b) boneMap[k] = b; });
++          // Regex fallback only at load-time — never inside useFrame.
++          // Runs when tryGet misses (e.g. VRM0 or non-standard Blender exports).
++          if (Object.keys(boneMap).length < 4) {
++            const allPatterns = { ...SKELETON_TRUNK_PATTERNS, ...SKELETON_ARM_PATTERNS, ...SKELETON_FINGER_PATTERNS };
++            vrmModel.scene.traverse((o) => {
++              const sm = o as THREE.SkinnedMesh;
++              if (!sm.skeleton) return;
++              sm.skeleton.bones.forEach((bone) => {
++                for (const [key, pat] of Object.entries(allPatterns)) {
++                  if (!boneMap[key] && (pat as RegExp).test(bone.name)) boneMap[key] = bone;
++                }
++              });
++            });
++          }
++          vrmBonesRef.current = boneMap;
++          console.log('[BONE_CACHE] Cached', Object.keys(boneMap).length, 'bones:', Object.keys(boneMap));
++        }
++
++        // ── VRM DIAGNOSTIC — version, expressionManager, expressions, bones ──
++        console.group('[VRM_DIAGNOSTIC] Model loaded:', vrmUrl);
++        try {
++          const meta = (vrmModel as any).meta;
++          console.log('  version:', meta?.metaVersion ?? meta?.specVersion ?? 'unknown');
++          console.log('  expressionManager:', !!vrmModel.expressionManager);
++          if (vrmModel.expressionManager) {
++            const exprList = (vrmModel.expressionManager as any).expressions as any[] | undefined;
++            console.log('  expressions:', exprList?.map((e: any) => e.expressionName ?? e.name) ?? '(none)');
++          }
++          console.log('  blendShapeProxy (VRM0 raw):', !!(vrmModel as any).blendShapeProxy);
++          console.log('  humanoid:', !!vrmModel.humanoid, '— humanBoneKeys:', Object.keys(vrmModel.humanoid?.humanBones ?? {}));
++          console.log('  cachedBones:', Object.keys(vrmBonesRef.current).length, Object.keys(vrmBonesRef.current));
++          // Finger bone report — shows which finger bones the VRM actually exposes via humanoid
++          const hBones = vrmModel.humanoid?.humanBones as Record<string, unknown> | undefined;
++          const detectedFingers = Object.keys(hBones ?? {}).filter(
++            (b) => /finger|index|thumb|middle|ring|little|pinky/i.test(b)
++          );
++          console.log('  detectedFingerBones:', detectedFingers.length > 0 ? detectedFingers : '(none — will use regex fallback)');
++        } catch (diagErr) { console.warn('  diagnostic read failed:', diagErr); }
++        vrmModel.scene.traverse((o) => {
++          const sm = o as THREE.SkinnedMesh;
++          if (sm.skeleton?.bones?.length) {
++            console.log('  SkeletonMesh:', sm.name, '→ bones:', sm.skeleton.bones.map((b) => b.name));
++          }
++        });
++        console.groupEnd();
++
+         try {
+           mixerRef.current = new THREE.AnimationMixer(vrmModel.scene);
+           emotionManagerRef.current = new EmotionManager(vrmModel, mixerRef.current);
+           phonemeManagerRef.current = new PhonemeManager(vrmModel);
+           waveUntilRef.current = Date.now() + WAVE_DURATION * 1000;
+-          console.log('[VRM] managers ready — Emotion ✅  Phoneme ✅  expressionMgr:', !!vrmModel.expressionManager);
+         } catch (managerErr) {
+-          console.warn('[VRM] manager init failed (non-fatal — avatar still renders):', managerErr);
++          console.warn('[VRM] manager init failed:', managerErr);
+         }
+       },
+       undefined,
+       (error) => {
+         if (cancelled) return;
+-        console.warn = origWarn;
+         const msg = (error as Error)?.message || 'VRM network error';
+-        console.warn('[VRMAvatar] Failed to fetch VRM file:', msg, '— URL was:', vrmUrl);
+         onError?.(msg);
+       }
+     );
+-    return () => {
+-      cancelled = true;
+-      console.warn = origWarn;
+-    };
++    return () => { cancelled = true; };
+   }, [vrmUrl, onLoad, onError]);
+ 
+   const onSpeakEnd = useCallback(() => {
+     isTalkingRef.current = false;
+     timingsRef.current = null;
+-    lipSyncFlagSetRef.current = false;
+     emotionRef.current = 'neutral';
+     postureLeanRef.current = 0;
+-    visemeRef.current = { aa: 0, ih: 0, ou: 0 };
+-    // V29: stop PhonemeManager lip-sync
++    
++    // 🔴 إيقاف محرك الشفاه النظيف 
+     phonemeManagerRef.current?.stop();
+-    const v = vrmRef.current;
+-    if (v?.expressionManager) {
+-      v.expressionManager.setValue(BS_AA, 0);
+-      v.expressionManager.setValue(BS_IH, 0);
+-      v.expressionManager.setValue(BS_OU, 0);
+-      v.expressionManager.setValue('happy' as never, 0);
+-      v.expressionManager.setValue('angry' as never, 0);
+-      v.expressionManager.setValue('sad' as never, 0);
+-      v.expressionManager.setValue('relaxed' as never, 0);
+-    }
++    // 🔴 إعادة المشاعر للوضع المحايد بسلاسة
++    emotionManagerRef.current?.setEmotion('neutral');
+   }, []);
+ 
+   const doSpeak = useCallback((rawText: string) => {
+     if (!rawText?.trim()) return;
+ 
+-    // ── فصل أوصاف الحركات عن الحوار ────────────────────────────
+     const { dialogue: cleanDialogue, emotion: parsedEmotion, action } = parseVeronaResponse(rawText);
+-    // text = الحوار النظيف فقط (بدون *حركات* ولا [EMOTION])
+     const text = cleanDialogue || rawText;
+ 
+-    // ── نُفِّعل الحركات والمشاعر من وسم Verona أولاً ────────────────────
+     if (action) dispatchGestureFromActionText(action);
+ 
+     const plan = inferResponsePlan(text);
+-    // وسم Verona يتقدم على الاستنتاج المحلي
+     emotionRef.current = parsedEmotion !== 'neutral' ? parsedEmotion : plan.emotion;
+     postureLeanRef.current = plan.posture.lean === 'listen' ? 0.03 : plan.posture.lean === 'emphasize' ? -0.02 : 0;
+-    // V29: trigger VRMA body animation from speech emotion
+-    console.log('[V29] 💬 doSpeak → emotion:', emotionRef.current, '| text:', text.slice(0, 60));
++    
+     emotionManagerRef.current?.setEmotion(emotionRef.current);
+-    // Dispatch gesture based on emotion
++
+     const emotionGestureMap: Record<string, { type: ExtendedGestureType; side: 'left' | 'right' | 'both'; duration: number; intensity: number }> = {
+       celebration: { type: 'wave', side: 'both', duration: 2.5, intensity: 1 },
+       encouraging: { type: 'openHand', side: 'right', duration: 1.8, intensity: 0.9 },
+@@ -1025,16 +1179,13 @@ function VRMModel({
+     const ttsOnStart = () => {
+       isTalkingRef.current = true;
+       talkStartRef.current = 0;
+-      // V29: start PhonemeManager procedural lip-sync if no timings
+       if (!timingsRef.current?.length) phonemeManagerRef.current?.startProcedural();
+     };
+-    // نَطق الحوار النظيف فقط (text) — ليس rawText
++    
+     speakWithTTS(text, { onStart: ttsOnStart, onEnd: onSpeakEnd }).then((ok) => {
+       if (!ok) {
+-        // TTS فشل — نُفعِّل lip-sync يدوياً عبر Web Speech API
+         const started = fallbackSpeakWebSpeech(text, ttsOnStart, onSpeakEnd);
+         if (!started) {
+-          // لا يوجد صوت على الإطلاق — نحرِّك الفم إجرائياً لمدة تقريبية
+           ttsOnStart();
+           const est = Math.max(2000, text.length * 60);
+           setTimeout(onSpeakEnd, est);
+@@ -1047,155 +1198,170 @@ function VRMModel({
+     onSpeakReady?.(doSpeak);
+   }, [onSpeakReady, doSpeak]);
+ 
+-  // ── avatar:stopSpeaking — interrupt speech from any source (e.g. when mic opens) ──
+   useEffect(() => {
+     const handleStopSpeaking = () => {
+-      stopTTS();    // stops HTMLAudioElement from speakWithTTS (evaluate route etc.)
+-      onSpeakEnd(); // resets lipsync, expression, emotion to neutral
++      stopTTS();
++      onSpeakEnd();
+     };
+     window.addEventListener('avatar:stopSpeaking', handleStopSpeaking);
+     return () => window.removeEventListener('avatar:stopSpeaking', handleStopSpeaking);
+   }, [onSpeakEnd]);
+ 
+-  // ── V29: Debug object — accessible from browser console as window.__avatarDebug ────
++  // ── SPEAK LIFECYCLE — bridge between director/useAgentAgent audio and VRM state ───
++  // avatar:speak       → director.ts fires this when it wants the avatar to speak
++  // avatar:speak:start → useAgentAgent fires this when audio actually begins playing
++  // avatar:speak:end   → useAgentAgent fires this when audio finishes
+   useEffect(() => {
+-    if (typeof window === 'undefined' || !vrm) return;
+-    const avatarDebug = {
+-      get emotionManager() { return emotionManagerRef.current; },
+-      get phonemeManager() { return phonemeManagerRef.current; },
+-      get vrm() { return vrmRef.current; },
+-      get emotion() { return emotionRef.current; },
+-      get isTalking() { return isTalkingRef.current; },
+-      get mixer() { return mixerRef.current; },
+-      testEmotion: (e: string) => {
+-        console.log('[V29] 🧪 testEmotion:', e);
+-        window.dispatchEvent(new CustomEvent('avatar:emotion', { detail: { emotion: e } }));
+-      },
+-      testSpeak: (t: string) => {
+-        console.log('[V29] 🧪 testSpeak:', t.slice(0, 50));
+-        window.dispatchEvent(new CustomEvent('avatar:speak', { detail: { text: t } }));
++    // Guard to prevent double-calling onSpeakEnd if both TTS callbacks + event fire
++    let speakEndFired = false;
++
++    const onAvatarSpeak = (e: Event) => {
++      const text = (e as CustomEvent<{ text?: string }>).detail?.text ?? '';
++      console.log('[AVATAR_SPEAK] ▶ avatar:speak received, text length:', text.length, text.slice(0, 60));
++      speakEndFired = false;
++      isTalkingRef.current = true;
++      talkStartRef.current = Date.now();
++      if (!timingsRef.current?.length) phonemeManagerRef.current?.startProcedural?.();
++      // Safety watchdog: if no speak:end arrives in time, clean up automatically
++      if (text) {
++        const estMs = Math.max(2500, text.length * 65);
++        setTimeout(() => {
++          if (isTalkingRef.current && !speakEndFired) {
++            console.warn('[AVATAR_SPEAK] ⚠️ Watchdog: no speak:end received in time — stopping TTS and cleaning up');
++            speakEndFired = true;
++            stopTTS();      // kill any stalled audio
++            onSpeakEnd();
++          }
++        }, estMs + 1200);
++      }
++    };
++
++    const onSpeakStart = () => {
++      console.log('[AVATAR_SPEAK] ▶ avatar:speak:start received → isTalking = true');
++      speakEndFired = false;
++      isTalkingRef.current = true;
++      talkStartRef.current = Date.now();
++      if (!timingsRef.current?.length) phonemeManagerRef.current?.startProcedural?.();
++    };
++
++    const onSpeakEndEvt = () => {
++      if (speakEndFired) return; // prevent double-call
++      speakEndFired = true;
++      console.log('[AVATAR_SPEAK] ■ avatar:speak:end received → isTalking = false');
++      onSpeakEnd();
++    };
++
++    window.addEventListener('avatar:speak', onAvatarSpeak);
++    window.addEventListener('avatar:speak:start', onSpeakStart);
++    window.addEventListener('avatar:speak:end', onSpeakEndEvt);
++    return () => {
++      window.removeEventListener('avatar:speak', onAvatarSpeak);
++      window.removeEventListener('avatar:speak:start', onSpeakStart);
++      window.removeEventListener('avatar:speak:end', onSpeakEndEvt);
++    };
++  }, [onSpeakEnd]);
++
++  // ── GLOBAL DEBUG CONSOLE API — test in browser: __avatarDebug.testSpeak('مرحبا') ──
++  useEffect(() => {
++    if (typeof window === 'undefined') return;
++    const api = {
++      testSpeak: (text = 'مرحبا، أنا الدكتور حمزة!') => {
++        console.log('[DEBUG] testSpeak:', text);
++        window.dispatchEvent(new CustomEvent('avatar:speak', { detail: { text } }));
++        if (typeof window.speechSynthesis !== 'undefined') {
++          const u = new SpeechSynthesisUtterance(text);
++          u.lang = 'ar-SA';
++          u.onstart = () => window.dispatchEvent(new CustomEvent('avatar:speak:start'));
++          u.onend   = () => window.dispatchEvent(new CustomEvent('avatar:speak:end'));
++          window.speechSynthesis.speak(u);
++        }
+       },
+-      testWalk: (on = true) => {
+-        console.log('[V29] 🧪 testWalk:', on);
+-        window.dispatchEvent(new CustomEvent(on ? 'avatar:walk' : 'avatar:stop', { detail: { isWalking: on } }));
++      testEmotion: (emotion = 'happy') => {
++        console.log('[DEBUG] testEmotion:', emotion);
++        window.dispatchEvent(new CustomEvent('avatar:emotion', { detail: { emotion } }));
+       },
+-      getAllBones: () => {
+-        const bones: string[] = [];
+-        vrmRef.current?.scene.traverse((o) => {
+-          const m = o as THREE.SkinnedMesh;
+-          if (m.skeleton) m.skeleton.bones.forEach((b) => bones.push(b.name));
+-        });
+-        return bones;
++      testGesture: (type = 'wave', side = 'right') => {
++        console.log('[DEBUG] testGesture:', type, side);
++        window.dispatchEvent(new CustomEvent('avatar:gesture', { detail: { type, side, duration: 2.5, intensity: 1 } }));
+       },
++      state: () => ({
++        isTalking: isTalkingRef.current,
++        emotion: emotionRef.current,
++        vrmLoaded: !!vrmRef.current,
++        bonesCache: Object.keys(vrmBonesRef.current),
++        emotionManager: !!emotionManagerRef.current,
++        phonemeManager: !!phonemeManagerRef.current,
++      }),
+     };
+-    (window as unknown as Record<string, unknown>).__avatarDebug = avatarDebug;
+-    console.log('[V29] 🔧 window.__avatarDebug ready. Try:\n  __avatarDebug.testEmotion("happy")\n  __avatarDebug.testEmotion("excited")\n  __avatarDebug.testSpeak("مرحباً!")\n  __avatarDebug.testWalk()\n  __avatarDebug.getAllBones()');
+-  }, [vrm]);
++    (window as any).__avatarDebug = api;
++    console.log('%c[AVATAR DEBUG] __avatarDebug ready. Try: __avatarDebug.state() or __avatarDebug.testSpeak()', 'color:#22d3ee;font-weight:bold');
++    return () => { delete (window as any).__avatarDebug; };
++  }, []);
+ 
+   const { pointer, camera } = useThree();
+-  const lookAtTargetRef = useRef(new THREE.Vector3());
+ 
+-  // ── Animation frame ─────────────────────────────────────────────────────────
++  // ── 🔴 Animation frame المُنظف كلياً (القلب النابض) ─────────────────────────
+   useFrame((state, delta) => {
+-    // V30 diagnostic: log every 5 s (300 frames @60fps) to confirm useFrame is alive
++    if (typeof document !== 'undefined' && document.hidden) return; // إيقاف مؤقت عند إخفاء التبويب
++    
+     frameCounterRef.current += 1;
+-    if (frameCounterRef.current % 300 === 1) {
+-      console.log(
+-        '%c[V30] 🔄 useFrame alive', 'color:orange',
+-        '| frame:', frameCounterRef.current,
+-        '| vrm:', !!vrmRef.current,
+-        '| mixer:', !!mixerRef.current,
+-        '| emotionMgr:', !!emotionManagerRef.current,
+-        '| phonemeMgr:', !!phonemeManagerRef.current,
+-        '| isTalking:', isTalkingRef.current,
+-        '| isWalking:', activeWalkRef.current?.isWalking,
+-      );
++
++    // 1. تحديث حركات الجسم والتنفس (AnimationMixer) + مزج تعابير الوجه
++    // EmotionManager.update() calls _mixer.update() + _blendExpressions() — must be invoked every frame.
++    if (emotionManagerRef.current) {
++      emotionManagerRef.current.update(delta); // updates shared mixer AND blends face expressions
++    } else if (mixerRef.current) {
++      mixerRef.current.update(delta);           // fallback: mixer only (until EmotionManager is ready)
+     }
+-    if (mixerRef.current) mixerRef.current.update(delta);
++    
+     const currentVrm = vrmRef.current;
+     if (currentVrm) {
+-      // Head/eyes follow pointer for interactive gaze
++      // 2. Gaze tracking — lerp toward mouse position so eye saccades (priority 3)
++      //    can offset lookAtTargetRef before lookAt.lookAt() is applied at priority 6.
++      //    DO NOT hard-.set() here — that would destroy saccade offsets every frame.
+       const lookAt = (currentVrm as { lookAt?: { autoUpdate?: boolean; lookAt: (p: THREE.Vector3) => void } }).lookAt;
+       if (lookAt) {
+         lookAt.autoUpdate = false;
+-        lookAtTargetRef.current.set(pointer.x, pointer.y, 0.4).unproject(camera);
+-        lookAt.lookAt(lookAtTargetRef.current);
++        gazeMouseRef.current.set(pointer.x, pointer.y, 0.4).unproject(camera);
++        // Smooth pull toward mouse (~200ms); saccades add offsets on top of this
++        lookAtTargetRef.current.lerp(gazeMouseRef.current, Math.min(1, delta * 5));
++        // lookAt.lookAt() is called at priority 6 (after saccades run at priority 3)
+       }
++      
++      // 3. تحديث مجسم الـ VRM الأساسي
+       currentVrm.update(delta);
+ 
+-      // V29: update PhonemeManager (lip-sync via blendshapes)
+-      // EmotionManager VRMA animations driven by shared mixerRef.current above
++      // 4. تحديث الـ Lip-sync (PhonemeManager يتولى كل شيء بذكاء)
+       phonemeManagerRef.current?.update(delta, isTalkingRef.current);
+ 
+-      // Advance walk phase for bone animation (useArmPose reads this at priority 1)
++      // 4b. Phoneme Watchdog — amplitude fallback when no word timings loaded
++      // Drives AA/IH/OU blendshapes with a natural syllabic rhythm (procedural)
++      if (isTalkingRef.current && !(timingsRef.current?.length)) {
++        const amp = Math.max(0, Math.sin(state.clock.elapsedTime * 5.5)) * 0.38;
++        try { currentVrm.expressionManager?.setValue('aa' as never, amp); } catch { /* blendshape may not exist */ }
++        try { currentVrm.expressionManager?.setValue('ih' as never, amp * 0.55); } catch {}
++        try { currentVrm.expressionManager?.setValue('ou' as never, amp * 0.35); } catch {}
++      }
++
++      // 5. تحديث حركة المشي والأرجل (إن وجدت)
+       const ws = activeWalkRef.current;
+       if (ws?.isWalking) {
+         ws.walkPhase = ((ws.walkPhase ?? 0) + delta * 4) % (Math.PI * 2);
+       }
+-
+-      // ── Lip-sync (viseme) + emotion blendshapes ──────────────────────────────
+-      const em = currentVrm.expressionManager;
+-      if (em) {
+-        if (isTalkingRef.current) {
+-          if (talkStartRef.current === 0) talkStartRef.current = state.clock.elapsedTime;
+-          const timings = timingsRef.current;
+-          const elapsedMs = timings?.length && audioStartTimeRef.current > 0
+-            ? Date.now() - audioStartTimeRef.current
+-            : (state.clock.elapsedTime - talkStartRef.current) * 1000;
+-          if (timings?.length) {
+-            const target = timingsToVisemeAt(timings, elapsedMs);
+-            visemeRef.current = lerpViseme(visemeRef.current, target, delta);
+-            if (!lipSyncFlagSetRef.current && typeof window !== 'undefined') {
+-              lipSyncFlagSetRef.current = true;
+-              try {
+-                (window as unknown as { __lipSyncStarted?: boolean }).__lipSyncStarted = true;
+-                if (process.env.NODE_ENV === 'development') console.debug('[VRMAvatar] __lipSyncStarted = true (timings)');
+-              } catch { }
+-            }
+-          } else {
+-            const t = state.clock.elapsedTime - talkStartRef.current;
+-            visemeRef.current = proceduralViseme(t);
+-            if (!lipSyncFlagSetRef.current && typeof window !== 'undefined') {
+-              lipSyncFlagSetRef.current = true;
+-              try {
+-                (window as unknown as { __lipSyncStarted?: boolean }).__lipSyncStarted = true;
+-                if (process.env.NODE_ENV === 'development') console.debug('[VRMAvatar] __lipSyncStarted = true (procedural)');
+-              } catch { }
+-            }
+-          }
+-          em.setValue(BS_AA, visemeRef.current.aa);
+-          em.setValue(BS_IH, visemeRef.current.ih);
+-          em.setValue(BS_OU, visemeRef.current.ou);
+-        } else {
+-          visemeRef.current = decayViseme(visemeRef.current);
+-          em.setValue(BS_AA, visemeRef.current.aa);
+-          em.setValue(BS_IH, visemeRef.current.ih);
+-          em.setValue(BS_OU, visemeRef.current.ou);
+-        }
+-        const emotionBlend = EMOTION_BLENDSHAPES[emotionRef.current as keyof typeof EMOTION_BLENDSHAPES];
+-        if (emotionBlend) {
+-          if (emotionBlend.joy != null) em.setValue('happy' as never, emotionBlend.joy);
+-          if (emotionBlend.angry != null) em.setValue('angry' as never, emotionBlend.angry);
+-          if (emotionBlend.sorrow != null) em.setValue('sad' as never, emotionBlend.sorrow);
+-          if (emotionBlend.fun != null) em.setValue('relaxed' as never, emotionBlend.fun);
+-        }
+-      }
+     }
+-
+   });
+ 
+   const handlePointerDown = useCallback((e: { stopPropagation: () => void }) => {
+     e.stopPropagation();
+     waveUntilRef.current = Date.now() + WAVE_DURATION * 1000;
+-    if (typeof window !== 'undefined') {
+-      window.dispatchEvent(new CustomEvent('avatar:waved', { detail: {} }));
+-    }
++    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('avatar:waved', { detail: {} }));
+   }, []);
+ 
+   return vrm ? (
+     <group
+       ref={groupRef}
+       position={[0, 0, 0]}
++      rotation={[0, Math.PI, 0]}
+       onPointerDown={handlePointerDown}
+       onPointerOver={(e) => {
+         e.stopPropagation();
+@@ -1206,14 +1372,11 @@ function VRMModel({
+         if (typeof document !== 'undefined') document.body.style.cursor = 'auto';
+       }}
+     >
+-      {/* rotateVRM0 already handles orientation — no rotation group needed */}
+       <primitive object={vrm.scene} />
+     </group>
+   ) : null;
+ }
+ 
+-// ─── SimpleAvatarPlaceholder (used when useSimpleFallback=true) ───────────────
+-
+ function useIsMobile(): boolean {
+   const [mobile, setMobile] = useState(false);
+   useEffect(() => {
+@@ -1236,28 +1399,11 @@ function SimpleAvatarPlaceholder() {
+   useHeadTracking(groupRef, listeningRef, { waveUntilRef, isTalkingRef: NEVER_TALKING_REF });
+   const segments = mobile ? 16 : 32;
+ 
+-  const handlePointerDown = useCallback((e: { stopPropagation: () => void }) => {
+-    e.stopPropagation();
+-    waveUntilRef.current = Date.now() + WAVE_DURATION * 1000;
+-    if (typeof window !== 'undefined') {
+-      window.dispatchEvent(new CustomEvent('avatar:waved', { detail: {} }));
+-    }
+-  }, []);
+-
+   return (
+     <group
+       ref={groupRef}
+       position={[0, AVATAR_BASE_Y, 0.2]}
+       matrixAutoUpdate={false}
+-      onPointerDown={handlePointerDown}
+-      onPointerOver={(e) => {
+-        e.stopPropagation();
+-        if (typeof document !== 'undefined') document.body.style.cursor = 'pointer';
+-      }}
+-      onPointerOut={(e) => {
+-        e.stopPropagation();
+-        if (typeof document !== 'undefined') document.body.style.cursor = 'auto';
+-      }}
+     >
+       <group rotation={[0, Math.PI, 0]}>
+         <mesh>
+@@ -1269,8 +1415,6 @@ function SimpleAvatarPlaceholder() {
+   );
+ }
+ 
+-// ─── Public export ────────────────────────────────────────────────────────────
+-
+ export interface BoardroomAvatarProps {
+   vrmUrl?: string;
+   scale?: number;
+@@ -1278,8 +1422,8 @@ export interface BoardroomAvatarProps {
+   onError?: (err: string) => void;
+   useSimpleFallback?: boolean;
+   walkStateRef?: React.RefObject<{ isWalking: boolean; walkPhase: number } | null>;
+-  height?: string; // Added height prop
+-  showChat?: boolean; // Added showChat prop
++  height?: string;
++  showChat?: boolean;
+ }
+ 
+ const VRMAvatarInner = forwardRef<VRMAvatarRef, BoardroomAvatarProps>(function VRMAvatarInner(
+@@ -1287,16 +1431,35 @@ const VRMAvatarInner = forwardRef<VRMAvatarRef, BoardroomAvatarProps>(function V
+   ref
+ ) {
+   const [loadError, setLoadError] = useState<string | null>(null);
+-  // إعادة تعيين حالة الخطأ عند تغيير رابط الـ VRM
+   useEffect(() => { setLoadError(null); }, [vrmUrl]);
+   const speakFnRef = useRef<((text: string) => void) | null>(null);
+   const humRef = useRef<Howl | null>(null);
+   const humResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+-  // Refs lifted to this scope so useImperativeHandle can reach them.
+-  // VRMModel's inner copies are the authoritative ones; here we relay via events.
++  
+   const emotionRef = useRef<string>('neutral');
+   const emotionManagerRef = useRef<{ setEmotion: (e: string) => void } | null>(null);
+ 
++  useEffect(() => {
++    if (typeof window === 'undefined') return;
++    const w = window as unknown as Record<string, unknown>;
++    if (!w.__avatarDebug) {
++      w.__avatarDebug = {
++        testEmotion: (e: string) => {
++          emotionRef.current = e;
++          emotionManagerRef.current?.setEmotion(e);
++          window.dispatchEvent(new CustomEvent('avatar:emotion', { detail: { emotion: e } }));
++        },
++        testGesture: (type: string, detail: Record<string, unknown> = {}) => {
++          window.dispatchEvent(new CustomEvent('avatar:gesture', { detail: { type, ...detail } }));
++        },
++        testSpeak: (text: string) => {
++          if (speakFnRef.current) speakFnRef.current(text);
++        },
++      };
++    }
++    return () => { delete (window as unknown as Record<string, unknown>).__avatarDebug; };
++  }, []);
++
+   useImperativeHandle(ref, () => ({
+     speak: (text: string) => {
+       if (speakFnRef.current) speakFnRef.current(text);
+@@ -1305,7 +1468,6 @@ const VRMAvatarInner = forwardRef<VRMAvatarRef, BoardroomAvatarProps>(function V
+     setEmotion: (emotion: string) => {
+       emotionRef.current = emotion;
+       emotionManagerRef.current?.setEmotion(emotion);
+-      // Also relay through the event bus so inner VRMModel receives it
+       window.dispatchEvent(new CustomEvent('avatar:emotion', { detail: { emotion } }));
+     },
+   }));
+@@ -1341,27 +1503,6 @@ const VRMAvatarInner = forwardRef<VRMAvatarRef, BoardroomAvatarProps>(function V
+     };
+   }, []);
+ 
+-  useEffect(() => {
+-    const onReceived = () => {
+-      const h = humRef.current;
+-      if (!h) return;
+-      if (humResetTimeoutRef.current) clearTimeout(humResetTimeoutRef.current);
+-      h.volume(0.06);
+-      humResetTimeoutRef.current = setTimeout(() => {
+-        h.volume(0.02);
+-        humResetTimeoutRef.current = null;
+-      }, 600);
+-    };
+-    window.addEventListener('chat:received', onReceived);
+-    return () => {
+-      window.removeEventListener('chat:received', onReceived);
+-      if (humResetTimeoutRef.current) {
+-        clearTimeout(humResetTimeoutRef.current);
+-        humResetTimeoutRef.current = null;
+-      }
+-    };
+-  }, []);
+-
+   const handleError = useCallback((err: string) => {
+     setLoadError(err);
+     onError?.(err);
+@@ -1396,4 +1537,4 @@ const VRMAvatarInner = forwardRef<VRMAvatarRef, BoardroomAvatarProps>(function V
+   );
+ });
+ 
+-export default VRMAvatarInner;
++export default VRMAvatarInner;
+\ No newline at end of file

@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = Field("INFO", env="LOG_LEVEL")
 
     # ----------------------------
+    # TTS / Avatar Voice Configuration
+    # ----------------------------
+    # Jordanian Arabic voices (ar-JO dialect)
+    TTS_ARABIC_VOICE:        str = Field("ar-JO-TaimNeural", env="TTS_ARABIC_VOICE")
+    TTS_ARABIC_VOICE_FEMALE: str = Field("ar-JO-SanaNeural", env="TTS_ARABIC_VOICE_FEMALE")
+
+    # ----------------------------
     # Helper for OpenAI API Key Validation
     # ----------------------------
     def validate_openai_key(self):
