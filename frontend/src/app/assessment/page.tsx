@@ -367,6 +367,14 @@ export default function AssessmentPage() {
       return;
     }
 
+    // Pre-flight: ensure assignment brief contains ≥2 BTEC criteria codes (P1, M1, D1 …)
+    const criteriaMatches = (assignmentContext.match(/\b[PMD]\d+\b/gi) || []);
+    const uniqueCodes = new Set(criteriaMatches.map((c: string) => c.toUpperCase()));
+    if (uniqueCodes.size < 2) {
+      alert("تحذير: لم يتم العثور على معايير BTEC كافية في نص الواجب.\nيجب أن يحتوي على معيارين على الأقل مثل: P1، M1، D1\n\nتأكد من النص المُدخل في حقل 'سياق الواجب'.");
+      return;
+    }
+
     setLoading(true); setResult(null);
 
     try {
@@ -400,18 +408,25 @@ export default function AssessmentPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          student_text: studentAnswer, // Fixed field name
+          student_text: studentAnswer,
           assignment_text: assignmentBrief,
           unit_id: '14'
         })
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || data.error || "Evaluation failed");
-      setResult(data);
+      if (!res.ok) throw new Error(data?.detail || data?.error || 'Evaluation failed');
+      // Normalize to ensure consistent shape regardless of which path returned data
+      const normalized = data?.data?.criteria !== undefined ? data.data : data;
+      const evalResult = normalizeIntegratedResult(normalized);
+      // Preserve report from the route-level field if it's a string
+      if (typeof data?.report === 'string' && data.report) {
+        evalResult.report = data.report;
+      }
+      setResult(evalResult);
       const sim = jaccardSim(buildNgrams(studentAnswer), buildNgrams(`${selectedSubject}\n${assignmentContext}`));
       setLocalSimilarity(sim);
       setComplianceVerdict(computeCompliance(studentAnswer, sim));
-      saveToHistory(data?.data?.final_grade || 'PENDING', sim);
+      saveToHistory(evalResult.data.final_grade || 'PENDING', sim);
     } catch (e: unknown) { alert(getErrorMessage(e)); } finally { setLoading(false); }
   };
 
@@ -618,18 +633,18 @@ export default function AssessmentPage() {
                 <div className="flex gap-8 text-center">
                   <div className="bg-gray-800/50 p-4 rounded-2xl border border-white/5">
                     <div className="text-gray-400 text-sm mb-1">المعايير</div>
-                    <div className="text-3xl font-bold text-white">{result.data.summary.achievedCount} <span className="text-gray-500 text-lg">/ {result.data.summary.totalCriteria}</span></div>
+                    <div className="text-3xl font-bold text-white">{result.data?.summary?.achievedCount ?? 0} <span className="text-gray-500 text-lg">/ {result.data?.summary?.totalCriteria ?? 0}</span></div>
                   </div>
                   <div className="bg-gray-800/50 p-4 rounded-2xl border border-white/5">
                     <div className="text-gray-400 text-sm mb-1">النسبة</div>
-                    <div className="text-3xl font-bold text-blue-400">{result.data.summary.achievedPercent}%</div>
+                    <div className="text-3xl font-bold text-blue-400">{result.data?.summary?.achievedPercent ?? 0}%</div>
                   </div>
                 </div>
               </div>
             </div>
 
             <div className="grid gap-6">
-              {result.data.criteria.map((crit, idx) => (
+              {(Array.isArray(result.data?.criteria) ? result.data.criteria : []).map((crit, idx) => (
                 <div key={idx} className="bg-gray-800/40 backdrop-blur border border-white/5 rounded-2xl p-6 hover:bg-gray-800/60 transition duration-300">
                   <div className="flex justify-between items-center mb-4 pb-4 border-b border-white/5">
                     <div className="flex items-center gap-3">

@@ -1,101 +1,87 @@
 import { NextRequest } from 'next/server';
 
 export const runtime = 'nodejs';
-export const maxDuration = 300; 
+export const maxDuration = 300;
+
+const ERROR_PAYLOAD = (msg: string) => ({
+  success: true,
+  data: {
+    summary: { totalCriteria: 0, achievedCount: 0, achievedPercent: 0 },
+    criteria: [] as unknown[],
+    final_grade: 'ERROR',
+  },
+  report: msg,
+});
 
 export async function POST(req: NextRequest) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 290_000);
+
   try {
     const body = await req.json();
 
     // 🛡️ تطهير وتوحيد البيانات (Canonical Normalization)
     const assignment_text = String(
-      body?.assignment_text ?? 
-      body?.assignmentText ?? 
-      body?.assignmentBrief ?? 
+      body?.assignment_text ??
+      body?.assignmentText ??
+      body?.assignmentBrief ??
       ''
     ).trim();
 
     const student_text = String(
-      body?.student_text ?? 
-      body?.studentText ?? 
-      body?.studentAnswer ?? 
+      body?.student_text ??
+      body?.studentText ??
+      body?.studentAnswer ??
       ''
     ).trim();
 
-    // التحقق من وجود البيانات قبل الإرسال
     if (!assignment_text || assignment_text.length < 20) {
-      return new Response(JSON.stringify({ 
-        type: "error", 
-        detail: "نص الواجب فارغ أو قصير جداً. يجب أن يكون 20 حرف على الأقل." 
-      }), { 
-        status: 400,
-        headers: { 'Content-Type': 'application/json' }
-      });
+      return new Response(JSON.stringify({
+        type: 'error',
+        detail: 'نص الواجب فارغ أو قصير جداً. يجب أن يكون 20 حرف على الأقل.',
+      }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     }
 
     if (!student_text || student_text.length < 50) {
-      return new Response(JSON.stringify({ 
-        type: "error", 
-        detail: `إجابة الطالب قصيرة جداً. الحد الأدنى 50 حرف. الطول الحالي: ${student_text.length}` 
-      }), { 
-        status: 400,
-        headers: { 'Content-Type': 'application/json' }
-      });
+      return new Response(JSON.stringify({
+        type: 'error',
+        detail: `إجابة الطالب قصيرة جداً. الحد الأدنى 50 حرف. الطول الحالي: ${student_text.length}`,
+      }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     }
 
-    const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+    const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
     const backendResponse = await fetch(`${backendUrl}/api/v1/assessment/forensic-grade-v3`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        assignment_text: assignment_text,
-        student_text: student_text
-      })
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assignment_text, student_text }),
+      signal: controller.signal,
     });
 
-    if (!backendResponse.ok) {
-      const errorText = await backendResponse.text();
-      console.error('Backend Error Details:', {
-        status: backendResponse.status,
-        statusText: backendResponse.statusText,
-        error: errorText
-      });
-      // Parse JSON if backend returned structured error (e.g. 503 with final_grade: ERROR)
-      // Return 200 with error payload so frontend displays message instead of generic error
-      let errorPayload: Record<string, unknown> = { type: "error", detail: errorText };
-      try {
-        const parsed = JSON.parse(errorText);
-        if (parsed?.final_grade === "ERROR") {
-          errorPayload = {
-            success: true,
-            data: {
-              summary: { totalCriteria: 0, achievedCount: 0, achievedPercent: 0 },
-              criteria: [],
-              final_grade: "ERROR",
-              error_message: parsed.summary || "تقييم غير متاح حالياً، يرجى المحاولة لاحقاً.",
-            },
-            report: parsed.summary || "تقييم غير متاح حالياً.",
-          };
-        }
-      } catch {
-        errorPayload = {
-          success: true,
-          data: {
-            summary: { totalCriteria: 0, achievedCount: 0, achievedPercent: 0 },
-            criteria: [],
-            final_grade: "ERROR",
-            error_message: "تقييم غير متاح حالياً، يرجى المحاولة لاحقاً.",
-          },
-          report: "خطأ في خدمة التقييم.",
-        };
-      }
-      return new Response(JSON.stringify(errorPayload), {
+    // Always parse as JSON (backend always returns JSON, even on 503)
+    let result: any;
+    try {
+      result = await backendResponse.json();
+    } catch {
+      console.error('Backend returned non-JSON response, status:', backendResponse.status);
+      return new Response(JSON.stringify(ERROR_PAYLOAD('فشل تحليل رد الخادم. يرجى المحاولة لاحقاً.')), {
         status: 200,
-        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' }
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
       });
     }
 
-    const result = await backendResponse.json();
+    // Handle all error/non-OK cases in one place
+    if (!backendResponse.ok || result?.final_grade === 'ERROR') {
+      const msg = typeof result?.summary === 'string' && result.summary
+        ? result.summary
+        : typeof result?.detail === 'string' && result.detail
+          ? result.detail
+          : 'تقييم غير متاح حالياً. يرجى التحقق من إعدادات API والمحاولة لاحقاً.';
+      console.error('Backend evaluation error:', { status: backendResponse.status, msg });
+      return new Response(JSON.stringify(ERROR_PAYLOAD(msg)), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
+      });
+    }
 
     // Build criteria array from backend response
     const rawCriteria = result.criteria_results || result.criteria || {};
@@ -133,18 +119,16 @@ export async function POST(req: NextRequest) {
     });
 
   } catch (error: any) {
-    console.error("Bridge Error:", {
-      message: error.message,
-      stack: error.stack,
-      timestamp: new Date().toISOString()
+    const isAbort = error?.name === 'AbortError';
+    const msg = isAbort
+      ? 'انتهت مهلة الاتصال (5 دقائق). يرجى المحاولة لاحقاً.'
+      : `خطأ في الخادم: ${error?.message ?? 'خطأ غير معروف'}`;
+    console.error('Bridge Error:', { message: error?.message, timestamp: new Date().toISOString() });
+    return new Response(JSON.stringify(ERROR_PAYLOAD(msg)), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
     });
-    
-    return new Response(JSON.stringify({ 
-      type: "error",
-      detail: `خطأ في الخادم: ${error.message}` 
-    }), { 
-      status: 500,
-      headers: { 'Content-Type': 'application/json' }
-    });
+  } finally {
+    clearTimeout(timeout);
   }
 }
