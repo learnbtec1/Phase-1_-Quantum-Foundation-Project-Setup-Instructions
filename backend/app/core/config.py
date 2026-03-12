@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = Field("INFO", env="LOG_LEVEL")
 
     # ----------------------------
+    # Azure Cognitive Services — Speech (TTS / STT)
+    # ----------------------------
+    AZURE_SPEECH_KEY:    str = Field("", env="AZURE_SPEECH_KEY")
+    AZURE_SPEECH_REGION: str = Field("eastus", env="AZURE_SPEECH_REGION")
+
+    # ----------------------------
     # TTS / Avatar Voice Configuration
     # ----------------------------
     # Jordanian Arabic voices (ar-JO dialect)

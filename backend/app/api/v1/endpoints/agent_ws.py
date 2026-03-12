@@ -16,7 +16,8 @@ Message protocol (server → client):
   { "type": "llm_thinking" }
   { "type": "speech",          "transcript": "...", "reply": "...", "dialogue": "...",
                                 "emotion": "...", "action": "...",
-                                "audio_base64": "...", "sample_rate": 24000 }
+                                "audio_base64": "...", "audio_format": "mp3",
+                                "viseme_cues": [...], "word_cues": [...] }
   { "type": "tts_unavailable", "transcript": "...", "reply": "...", "dialogue": "...",
                                 "emotion": "...", "action": "..." }
   { "type": "error",           "error": { "message": "...", "severity": "error|warn" } }
@@ -34,6 +35,24 @@ from typing import List
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
+
+# ── Azure TTS singleton (lazy init — avoids import-time crash if SDK absent) ─
+_azure_tts = None
+
+def _get_azure_tts():
+    """Return a shared AzureTTSService instance, or None if unavailable."""
+    global _azure_tts
+    if _azure_tts is None:
+        try:
+            from app.services.tts_service import AzureTTSService
+            _azure_tts = AzureTTSService()
+            logger.info(
+                "[AgentWS] AzureTTSService ready | voice=%s | region=%s",
+                _azure_tts._default_voice, _azure_tts._region,
+            )
+        except Exception as exc:
+            logger.error("[AgentWS] AzureTTSService init failed: %s", exc)
+    return _azure_tts
 
 router = APIRouter(prefix="/ws", tags=["Agent WebSocket"])
 
@@ -176,20 +195,28 @@ async def agent_ws(websocket: WebSocket):
         if len(history) > 6:
             history[:] = history[-6:]
 
-        # ── tts_arabic local Arabic TTS ─────────────────────────────────────
-        # Returns raw int16 PCM bytes at 22050 Hz.  Frontend's playPCMAudio()
-        # wraps them into a WAV Blob via pcmToWavBlob — no ffmpeg needed.
-        audio_b64  = ""
-        audio_fmt  = "pcm"
-        try:
-            from app.services.lahajati_tts import synthesize as tts_synthesize
-            if parsed['dialogue']:
-                pcm_bytes = await tts_synthesize(parsed['dialogue'])
-                if pcm_bytes:
-                    audio_b64 = base64.b64encode(pcm_bytes).decode('ascii')
-        except Exception as e:
-            logger.warning("[AgentWS] TTS error (will send tts_unavailable): %s", e)
+        # ── Azure Neural TTS (ar-JO-TaimNeural — male, Jordanian Arabic) ────────
+        # Returns MP3 bytes + Temporal Cues (Visemes & Words).
+        audio_b64 = ""
+        viseme_cues = []
+        word_cues = []
+        azure_tts = _get_azure_tts()
+        
+        if azure_tts and parsed['dialogue']:
+            try:
+                # 1. Update the unpack assignment to receive all three outputs
+                mp3_bytes, viseme_cues, word_cues = await azure_tts.synthesize(parsed['dialogue'])
+                
+                if mp3_bytes:
+                    audio_b64 = base64.b64encode(mp3_bytes).decode('ascii')
+                    logger.info(
+                        "[AgentWS] Azure TTS OK | %d mp3 bytes | %d visemes | %d words | voice=%s",
+                        len(mp3_bytes), len(viseme_cues), len(word_cues), azure_tts._default_voice,
+                    )
+            except Exception as e:
+                logger.warning("[AgentWS] Azure TTS error (will send tts_unavailable): %s", e)
 
+        # 2. Add the new cue arrays to the WebSocket payload sent to the frontend
         if audio_b64:
             await send({
                 "type":         "speech",
@@ -199,8 +226,9 @@ async def agent_ws(websocket: WebSocket):
                 "action":       parsed['action'],
                 "emotion":      parsed['emotion'],
                 "audio_base64": audio_b64,
-                "audio_format": audio_fmt,   # "pcm" — frontend's pcmToWavBlob wraps it
-                "sample_rate":  22050,        # tts_arabic fixed output rate
+                "audio_format": "mp3",  # Azure SDK returns MP3 → playMp3Audio()
+                "viseme_cues":  viseme_cues,  # NEW: Lip-sync timeline
+                "word_cues":    word_cues,    # NEW: Word boundary timeline
             })
         else:
             await send({

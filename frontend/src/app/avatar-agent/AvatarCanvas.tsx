@@ -15,7 +15,9 @@
 import React, { Suspense, useCallback, useRef, useState, useEffect } from 'react';
 import * as THREE from 'three';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls } from '@react-three/drei';
+import { OrbitControls, Environment, SpotLight, SoftShadows, ContactShadows } from '@react-three/drei';
+
+import { useControls, Leva } from 'leva';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRM, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
@@ -25,6 +27,16 @@ import { perlinNoise, Easing, lerp } from './utils';
 import { RoomShell, ROOM_BOUNDS } from './scene/RoomShell';
 import { LightingRig }       from './scene/LightingRig';
 import { OfficeSetLoader }   from './scene/OfficeSetLoader';
+import { CarpetLoader }      from './scene/CarpetLoader';
+import { CabinetLoader }     from './scene/CabinetLoader';
+import { GlobeLoader }       from './scene/GlobeLoader';
+import HologramWindow        from '@/components/HologramWindow';
+import { EffectComposer, SSAO } from '@react-three/postprocessing';
+import ComfortLightingRig    from '@/components/ComfortLightingRig';
+import ScenicBackdrop        from '@/components/ScenicBackdrop';
+import RoyalDecoProps        from '@/components/RoyalDecoProps';
+import RoyalMaterialsOverride from '@/components/RoyalMaterialsOverride';
+import { ParquetFloor }      from './scene/ParquetFloor';
 import { resolveIfEnabled }  from './physics/WorldColliders';
 import { OfficeDebugHUD }    from './debug/OfficeDebugHUD';
 
@@ -67,6 +79,35 @@ const VRMA_PATHS: Record<string, string> = {
   untitled:    '/models/animations/Untitled.vrma',
 };
 
+// ── Azure Viseme ID → VRM morph-target weight map ───────────────────────────
+// All 22 Azure Speech Viseme IDs mapped to the 5 standard VRM expression keys.
+// IDs 0-21 cover silence + every phoneme group the Azure Neural TTS engine emits.
+// VRM keys: aa (wide-open), ih (narrow/smile), ou (round/purse), ee (mid-front), oh (round-open)
+const AZURE_VISEME_TO_VRM: ReadonlyArray<Partial<{ aa: number; ih: number; ou: number; ee: number; oh: number }>> = [
+  /* 0  silence  */ {},
+  /* 1  æ/ə/ʌ   */ { aa: 0.10 },
+  /* 2  æ (cat)  */ { aa: 0.70 },
+  /* 3  ɑ (hot)  */ { aa: 0.90 },
+  /* 4  ɔ (law)  */ { aa: 0.30, oh: 0.50 },
+  /* 5  ɛ (bet)  */ { ee: 0.70 },
+  /* 6  iː (bee) */ { ih: 0.90 },
+  /* 7  ɪ (bit)  */ { ih: 0.55 },
+  /* 8  eɪ (day) */ { ee: 0.65, ih: 0.20 },
+  /* 9  uː (boot)*/ { ou: 0.90 },
+  /* 10 ʊ (book) */ { ou: 0.65 },
+  /* 11 oʊ (go)  */ { ou: 0.55, oh: 0.30 },
+  /* 12 aɪ (kite)*/ { aa: 0.75, ih: 0.20 },
+  /* 13 aʊ (now) */ { aa: 0.65, ou: 0.35 },
+  /* 14 ɔɪ (boy) */ { oh: 0.50, ih: 0.30 },
+  /* 15 j (yes)  */ { ih: 0.35, ee: 0.30 },
+  /* 16 w (wet)  */ { ou: 0.50 },
+  /* 17 r (red)  */ { aa: 0.20 },
+  /* 18 l (lip)  */ { ih: 0.15 },
+  /* 19 n/m/ng   */ { aa: 0.08 },
+  /* 20 t/d/s/z  */ { ih: 0.10 },
+  /* 21 b/p/m    */ {},
+];
+
 // ── VRMScene — lives inside <Canvas> ────────────────────────────────────────
 function VRMScene({
   vrmUrl,
@@ -86,11 +127,15 @@ function VRMScene({
   const emotionRef        = useRef<string>('neutral');
   // Smooth emotion blending (lerp from prev to target)
   const emotionBlendRef   = useRef<Record<string, number>>({});
-  // Phase 2: real viseme weights from edge-tts word-boundary events
+  // Phase 2: real viseme weights (legacy event-based path — kept for compat)
   const azureVisemeRef    = useRef<{ aa: number; ih: number; ou: number }>({ aa: 0, ih: 0, ou: 0 });
-  const azureVisemeActive = useRef(false); // true while real visemes are scheduled
-  // Current rendered lip weights (for smooth lerp without reading from VRM)
-  const lipWeightsRef     = useRef<{ aa: number; ih: number; ou: number }>({ aa: 0, ih: 0, ou: 0 });
+  const azureVisemeActive = useRef(false); // true while real visemes are available
+  // Phase 3: full Azure temporal viseme cue queue + audio element reference
+  const visemeCueQueueRef   = useRef<Array<{ t: number; id: number }>>([]);
+  const lipSyncAudioRef     = useRef<HTMLAudioElement | null>(null);
+  const lastLoggedVisemeRef = useRef(-1); // throttle [LipSync] debug logs
+  // Current rendered lip weights — 5-shape (for smooth lerp without reading from VRM)
+  const lipWeightsRef     = useRef<{ aa: number; ih: number; ou: number; ee: number; oh: number }>({ aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 });
   const waveUntilRef      = useRef(0);
   const gestureRef        = useRef<{
     type: 'point' | 'openHand' | 'beat';
@@ -117,6 +162,29 @@ function VRMScene({
   const idleHeadOffsetRef = useRef(0);
   // Spine breathing rotation (human-like chest rise)
   const spineBreathRef    = useRef(0);
+
+  // ── §1 Saccadic gaze state machine ─────────────────────────────────────
+  // FSM states: 'fixate' (hold gaze) | 'saccade' (fast snap to new target)
+  const gazeStateRef      = useRef<'fixate' | 'saccade'>('fixate');
+  // Current world-space gaze target (updated on each saccade)
+  const gazeCurrRef       = useRef(new THREE.Vector3(0, 0.1, 3));
+  const gazeTargetRef     = useRef(new THREE.Vector3(0, 0.1, 3));
+  // Microsaccade drift from fixation point (sub-degree wandering)
+  const gazeDriftRef      = useRef(new THREE.Vector3());
+  // Timers (ms timestamps)
+  const gazeFixateUntilRef  = useRef(0);   // stay in fixate until this time
+  const gazeSaccadeUntilRef = useRef(0);   // saccade finishes at this time
+  // Head/eye weight split: eyes lead 70 %, neck/head absorbs 30 %
+  // Tracked separately so VRM lookAt drives eyes; bone overrides handle neck.
+  const eyeWorldTargetRef = useRef(new THREE.Vector3(0, 0.1, 3)); // smoothed eye target
+  const neckGazeYawRef    = useRef(0);   // current neck contribution (rad)
+  const neckGazePitchRef  = useRef(0);
+
+  // ── §2 Procedural weight-shift / hip-sway ────────────────────────────────
+  // Pelvis lateral shift: gentle S-curve driven by low-freq Perlin noise.
+  const hipShiftRef       = useRef(0);   // current rendered X offset (metres)
+  // Subtle idle head-roll (±2°) driven by opposite Perlin channel to sway
+  const headRollRef       = useRef(0);
   // Micro-expression refs
   const microExprUntilRef = useRef(0);
   const microExprTypeRef  = useRef<'eyebrowRaise'|'squint'|'halfSmile'|'none'>('none');
@@ -368,20 +436,41 @@ function VRMScene({
       console.log('[BRAIN] avatar:speak:start — lip-sync active');
     };
     const onSpeakEnd   = () => {
-      isTalkingRef.current = false;
+      isTalkingRef.current      = false;
       azureVisemeActive.current = false;
-      azureVisemeRef.current = { aa: 0, ih: 0, ou: 0 };
+      azureVisemeRef.current    = { aa: 0, ih: 0, ou: 0 };
+      visemeCueQueueRef.current   = [];
+      lipSyncAudioRef.current     = null;
+      lastLoggedVisemeRef.current = -1;
       emotionRef.current = 'neutral';
       if (isSittingRef.current && vrmaReadyRef.current) playVRMA('sit', true, 0.4);
       console.log('[BRAIN] avatar:speak:end — resetting to neutral');
     };
-    // avatar:viseme:start — real visemes are incoming; switch from procedural
+    // avatar:viseme:start — legacy: real visemes are incoming; switch from procedural
     const onVisemeStart = () => { azureVisemeActive.current = true; };
-    // avatar:viseme — update target weights from real phoneme data
+    // avatar:viseme — legacy: update target weights from real phoneme data
     const onViseme = (e: Event) => {
       const d = (e as CustomEvent<{ id?: number; weights?: { aa: number; ih: number; ou: number } }>).detail;
       if (d?.weights) {
         azureVisemeRef.current = d.weights;
+      }
+    };
+    // avatar:visemes:timeline — NEW: full Azure cue array { t: ms, id: 0-21 }[]
+    const onVisemesTimeline = (e: Event) => {
+      const d = (e as CustomEvent<{ cues?: Array<{ t: number; id: number }> }>).detail;
+      if (d?.cues && d.cues.length > 0) {
+        visemeCueQueueRef.current   = d.cues;
+        azureVisemeActive.current   = true;
+        lastLoggedVisemeRef.current = -1;
+        console.log(`[LipSync] Timeline loaded: ${d.cues.length} cues, first=${d.cues[0].t}ms, last=${d.cues[d.cues.length-1].t}ms`);
+      }
+    };
+    // avatar:audio:element — NEW: the HTMLAudioElement being played (for currentTime reads)
+    const onAudioElement = (e: Event) => {
+      const d = (e as CustomEvent<{ audio?: HTMLAudioElement }>).detail;
+      if (d?.audio) {
+        lipSyncAudioRef.current = d.audio;
+        console.log('[LipSync] Audio element bound — timeline sync ready');
       }
     };
     const onWalk  = (e: Event) => { walkUntilRef.current  = Date.now() + ((e as CustomEvent<{ duration?: number }>).detail?.duration ?? 3) * 1000; };
@@ -466,8 +555,10 @@ function VRMScene({
     window.addEventListener('avatar:speak:start',   onSpeakStart);
     window.addEventListener('avatar:speak:end',     onSpeakEnd);
     window.addEventListener('avatar:stopSpeaking',  onSpeakEnd);
-    window.addEventListener('avatar:viseme:start',  onVisemeStart);
-    window.addEventListener('avatar:viseme',        onViseme);
+    window.addEventListener('avatar:viseme:start',      onVisemeStart);
+    window.addEventListener('avatar:viseme',            onViseme);
+    window.addEventListener('avatar:visemes:timeline',  onVisemesTimeline);
+    window.addEventListener('avatar:audio:element',     onAudioElement);
     window.addEventListener('avatar:walk',          onWalk);
     window.addEventListener('avatar:nod',           onNod);
     window.addEventListener('avatar:laugh',         onLaugh);
@@ -485,8 +576,10 @@ function VRMScene({
       window.removeEventListener('avatar:speak:start',  onSpeakStart);
       window.removeEventListener('avatar:speak:end',    onSpeakEnd);
       window.removeEventListener('avatar:stopSpeaking', onSpeakEnd);
-      window.removeEventListener('avatar:viseme:start', onVisemeStart);
-      window.removeEventListener('avatar:viseme',       onViseme);
+      window.removeEventListener('avatar:viseme:start',     onVisemeStart);
+      window.removeEventListener('avatar:viseme',            onViseme);
+      window.removeEventListener('avatar:visemes:timeline',  onVisemesTimeline);
+      window.removeEventListener('avatar:audio:element',     onAudioElement);
       window.removeEventListener('avatar:walk',         onWalk);
       window.removeEventListener('avatar:nod',          onNod);
       window.removeEventListener('avatar:laugh',        onLaugh);
@@ -500,8 +593,8 @@ function VRMScene({
   }, []);
 
   // ── Click-to-move state (2D: X + Z) ────────────────────────────────────
-  const targetAvatarXRef  = useRef(0);
-  const currentAvatarXRef = useRef(0);
+  const targetAvatarXRef  = useRef(-0.5);   // slightly left — clear of visitor chairs
+  const currentAvatarXRef = useRef(-0.5);
   const targetAvatarZRef  = useRef(-2.0);   // in front of desk
   const currentAvatarZRef = useRef(-2.0);
 
@@ -649,38 +742,61 @@ function VRMScene({
       if (isTalkingRef.current) {
         talkElapsedRef.current += delta;
         const lw = lipWeightsRef.current;
-        if (azureVisemeActive.current) {
-          // ── Real phoneme-driven lip sync (edge-tts word-boundary timing) ──
-          const { aa, ih, ou } = azureVisemeRef.current;
-          const spd = delta * 18; // fast blend for tight sync
-          lw.aa = lerp(lw.aa, aa, spd);
-          lw.ih = lerp(lw.ih, ih, spd);
-          lw.ou = lerp(lw.ou, ou, spd);
+        const audioEl = lipSyncAudioRef.current;
+        const cues    = visemeCueQueueRef.current;
+        if (azureVisemeActive.current && audioEl && cues.length > 0) {
+          // ── Frame-perfect Azure temporal timeline lip sync ─────────────────
+          const nowMs = audioEl.currentTime * 1000;
+          // Binary search: find last cue where cue.t <= nowMs
+          let lo = 0, hi = cues.length - 1, idx = 0;
+          while (lo <= hi) {
+            const mid = (lo + hi) >>> 1;
+            if (cues[mid].t <= nowMs) { idx = mid; lo = mid + 1; }
+            else hi = mid - 1;
+          }
+          const visemeId = cues[idx]?.id ?? 0;
+          const target   = AZURE_VISEME_TO_VRM[Math.min(visemeId, 21)] ?? {};
+          // Throttled debug log — fires only when the active viseme ID changes
+          if (visemeId !== lastLoggedVisemeRef.current) {
+            const shapeName = Object.keys(target).join('/') || 'silence';
+            console.log(`[LipSync] ${nowMs.toFixed(0)}ms → ID:${visemeId} → ${shapeName}`);
+            lastLoggedVisemeRef.current = visemeId;
+          }
+          const spd = delta * 18; // fast blend — tracks sharp phoneme transitions
+          lw.aa = lerp(lw.aa, target.aa ?? 0, spd);
+          lw.ih = lerp(lw.ih, target.ih ?? 0, spd);
+          lw.ou = lerp(lw.ou, target.ou ?? 0, spd);
+          lw.ee = lerp(lw.ee, target.ee ?? 0, spd);
+          lw.oh = lerp(lw.oh, target.oh ?? 0, spd);
           try { em.setValue('aa' as never, lw.aa); } catch {}
           try { em.setValue('ih' as never, lw.ih); } catch {}
           try { em.setValue('ou' as never, lw.ou); } catch {}
-          try { em.setValue('oh' as never, 0); } catch {}
+          try { em.setValue('ee' as never, lw.ee); } catch {}
+          try { em.setValue('oh' as never, lw.oh); } catch {}
         } else {
-          // ── Procedural fallback: sine-wave when no real timing available ──
+          // ── Procedural fallback: sine-wave when no Azure timeline available ──
           const fastJaw = 0.5 * Math.sin(talkElapsedRef.current * 9.1);
           const slowJaw = 0.2 * Math.sin(talkElapsedRef.current * 3.7);
           const jaw = Math.max(0, Math.min(1, 0.35 + fastJaw + slowJaw));
-          lw.aa = jaw; lw.ih = 0; lw.ou = 0;
+          lw.aa = jaw; lw.ih = 0; lw.ou = 0; lw.ee = 0; lw.oh = 0;
           try { em.setValue('aa' as never, jaw); } catch {}
           const oh = Math.max(0, Math.min(0.4, 0.15 * Math.sin(talkElapsedRef.current * 5.3 + 1)));
           try { em.setValue('oh' as never, oh); } catch {}
         }
       } else {
-        // Mouth closed: decay all lip shapes to zero using tracked weights
+        // Mouth closed: smoothly decay all 5 lip shapes to zero
         const lw = lipWeightsRef.current;
         const spd = delta * 10;
         lw.aa = lerp(lw.aa, 0, spd);
         lw.ih = lerp(lw.ih, 0, spd);
         lw.ou = lerp(lw.ou, 0, spd);
+        lw.ee = lerp(lw.ee, 0, spd);
+        lw.oh = lerp(lw.oh, 0, spd);
         try { em.setValue('aa' as never, lw.aa); } catch {}
         try { em.setValue('ih' as never, lw.ih); } catch {}
         try { em.setValue('ou' as never, lw.ou); } catch {}
-        try { em.setValue('oh' as never, 0); } catch {}
+        try { em.setValue('ee' as never, lw.ee); } catch {}
+        try { em.setValue('oh' as never, lw.oh); } catch {}
       }
 
       // 4. Emotion blendshapes — smooth lerp between states
@@ -734,50 +850,173 @@ function VRMScene({
         try { em.setValue('lookUp' as never, 0); } catch {}
       }
 
-      // Head nod — single smooth arch on spine + neck
+      // §1-A Spine breathing (+nod) — additive on top of VRMA ───────────────
       if (v.humanoid) {
-        const nodArc    = isNodding ? Math.sin(Math.min(1, (now - nodStartRef.current) / nodDurationRef.current) * Math.PI) : 0;
-        // Spine breathing — actual rotation (chest rise, not just position)
-        const spineBreathTarget = Math.sin(t * 0.9) * 0.025;
-        spineBreathRef.current  = lerp(spineBreathRef.current, spineBreathTarget, delta * 2);
-        const spineBone = v.humanoid.getRawBoneNode('spine' as never);
-        const neckBone  = v.humanoid.getRawBoneNode('neck'  as never);
+        const nodArc = isNodding
+          ? Math.sin(Math.min(1, (now - nodStartRef.current) / nodDurationRef.current) * Math.PI)
+          : 0;
+        // Two-frequency breathing: primary (0.9 Hz) + secondary costal (1.6 Hz)
+        const spineBreathTarget =
+          Math.sin(t * 0.9) * 0.022 + Math.sin(t * 1.6) * 0.006;
+        spineBreathRef.current = lerp(spineBreathRef.current, spineBreathTarget, delta * 2);
+
+        const spineBone  = v.humanoid.getRawBoneNode('spine'   as never);
+        const spine2Bone = v.humanoid.getRawBoneNode('upperChest' as never)
+                        ?? v.humanoid.getRawBoneNode('chest'   as never);
+        const neckBone   = v.humanoid.getRawBoneNode('neck'    as never);
+
+        // vrmaLive = VRMA mixer is actively driving this bone this frame.
+        // When true we use += (additive ontop of VRMA baseline — no drift because
+        // mixer resets the bone every frame before our code runs).
+        // When false (no VRMA, or VRMA muted during walk) we use = (absolute) so
+        // values can never accumulate across frames and push the skeleton off-screen.
+        const vrmaLive = vrmaReadyRef.current && !isWalkingNow;
+
         if (spineBone) {
-          // Additive when VRMA drives skeleton; absolute otherwise
-          if (vrmaReadyRef.current) spineBone.rotation.x += spineBreathRef.current * 0.4 + nodArc * 0.12;
-          else spineBone.rotation.x = spineBreathRef.current + nodArc * 0.14;
+          const breathX = spineBreathRef.current * 0.35 + nodArc * 0.10;
+          const rollZ   = headRollRef.current * 0.04;
+          if (vrmaLive) {
+            spineBone.rotation.x += breathX;
+            spineBone.rotation.z += rollZ;
+          } else {
+            spineBone.rotation.x  = breathX;
+            spineBone.rotation.z  = rollZ;
+          }
         }
-        if (neckBone)  neckBone.rotation.x  = nodArc * 0.18;
+        if (spine2Bone) {
+          if (vrmaLive) spine2Bone.rotation.x += spineBreathRef.current * 0.20;
+          else          spine2Bone.rotation.x  = spineBreathRef.current * 0.20;
+        }
+        if (neckBone) {
+          if (vrmaLive) neckBone.rotation.x += nodArc * 0.16;
+          else          neckBone.rotation.x  = nodArc * 0.16;
+        }
       }
 
       em.update();
     }
 
-    // 5. LookAt
-    const lookAt = (v as { lookAt?: { autoUpdate?: boolean; lookAt?: (p: THREE.Vector3) => void } }).lookAt;
-    if (lookAt?.lookAt) {
-      lookAt.autoUpdate = false;
-      const target = new THREE.Vector3(pointer.x, pointer.y, 0.4).unproject(camera);
-      lookAt.lookAt(target);
+    // §2 Weight-shift / hip-sway
+    // Same additive/absolute split as §1-A: += when VRMA is live (mixer resets
+    // the bone each frame), = (absolute) otherwise to prevent position drift.
+    if (v.humanoid && !isSittingRef.current) {
+      const hipTarget   = (perlinNoise(t * 0.25, 5, 0) - 0.5) * 0.028; // ±1.4 cm
+      hipShiftRef.current = lerp(hipShiftRef.current, hipTarget, delta * 1.2);
+      const headRollTarget  = -hipShiftRef.current * 3.5;
+      headRollRef.current   = lerp(headRollRef.current, headRollTarget, delta * 1.5);
+
+      const hipBone = v.humanoid.getRawBoneNode('hips' as never);
+      if (hipBone) {
+        const vrmaLiveHip = vrmaReadyRef.current && !isWalkingNow;
+        if (vrmaLiveHip) hipBone.position.x += hipShiftRef.current;
+        else             hipBone.position.x  = hipShiftRef.current;
+      }
+    }
+
+    // §1-B Saccadic gaze state machine ────────────────────────────────────
+    // Architecture:
+    //   Eyes  → VRM lookAt (drives eye-bone rotations, limited ±30°)
+    //   Neck  → bone additive override (absorbs 30% of gaze angle)
+    //   Head  → existing headBone lerp (absorbs 20% via slow speed)
+    //
+    // FSM: fixate → wait → schedule saccade → saccade (20-80ms snap) → fixate
+    {
+      // 1. Compute "desire" gaze — always toward the camera (the viewer).
+      // Add slow Perlin face-region variance (±5 cm) to simulate natural eye contact:
+      // the avatar drifts between the viewer's left eye → nose → right eye, just like
+      // a real person does during direct conversation.  NO pointer tracking.
+      const faceVarianceX = (perlinNoise(t * 0.14, 20, 0) - 0.5) * 0.10;
+      const faceVarianceY = (perlinNoise(t * 0.11, 21, 0) - 0.5) * 0.06;
+      const desireWorld = camera.position.clone().add(
+        new THREE.Vector3(faceVarianceX, faceVarianceY, 0),
+      );
+
+      // 2. State-machine tick
+      if (gazeStateRef.current === 'fixate') {
+        // Microsaccade drift — tiny random walk around fixation point
+        const driftAmp = 0.003;
+        gazeDriftRef.current.x = lerp(gazeDriftRef.current.x, (perlinNoise(t * 3.1, 10, 0) - 0.5) * driftAmp, delta * 4);
+        gazeDriftRef.current.y = lerp(gazeDriftRef.current.y, (perlinNoise(t * 2.8, 11, 0) - 0.5) * driftAmp, delta * 4);
+
+        if (now > gazeFixateUntilRef.current) {
+          // Schedule next saccade: jump toward the current desire direction
+          // but only 60-90% of the way (undershoot is biologically correct)
+          const undershoot = 0.6 + Math.random() * 0.3;
+          gazeTargetRef.current.lerpVectors(gazeCurrRef.current, desireWorld, undershoot);
+          gazeStateRef.current      = 'saccade';
+          gazeSaccadeUntilRef.current = now + 20 + Math.random() * 60; // 20–80 ms saccade
+        }
+      } else {
+        // saccade: fast snap — lerp speed = delta * 40 ≈ full move in ~25 ms @60 fps
+        const saccadeSpd = delta * 40;
+        gazeCurrRef.current.lerp(gazeTargetRef.current, saccadeSpd);
+        if (now > gazeSaccadeUntilRef.current) {
+          gazeStateRef.current       = 'fixate';
+          // Fixation hold: 150–500 ms (human average ~220 ms)
+          gazeFixateUntilRef.current = now + 150 + Math.random() * 350;
+        }
+      }
+
+      // 3. Smooth eye target = fixated point + microsaccade drift
+      const eyeDesire = gazeCurrRef.current.clone().add(gazeDriftRef.current);
+      eyeWorldTargetRef.current.lerp(eyeDesire, delta * 18); // fast-ish for eye-only movement
+
+      // 4. Drive VRM lookAt with eye target
+      const lookAt = (v as { lookAt?: { autoUpdate?: boolean; lookAt?: (p: THREE.Vector3) => void } }).lookAt;
+      if (lookAt?.lookAt) {
+        lookAt.autoUpdate = false;
+        lookAt.lookAt(eyeWorldTargetRef.current);
+      }
+
+      // 5. Neck absorbs 30% of gaze angle (bone additive)
+      if (v.humanoid) {
+        const avatarPos = group ? group.position : new THREE.Vector3();
+        const toTarget  = eyeWorldTargetRef.current.clone().sub(avatarPos);
+        const neckYaw   = -Math.atan2(toTarget.x, toTarget.z) * 0.30;
+        const neckPitch = -Math.atan2(toTarget.y, Math.sqrt(toTarget.x ** 2 + toTarget.z ** 2)) * 0.30;
+        neckGazeYawRef.current   = lerp(neckGazeYawRef.current,   neckYaw,   delta * 6);
+        neckGazePitchRef.current = lerp(neckGazePitchRef.current, neckPitch, delta * 6);
+        const neckBone = v.humanoid.getRawBoneNode('neck' as never);
+        if (neckBone) {
+          neckBone.rotation.y += neckGazeYawRef.current;
+          neckBone.rotation.x += neckGazePitchRef.current;
+        }
+      }
     }
 
     // 6. VRM internals update
     v.update(delta);
 
     // 7. Head-pose lerp — driven by avatar:headpose events from AgentDirector
+    // Idle default: head aimed at camera (yaw≈0 + tiny noise, pitch computed from
+    // camera elevation above avatar so the avatar genuinely looks the viewer in the eye).
     if (v.humanoid) {
       const headBone = v.humanoid.getRawBoneNode('head' as never);
       if (headBone) {
-        const active      = headUntilRef.current > now;
-        const idleHeadYawTarget   = perlinNoise(t * 0.3, 1, 0) * 0.04 - 0.02;
-        const idleHeadPitchTarget = perlinNoise(t * 0.3, 2, 0) * 0.03 - 0.015;
+        const active = headUntilRef.current > now;
+
+        // Compute camera-relative pitch so head is leveled toward viewer's face
+        let camPitchBaseline = 0;
+        if (!active) {
+          const avatarWorldY = group ? group.position.y : 0;
+          const dY  = camera.position.y - avatarWorldY;
+          const dZ  = Math.abs(camera.position.z);
+          camPitchBaseline = Math.atan2(dY, dZ) * 0.35; // partial tilt (35% of full angle)
+        }
+
+        // Micro-wander: very small (±1°) so the head stays on-camera
+        const idleHeadYawTarget   = (perlinNoise(t * 0.25, 1, 0) - 0.5) * 0.018; // ±0.9°
+        const idleHeadPitchTarget = camPitchBaseline + (perlinNoise(t * 0.20, 2, 0) - 0.5) * 0.012;
         idleHeadOffsetRef.current = lerp(idleHeadOffsetRef.current, idleHeadYawTarget, 0.03);
 
         const targetYaw   = active ? headYawRef.current   : idleHeadOffsetRef.current;
         const targetPitch = active ? headPitchRef.current : idleHeadPitchTarget;
+        // Add head-roll from weight-shift
+        const targetRoll  = headRollRef.current * 0.60;
 
         headBone.rotation.y = lerp(headBone.rotation.y, targetYaw,   0.07);
         headBone.rotation.x = lerp(headBone.rotation.x, targetPitch, 0.07);
+        headBone.rotation.z = lerp(headBone.rotation.z, targetRoll,  0.05);
       }
     }
 
@@ -958,6 +1197,70 @@ function ZoomController() {
   return null;
 }
 
+// ── NaturalScene — lives inside <Canvas> ─────────────────────────────────────
+// Ultra-natural Scandinavian north-light setup.
+// Calibrated for 8+ hour eye comfort, zero glare, perfect avatar readability.
+interface NaturalSceneProps {
+  toneMappingExposure: number;
+  envIntensity:        number;
+}
+
+function CinematicScene({ toneMappingExposure, envIntensity }: NaturalSceneProps) {
+  const { gl } = useThree();
+
+  useEffect(() => {
+    gl.toneMappingExposure = toneMappingExposure;
+  }, [gl, toneMappingExposure]);
+
+  return (
+    <>
+      {/* ── 1. Hemisphere — sky/ground fill, balanced with HDRI ─── */}
+      <hemisphereLight args={['#C8D8FF', '#0A174E', 0.45]} />
+
+      {/* ── 2. Key directional — casts dramatic shadows ──────────────── */}
+      <directionalLight
+        position={[6, 7, 3]}
+        intensity={0.85}
+        color="#FFEFD9"
+        castShadow
+        shadow-mapSize-width={2048}
+        shadow-mapSize-height={2048}
+        shadow-camera-near={0.5}
+        shadow-camera-far={30}
+        shadow-camera-left={-8}
+        shadow-camera-right={8}
+        shadow-camera-top={8}
+        shadow-camera-bottom={-8}
+        shadow-bias={-0.0005}
+        shadow-normalBias={0.02}
+      />
+
+      {/* ── 3. Luxury warm spot — royal drama, strong shadows ─────────── */}
+      <spotLight
+        position={[5, 8, 4]}
+        intensity={1.0}
+        color="#FFEED8"
+        castShadow
+        shadow-mapSize-width={1024}
+        shadow-mapSize-height={1024}
+        penumbra={0.4}
+        angle={0.45}
+        decay={1.5}
+      />
+
+      {/* ── 4. Soft fill from ceiling-left (north-light bounce) ─────── */}
+      <directionalLight position={[-4, 5, -2]} intensity={0.18} color="#F0F4FB" castShadow={false} />
+
+      {/* ── 5. Environment — removed; CDN fetch causes R3F concurrent-mode
+           Suspense to defer the whole canvas. PBR ambient provided via
+           the hemisphere + spotLight combo below instead.             ── */}
+
+      {/* ── 6. Avatar warm ground wrap ──────────────────────────────── */}
+      <pointLight position={[0, -0.6, 0]} intensity={0.35} distance={3.5} color="#FFF8F0" />
+    </>
+  );
+}
+
 // ── Status dot ───────────────────────────────────────────────────────────────
 function StatusDot({ connected, processing }: { connected: boolean; processing: boolean }) {
   const color = !connected
@@ -972,6 +1275,13 @@ function StatusDot({ connected, processing }: { connected: boolean; processing: 
       <span className="text-xs text-gray-400">{label}</span>
     </div>
   );
+}
+
+// ── ExposureSync — keeps renderer toneMappingExposure in sync with Leva ────────
+function ExposureSync({ exposure }: { exposure: number }) {
+  const { gl } = useThree();
+  useEffect(() => { gl.toneMappingExposure = exposure; }, [gl, exposure]);
+  return null;
 }
 
 // ── Main component (pure VRM renderer — no WS hook, no HUD) ─────────────────
@@ -989,9 +1299,24 @@ export default function AvatarCanvas({
   const OFFICE_URL = '/assets/office.glb';
   const OFFICE_TARGET_Z: [number, number, number] = [0, 0, -2.0];
 
+  // ── Leva: dev-only natural light controls ───────────────────────────────────
+  const { toneMappingExposure, envIntensity } = useControls(
+    'Natural Light',
+    {
+      toneMappingExposure: { value: 0.90, min: 0.3, max: 2.0, step: 0.01 },
+      envIntensity:        { value: 0.65, min: 0.0, max: 3.0, step: 0.05 },
+    },
+  );
+
   const handleLoad  = useCallback(() => setLoaded(true), []);
   const handleError = useCallback((err: string) => setLoadError(err), []);
   const handleOfficeReady = useCallback(() => setOkOffice(true), []);
+
+  // URL quality param: ?quality=low → fewer HologramWindow particles
+  const qualityParam = typeof window !== 'undefined'
+    ? new URLSearchParams(window.location.search).get('quality')
+    : null;
+  const quality: 'low' | 'high' = qualityParam === 'low' ? 'low' : 'high';
 
   // Dev-only console debug API (fires window events — no WS required)
   useEffect(() => {
@@ -1029,34 +1354,39 @@ export default function AvatarCanvas({
       {process.env.NODE_ENV === 'development' && (
         <OfficeDebugHUD okOffice={okOffice} url={OFFICE_URL} pos={OFFICE_TARGET_Z} />
       )}
+      {/* Leva debug panel — dev only, hidden in production */}
+      <Leva hidden={process.env.NODE_ENV !== 'development'} collapsed />
       <Canvas
-        dpr={[1, 2]}
-        shadows={true}
+        dpr={[1, 1.75]}
+        shadows="soft"
         camera={{ position: [0, 1.6, 3.5], fov: 55, near: 0.01, far: 500 }}
-        gl={{ antialias: true, alpha: false }}
+        gl={{
+          powerPreference: 'high-performance',
+          antialias:       false,
+          alpha:           false,
+        }}
         onCreated={({ gl }) => {
-          gl.setClearColor(0x000000, 1);
-          gl.outputColorSpace = THREE.SRGBColorSpace;
-          gl.toneMapping = THREE.ACESFilmicToneMapping;
-          gl.toneMappingExposure = 1.6;
+          gl.setClearColor(0xE8E8E8, 1);
+          gl.outputColorSpace     = THREE.SRGBColorSpace;
+          gl.toneMapping          = THREE.ACESFilmicToneMapping;
+          gl.toneMappingExposure  = 0.90;
         }}
         style={{ width: '100%', height: '100%', display: 'block' }}
       >
-        {/* Interior ambient — soft base lighting inside the office */}
-        <ambientLight intensity={0.25} />
-        <hemisphereLight args={['#ffeedd', '#0a0c10', 0.30]} />
-        {/* Avatar key lights — near avatar at Z=-2.5 */}
-        <pointLight position={[0.8, 1.5, -1.5]} intensity={18} distance={8} decay={2} color="#fff8f0" />
-        <pointLight position={[-0.8, 1.0, -1.5]} intensity={12} distance={8} decay={2} color="#d8e8ff" />
-        {/* Room depth lights */}
-        <pointLight position={[0, 2.0, -4.0]} intensity={8} distance={10} decay={2} color="#ffe0a0" />
-        <pointLight position={[0, 2.0, -7.0]} intensity={5} distance={10} decay={2} color="#ffcc80" />
+        {/* ── Royal comfort lighting + exposure sync ──────────────── */}
+        <ComfortLightingRig />
+        <ExposureSync exposure={toneMappingExposure} />
+
 
         <Suspense fallback={null}>
+          {/* Panoramic city backdrop — mild parallax, easy on the eyes */}
+          <ScenicBackdrop size={[8.0, 3.6]} position={[0, 1.6, -6.0]} parallax={0.18} />
           <VRMScene vrmUrl={vrmUrl} onLoad={handleLoad} onError={handleError} />
-          {/* RoomShell disabled — GLB provides room geometry; shell caused overlit white walls */}
+          {/* RoomShell disabled — GLB provides room geometry */}
           {/* <RoomShell /> */}
-          {/* Office set loader — room as backdrop behind avatar */}
+          {/* Black-gold parquet floor overlay */}
+          <ParquetFloor />
+          {/* Office GLB — room as backdrop behind avatar */}
           <OfficeSetLoader
             url={OFFICE_URL}
             targetZ={OFFICE_TARGET_Z[2]}
@@ -1064,9 +1394,49 @@ export default function AvatarCanvas({
             debug={process.env.NODE_ENV === 'development'}
             onReady={handleOfficeReady}
           />
+          {/* Carpet: re-enabled with fixed no-rotation loader */}
+          <CarpetLoader
+            url="/assets/iranian_wool_carpet.glb"
+            debug={process.env.NODE_ENV === 'development'}
+          />
+          <CabinetLoader
+            url="/assets/3d_tv_white_cabinet_with_decoration.glb"
+            posX={-5.5}
+            posY={-0.03}
+            posZ={-2.5}
+            rotY={-Math.PI / 2}
+            debug={process.env.NODE_ENV === 'development'}
+          />
+          <GlobeLoader
+            url="/assets/golden_globe_decoration.glb"
+            posX={0.45}
+            posY={0.14}
+            posZ={-1.5}
+            debug={process.env.NODE_ENV === 'development'}
+          />
+          {/* Royal décor props — books, trophy, vase, globe, certificate */}
+          <RoyalDecoProps />
         </Suspense>
 
-        {/* OrbitControls — full 360° rotation, no distance/wall limits */}
+        {/* Soft contact shadows under avatar/furniture */}
+        <ContactShadows
+          position={[0, ROOM_BOUNDS.floorY + 0.012, -2.0]}
+          opacity={0.25}
+          blur={2.2}
+          far={6}
+          resolution={512}
+          frames={1}
+        />
+
+        {/* Royal material overrides — traverses scene graph once after mount */}
+        <RoyalMaterialsOverride />
+
+        {/* PostFX: SSAO only, no Bloom — NormalPass enabled for correct depth */}
+        <EffectComposer multisampling={0} enableNormalPass>
+          <SSAO intensity={0.22} radius={0.16} luminanceInfluence={0.28} />
+        </EffectComposer>
+
+        {/* OrbitControls — full 360° rotation */}
         <OrbitControls
           makeDefault
           target={[0, 0.8, -2.5]}

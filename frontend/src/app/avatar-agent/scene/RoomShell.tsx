@@ -16,7 +16,76 @@
  *   zFar     — back z edge         default -5.0
  */
 import React, { useMemo } from 'react';
+import * as THREE from 'three';
 import { ROOM_PALETTE, getRoomMaterial, getNoiseNormalMap } from './BackdropTheme';
+
+// ── Black-gold parquet texture (canvas-generated, no external image) ─────────
+let _parquetTex: THREE.CanvasTexture | null = null;
+
+function makeParquetTexture(): THREE.CanvasTexture {
+  if (_parquetTex) return _parquetTex;
+
+  const SIZE    = 512;          // canvas px  (= 1 m² tile when repeat matches room size)
+  const PLANK_L = 256;          // plank length px
+  const PLANK_W = 64;           // plank width px
+  const GAP     = 3;            // gold gap px
+
+  // Deterministic grain offset — no Math.random() so texture is stable
+  const grain = (r: number, c: number, g: number) =>
+    Math.sin(r * 17.3 + c * 11.7 + g * 5.9) * 5;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = SIZE; canvas.height = SIZE;
+  const ctx    = canvas.getContext('2d')!;
+
+  // Gold base (fills separator gaps)
+  ctx.fillStyle = '#B8860B';
+  ctx.fillRect(0, 0, SIZE, SIZE);
+
+  // Dark plank colour variants
+  const planks = ['#0C0A06', '#100D08', '#0E0C07', '#130F09', '#0A0805'];
+
+  const ROWS = Math.ceil(SIZE / PLANK_W) + 1;
+  for (let row = 0; row < ROWS; row++) {
+    const y      = row * PLANK_W;
+    const offset = (row % 2) * (PLANK_L / 2);   // brick offset
+    const COLS   = Math.ceil((SIZE + PLANK_L) / PLANK_L) + 1;
+
+    for (let col = -1; col < COLS; col++) {
+      const x  = col * PLANK_L - offset;
+      const ci = ((row * 3 + col * 7) & 0xffff) % planks.length;
+
+      // Plank body
+      ctx.fillStyle = planks[ci];
+      ctx.fillRect(x + GAP, y + GAP, PLANK_L - GAP * 2, PLANK_W - GAP * 2);
+
+      // Wood grain lines (dark, subtle)
+      ctx.strokeStyle = 'rgba(20,14,4,0.45)';
+      ctx.lineWidth   = 1;
+      for (let g = 1; g < 4; g++) {
+        const gy = y + GAP + (PLANK_W - GAP * 2) * g / 4;
+        ctx.beginPath();
+        ctx.moveTo(x + GAP,            gy + grain(row, col, g));
+        ctx.lineTo(x + PLANK_L - GAP,  gy + grain(row, col, g + 10));
+        ctx.stroke();
+      }
+
+      // Subtle gold highlight on top edge of each plank
+      ctx.strokeStyle = 'rgba(212,175,55,0.18)';
+      ctx.lineWidth   = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x + GAP,           y + GAP + 1);
+      ctx.lineTo(x + PLANK_L - GAP, y + GAP + 1);
+      ctx.stroke();
+    }
+  }
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 16;
+  _parquetTex = tex;
+  return tex;
+}
 
 export interface RoomShellProps {
   width?:     number;
@@ -45,10 +114,16 @@ export function RoomShell({
   const noiseMap = useMemo(() => (noiseNormals ? getNoiseNormalMap() : null), [noiseNormals]);
 
   const floorMat = useMemo(() => {
-    const m = getRoomMaterial(ROOM_PALETTE.floor, 0.92, 0.03);
-    if (noiseMap) { m.normalMap = noiseMap; m.normalScale.set(0.15, 0.15); }
-    return m;
-  }, [noiseMap]);
+    const tex = makeParquetTexture();
+    // Repeat so each 1 m² shows one canvas tile
+    tex.repeat.set(width, zLen);
+    tex.needsUpdate = true;
+    return new THREE.MeshStandardMaterial({
+      map:       tex,
+      roughness: 0.18,   // polished parquet
+      metalness: 0.06,
+    });
+  }, [width, zLen]);
 
   const backMat = useMemo(() => {
     const m = getRoomMaterial(ROOM_PALETTE.backWall, 0.86, 0.04);

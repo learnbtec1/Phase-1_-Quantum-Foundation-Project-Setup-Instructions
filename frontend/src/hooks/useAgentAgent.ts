@@ -256,6 +256,11 @@ export function useAgentAgent({
       const audio = new Audio(url);
       currentAudioRef.current = audio;
 
+      // Expose element for AvatarCanvas timeline sync (before play starts)
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('avatar:audio:element', { detail: { audio } }));
+      }
+
       audio.onplay  = () => {
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('avatar:speak:start'));
@@ -405,9 +410,20 @@ export function useAgentAgent({
         });
 
         // 4. Audio output
-        //    - MP3 from Lahajati.ai (audio_format=="mp3") → play as Blob URL
+        //    - MP3 from Azure TTS (audio_format=="mp3") → play as Blob URL
         //    - Legacy PCM from Kokoro → wrap in WAV and play (fallback path)
         //    - tts_unavailable or no audio → fall back to AgentDirector TTS
+        //
+        // Dispatch viseme timeline BEFORE audio play so AvatarCanvas has cues
+        // ready the moment isTalkingRef flips true on audio.onplay.
+        const visemeCues = (frame.viseme_cues ?? []) as Array<{ t: number; id: number }>;
+        if (typeof window !== 'undefined' && visemeCues.length > 0) {
+          window.dispatchEvent(
+            new CustomEvent('avatar:visemes:timeline', { detail: { cues: visemeCues } }),
+          );
+          console.log(`[useAgentAgent] Dispatched ${visemeCues.length} viseme cues to canvas`);
+        }
+
         if (type === 'speech' && frame.audio_base64) {
           const fmt = (frame.audio_format ?? 'pcm') as string;
           if (fmt === 'mp3') {
