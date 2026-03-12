@@ -621,7 +621,12 @@ export default function AssessmentPage() {
                     <div>
                       <h4 className="text-blue-400 font-bold mb-2 text-sm">الملاحظات والتحليل:</h4>
                       <ul className="space-y-2">
-                        {crit.reasons.map((r, i) => <li key={i} className="text-gray-300 text-sm flex gap-2"><span className="text-blue-500 mt-1">•</span>{r}</li>)}
+                        {crit.reasons.map((r, i) => (
+                          <li key={i} className="text-gray-300 text-sm flex gap-2">
+                            <span className="text-blue-500 mt-1">•</span>
+                            {typeof r === 'string' ? r : typeof r === 'object' && r !== null && 'text' in (r as object) ? String((r as any).text) : JSON.stringify(r)}
+                          </li>
+                        ))}
                       </ul>
                     </div>
                     {crit.evidence.length > 0 && (
