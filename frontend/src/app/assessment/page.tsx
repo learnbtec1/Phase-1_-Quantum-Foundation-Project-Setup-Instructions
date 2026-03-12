@@ -354,7 +354,9 @@ export default function AssessmentPage() {
         criteria: criteriaArray,
         final_grade: payload?.final_grade || 'PENDING',
       },
-      report: payload?.consolidated_summary || payload?.summary || '',
+      report: typeof payload?.consolidated_summary === 'string' && payload.consolidated_summary
+        ? payload.consolidated_summary
+        : typeof payload?.summary === 'string' ? payload.summary : ''
     };
   };
 
@@ -574,7 +576,7 @@ export default function AssessmentPage() {
             {isEvaluationError && (
               <div className="bg-amber-900/20 border border-amber-500/40 rounded-2xl p-5">
                 <h3 className="text-amber-300 font-bold mb-2">تنبيه: تعذر إكمال التقييم الذكي</h3>
-                <p className="text-amber-100 text-sm leading-relaxed">{result.report || 'الخادم لم يُرجع تفاصيل كافية. يرجى التحقق من إعدادات API ثم إعادة المحاولة.'}</p>
+                <p className="text-amber-100 text-sm leading-relaxed">{typeof result.report === 'string' ? result.report : 'الخادم لم يُرجع تفاصيل كافية. يرجى التحقق من إعدادات API ثم إعادة المحاولة.'}</p>
               </div>
             )}
 
@@ -587,7 +589,7 @@ export default function AssessmentPage() {
                     {result.data.final_grade || "PENDING"}
                   </div>
                   {result.data.final_grade === 'REFER (FAIL)' && (
-                    <p className="text-red-300 mt-2 max-w-xl text-sm border-r-2 border-red-500 pr-2">{result.report}</p>
+                    <p className="text-red-300 mt-2 max-w-xl text-sm border-r-2 border-red-500 pr-2">{typeof result.report === 'string' ? result.report : ''}</p>
                   )}
                 </div>
 
