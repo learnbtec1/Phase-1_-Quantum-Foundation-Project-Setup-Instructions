@@ -417,6 +417,7 @@ export default function AssessmentPage() {
 
   const handleCheckPlagiarism = async () => {
     if (!studentAnswer) return;
+    setPlagiarismResult(null);
     setPlagiarismLoading(true); setShowPlagModal(true);
     try {
       const res = await fetch('/api/plagiarism', {
@@ -425,16 +426,26 @@ export default function AssessmentPage() {
         body: JSON.stringify({ text: studentAnswer })
       });
       const raw = await res.json();
-      // Backend returns {score, detail, findings} — normalize to PlagiarismResult shape
-      const likelihood = Math.round((raw?.ai?.likelihood ?? raw?.score ?? 0) * (raw?.score <= 1 ? 100 : 1));
+      // Backend/route always returns PlagiarismGuard shape: {score, detail, findings}
+      // or the properly-shaped {ai:{likelihood,...}, similarity, sources}
+      const rawScore = typeof raw?.score === 'number' ? raw.score : 0;
+      const likelihood = raw?.ai?.likelihood != null
+        ? Math.round(raw.ai.likelihood)
+        : Math.round(rawScore * 100);
       setPlagiarismResult({
-        similarity: raw?.similarity ?? likelihood,
+        similarity: raw?.similarity != null ? Math.round(raw.similarity) : likelihood,
         ai: {
           likelihood,
-          signals: raw?.ai?.signals ?? raw?.findings?.suspected_ai_markers ?? [],
-          report: raw?.ai?.report ?? raw?.detail ?? '',
+          signals: Array.isArray(raw?.ai?.signals)
+            ? raw.ai.signals
+            : Array.isArray(raw?.findings?.suspected_ai_markers)
+              ? raw.findings.suspected_ai_markers
+              : [],
+          report: typeof raw?.ai?.report === 'string'
+            ? raw.ai.report
+            : typeof raw?.detail === 'string' ? raw.detail : '',
         },
-        sources: raw?.sources ?? [],
+        sources: Array.isArray(raw?.sources) ? raw.sources : [],
       });
     } catch (e: unknown) { alert(getErrorMessage(e)); setShowPlagModal(false); } finally { setPlagiarismLoading(false); }
   };

@@ -104,3 +104,26 @@ async def grade_v3_stream(payload: GradePayload):
 async def grade_legacy(payload: GradePayload):
     """Legacy endpoint — redirects to v3"""
     return await grade_v3(payload)
+
+
+# ==========================================
+# Plagiarism / AI Detection endpoint
+# ==========================================
+
+class PlagiarismPayload(BaseModel):
+    text: str
+
+@router.post("/check_plagiarism")
+async def check_plagiarism(payload: PlagiarismPayload):
+    """كشف الانتحال والبصمة الرقمية (مؤشرات أسلوبية)"""
+    if not payload.text or len(payload.text.strip()) < 10:
+        raise HTTPException(status_code=400, detail="النص قصير جداً للتحليل.")
+    try:
+        from app.services.plagiarism_guard import PlagiarismGuard
+        guard = PlagiarismGuard()
+        result = await guard.evaluate(payload.text)
+        # Return in the shape the frontend expects: {score, detail, findings}
+        return JSONResponse(content=result)
+    except Exception as e:
+        logger.exception("[Plagiarism] error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
