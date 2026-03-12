@@ -424,7 +424,18 @@ export default function AssessmentPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: studentAnswer })
       });
-      setPlagiarismResult(await res.json());
+      const raw = await res.json();
+      // Backend returns {score, detail, findings} — normalize to PlagiarismResult shape
+      const likelihood = Math.round((raw?.ai?.likelihood ?? raw?.score ?? 0) * (raw?.score <= 1 ? 100 : 1));
+      setPlagiarismResult({
+        similarity: raw?.similarity ?? likelihood,
+        ai: {
+          likelihood,
+          signals: raw?.ai?.signals ?? raw?.findings?.suspected_ai_markers ?? [],
+          report: raw?.ai?.report ?? raw?.detail ?? '',
+        },
+        sources: raw?.sources ?? [],
+      });
     } catch (e: unknown) { alert(getErrorMessage(e)); setShowPlagModal(false); } finally { setPlagiarismLoading(false); }
   };
 
