@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(FALLBACK);
     }
 
-    const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+    const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15000);
 

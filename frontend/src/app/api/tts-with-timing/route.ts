@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Empty text", reqId }, { status: 400, headers });
     }
 
-    const base = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+    const base = process.env.BACKEND_URL || "http://127.0.0.1:8000";
     const upstream = process.env.TTS_BACKEND_URL || `${base.replace(/\/$/, "")}/api/v1/tts-with-timing`;
 
     const controller = new AbortController();

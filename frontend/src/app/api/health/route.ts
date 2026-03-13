@@ -46,7 +46,7 @@ export async function GET(req: NextRequest) {
   const dockerUrl = process.env.AVATAR_DOCKER_URL || process.env.NEXT_PUBLIC_AVATAR_DOCKER_URL;
   const azure3dUrl = process.env.AZURE3D_URL || process.env.NEXT_PUBLIC_AZURE3D_URL;
 
-  const backendBase = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const backendBase = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
   let reach: {
     chat?: boolean;
     tts?: boolean;

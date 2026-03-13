@@ -318,27 +318,36 @@ export default function AssessmentPage() {
   };
 
   const normalizeIntegratedResult = (payload: any): EvaluationResult => {
-    const rawCriteria = payload?.criteria || {};
+    const rawCriteria = payload?.criteria;
 
-    const criteriaArray: Criterion[] = Object.entries(rawCriteria).map(
-      ([code, data]: [string, any]) => ({
-        code,
-        verdict: data?.achieved ? 'Achieved' : 'Not Achieved',
-        reasons: Array.isArray(data?.reasons)
-          ? data.reasons
-          : (data?.feedback ? [data.feedback] : []),
-        evidence: Array.isArray(data?.evidence)
-          ? data.evidence
-          : (data?.evidence_quote
-            ? [{
-              quote: data.evidence_quote,
-              start: data.start_index ?? 0,
-              end: data.end_index ?? 0,
-            }]
-            : []),
-        recommendations: Array.isArray(data?.recommendations) ? data.recommendations : [],
-      })
-    );
+    // Handle both array (already-normalized from route) and object/dict (from backend direct)
+    const criteriaArray: Criterion[] = Array.isArray(rawCriteria)
+      ? rawCriteria.map((item: any) => ({
+          code: item?.code || '?',
+          verdict: (item?.verdict === 'Achieved' || item?.achieved) ? 'Achieved' : 'Not Achieved',
+          reasons: Array.isArray(item?.reasons) ? item.reasons : (item?.feedback ? [item.feedback] : []),
+          evidence: Array.isArray(item?.evidence) ? item.evidence : (item?.evidence_quote ? [{ quote: item.evidence_quote, start: item.start_index ?? 0, end: item.end_index ?? 0 }] : []),
+          recommendations: Array.isArray(item?.recommendations) ? item.recommendations : [],
+        }))
+      : Object.entries(rawCriteria || {}).map(
+          ([code, data]: [string, any]) => ({
+            code,
+            verdict: data?.achieved ? 'Achieved' : 'Not Achieved',
+            reasons: Array.isArray(data?.reasons)
+              ? data.reasons
+              : (data?.feedback ? [data.feedback] : []),
+            evidence: Array.isArray(data?.evidence)
+              ? data.evidence
+              : (data?.evidence_quote
+                ? [{
+                  quote: data.evidence_quote,
+                  start: data.start_index ?? 0,
+                  end: data.end_index ?? 0,
+                }]
+                : []),
+            recommendations: Array.isArray(data?.recommendations) ? data.recommendations : [],
+          })
+        );
 
     const achievedCount = criteriaArray.filter((c) => c.verdict === 'Achieved').length;
     const totalCriteria = criteriaArray.length;
@@ -567,7 +576,7 @@ export default function AssessmentPage() {
         </section>
 
         {/* 3. Action Buttons */}
-        <div className="flex justify-center gap-6 mb-16">
+        <div className="flex justify-center gap-6 mb-16 flex-wrap">
           <button
             type="button"
             onClick={handleReset}
@@ -577,6 +586,17 @@ export default function AssessmentPage() {
             <div className="relative flex items-center gap-2 text-red-400 font-bold">
               <Trash2 />
               <span>طالب جديد</span>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleRunDemoCheck}
+            className="relative group px-6 py-4 rounded-2xl bg-yellow-900/20 border border-yellow-500/30 overflow-hidden transition-all hover:border-yellow-400 hover:bg-yellow-900/40"
+            title="تحميل بيانات تجريبية للاختبار السريع"
+          >
+            <div className="relative flex items-center gap-2 text-yellow-400 font-bold text-sm">
+              <span>⚡ تجربة سريعة</span>
             </div>
           </button>
 

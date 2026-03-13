@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Audio too short' }, { status: 400 });
     }
 
-    const base = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+    const base = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
     const upstream = `${base.replace(/\/$/, '')}/api/v1/stt`;
 
     const fd = new FormData();
