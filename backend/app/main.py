@@ -2,9 +2,11 @@
 Main FastAPI app for NEXUS.
 """
 
+import asyncio
 import logging
 import sys
 import os
+import time as _time
 
 # Ensure the backend directory is in the Python path
 _backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -22,11 +24,54 @@ from app.api.v1.endpoints.stt import router as stt_router
 from app.api.v1.endpoints.tts import router as tts_router
 from app.api.v1.endpoints.tts_timing import router as tts_timing_router
 from app.api.v1.endpoints.agent_ws import router as agent_ws_router
+from app.api.v1.endpoints.nexus_ip import router as nexus_ip_router
+from app.api.v1.endpoints.reports import router as reports_router
+from app.api.memory import router as memory_router
 
 from app.core.config import settings
 from app.services.tts_service import AzureTTSService
 
 logger = logging.getLogger(__name__)
+
+# ── TTS health-ping cache ─────────────────────────────────────────────────────
+# Updated every _TTS_PING_EVERY_SEC by the background task started in lifespan.
+# The /api/health endpoint reads from this dict instead of rechecking live on
+# every call.
+_tts_health: dict = {"ok": None, "latency_ms": None, "ts": 0}
+_TTS_PING_EVERY_SEC = 300   # 5 minutes
+
+
+async def _tts_ping_loop() -> None:
+    """Background task: perform a short Azure TTS synthesis every 5 minutes,
+    cache the result so /api/health can return live audio availability."""
+    await asyncio.sleep(8)   # slight startup delay — let the app warm up first
+    while True:
+        try:
+            from app.api.v1.endpoints.tts_timing import _synthesize_azure_sync
+            key    = settings.AZURE_SPEECH_KEY
+            region = settings.AZURE_SPEECH_REGION
+            voice  = settings.TTS_ARABIC_VOICE
+            if key and region:
+                t0 = _time.monotonic()
+                loop = asyncio.get_running_loop()
+                wav, _, _, _ = await loop.run_in_executor(
+                    None, _synthesize_azure_sync, "اختبار", key, region, voice
+                )
+                latency_ms = int((_time.monotonic() - t0) * 1000)
+                _tts_health.update({
+                    "ok":         bool(wav),
+                    "latency_ms": latency_ms,
+                    "ts":         int(_time.time() * 1000),
+                })
+                logger.info("TTS ping OK — latency=%d ms", latency_ms)
+            else:
+                _tts_health.update({"ok": False, "latency_ms": None,
+                                    "ts": int(_time.time() * 1000)})
+        except Exception as exc:
+            _tts_health.update({"ok": False, "latency_ms": None,
+                                 "ts": int(_time.time() * 1000)})
+            logger.warning("TTS ping failed: %s", exc)
+        await asyncio.sleep(_TTS_PING_EVERY_SEC)
 
 
 @asynccontextmanager
@@ -67,15 +112,17 @@ async def lifespan(app_instance):
         )
     except Exception as e:
         logger.error("Azure TTS service initialization failed: %s", e)
-        # The service will raise RuntimeError if used without credentials;
-        # we let the endpoint handle it gracefully.
         app_instance.state.tts_service = None
+
+    # 4) TTS health-ping background task — updates _tts_health every 5 min
+    _ping_task = asyncio.create_task(_tts_ping_loop())
+    app_instance.state.tts_ping_task = _ping_task
 
     yield
 
-    # Optional: clean up if needed
+    # Cleanup
+    _ping_task.cancel()
     if hasattr(app_instance.state, "tts_service") and app_instance.state.tts_service:
-        # The service has no explicit shutdown, but we could call reload_credentials or just let GC handle it.
         logger.info("Azure TTS service released (garbage collected).")
 
 
@@ -116,16 +163,36 @@ app.include_router(stt_router, prefix="/api/v1")
 app.include_router(tts_router, prefix="/api/v1")
 app.include_router(tts_timing_router, prefix="/api/v1")
 app.include_router(agent_ws_router)  # mounts at /ws/agent (no prefix — path defined by router)
+app.include_router(nexus_ip_router)  # NEXUS IP: /api/v1/nexus/*
+app.include_router(reports_router)   # Academic PDF reports: /api/v1/reports/*
+app.include_router(memory_router)    # Conversation memory: /api/v1/memory/*
 
 
 @app.get("/api/health")
 async def api_health():
-    """Standard /api/health endpoint consumed by Next.js health route."""
+    """Standard /api/health endpoint consumed by Next.js health route.
+
+    ``audio`` reflects a live TTS ping performed every 5 minutes by the
+    background task.  On first startup (before the first ping fires) it
+    falls back to a credential-presence check so health returns ``true``
+    immediately if Azure is configured.
+    """
+    credentials_ok = (
+        os.getenv("TTS_PROVIDER", "").lower() == "azure"
+        and bool(os.getenv("AZURE_SPEECH_KEY") or settings.AZURE_SPEECH_KEY)
+        and bool(os.getenv("AZURE_SPEECH_REGION") or settings.AZURE_SPEECH_REGION)
+    )
+    # Use live ping result once available, otherwise fall back to credential check
+    ping_result = _tts_health.get("ok")
+    audio = ping_result if ping_result is not None else credentials_ok
+
     return {
-        "ok": True,
-        "env": bool(os.getenv("OPENAI_API_KEY")),
-        "audio": os.path.exists(os.path.join(os.path.dirname(os.path.dirname(__file__)), "public", "audio", "ui", "hover.mp3")),
-        "reach": True,
+        "ok":            True,
+        "env":           bool(os.getenv("OPENAI_API_KEY") or settings.OPENAI_API_KEY),
+        "audio":         audio,
+        "reach":         True,
+        "last_tts_ms":   _tts_health.get("latency_ms"),
+        "last_check_ts": _tts_health.get("ts") or None,
     }
 
 

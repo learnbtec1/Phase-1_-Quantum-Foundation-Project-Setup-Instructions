@@ -49,6 +49,12 @@ except ImportError:
     def extract_criteria_with_descriptions(*args, **kwargs):
         return {}
 
+try:
+    from app.services.calibration_store import get_calibration_block
+except ImportError:
+    def get_calibration_block(band: str) -> str:  # type: ignore[misc]
+        return ""
+
 load_dotenv()
 
 logging.basicConfig(
@@ -76,8 +82,8 @@ if MODEL.startswith("gpt-") or MODEL.startswith("o1-"):
         openai_client = OpenAI(api_key=openai_key)
         logger.info(f"✅ Initialized OpenAI client for model: {MODEL}")
 elif MODEL.startswith("claude-"):
-    # Anthropic model
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    # Anthropic model — accept both ANTHROPIC_API_KEY and ANTHROPIC_KEY
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_KEY")
     if not anthropic_key or anthropic_key.strip() == "" or anthropic_key == "sk-ant-your-key-here":
         logger.warning("⚠️ ANTHROPIC_API_KEY غير مُعيَّن — لا يمكن استخدام نماذج Claude.")
     elif anthropic is None:
@@ -98,6 +104,8 @@ MAX_CONCURRENT = int(os.getenv("GRADER_MAX_CONCURRENT", "2"))
 # تأخير (بالثواني) قبل كل طلب لتوزيع الطلبات وتجنب تجاوز حد المعدل
 GRADER_DELAY_SEC = float(os.getenv("GRADER_DELAY_SEC", "1.5"))
 CACHE_TTL = int(os.getenv("GRADER_CACHE_TTL", "86400"))
+# Max retry attempts on rate-limit / transient errors
+GRADER_MAX_RETRIES = int(os.getenv("GRADER_MAX_RETRIES", "3"))
 
 semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
@@ -106,7 +114,8 @@ _cache: Dict[str, Tuple[datetime, dict]] = {}
 
 
 def _cache_key(assignment: str, student: str, code: str) -> str:
-    h = hashlib.sha256(f"{assignment[:2000]}|{student[:2000]}|{code}".encode()).hexdigest()
+    # Use full text hash so two students with the same header don't collide
+    h = hashlib.sha256(f"{assignment}|{student}|{code}".encode()).hexdigest()
     return h
 
 
@@ -183,6 +192,267 @@ def band_from_code(code: str) -> str:
     elif clean.startswith('D'):
         return 'DISTINCTION'
     return 'UNKNOWN'
+
+
+def sample_document(text: str, max_chars: int = 16000) -> str:
+    """
+    Return a representative sample of the document when it exceeds max_chars.
+    Strategy: beginning 50% + middle 25% + end 25%
+    This ensures we see the intro, body, and conclusion.
+    """
+    if len(text) <= max_chars:
+        return text
+    head = int(max_chars * 0.50)
+    mid_size = int(max_chars * 0.25)
+    tail = int(max_chars * 0.25)
+    mid_start = (len(text) - mid_size) // 2
+    parts = [
+        text[:head],
+        f"\n\n[... محتوى محذوف للاختصار ...]\n\n",
+        text[mid_start: mid_start + mid_size],
+        f"\n\n[... محتوى محذوف للاختصار ...]\n\n",
+        text[-tail:],
+    ]
+    return "".join(parts)
+
+
+def extract_relevant_excerpt(text: str, criterion_desc: str, max_chars: int = 14000) -> str:
+    """
+    Extract the most relevant portion of student text for a given criterion.
+    Strategy:
+      1. Tokenize criterion description into keywords.
+      2. Score each paragraph by keyword hit density.
+      3. Return top-scoring paragraphs up to max_chars.
+      Always includes the first 2000 chars as baseline context.
+    If text is short enough to fit entirely, returns it as-is.
+    """
+    if len(text) <= max_chars:
+        return text
+
+    # Build keyword set from criterion description (filter short/stop words)
+    stop = {'في', 'من', 'على', 'إلى', 'عن', 'مع', 'هذا', 'هذه', 'التي', 'الذي',
+            'يجب', 'أو', 'و', 'أن', 'لا', 'كل', 'هل', 'a', 'the', 'of', 'and', 'or', 'to'}
+    norm_desc = normalize_text(criterion_desc)
+    keywords = {
+        w for w in re.split(r'\W+', norm_desc)
+        if len(w) >= 3 and w not in stop
+    }
+
+    # Split text into paragraphs (~500-char windows overlapping slightly)
+    paragraphs = [p.strip() for p in re.split(r'\n{1,}', text) if p.strip()]
+    if not paragraphs:
+        return text[:max_chars]
+
+    # Score each paragraph
+    def score(para: str) -> float:
+        norm_p = normalize_text(para)
+        words = set(re.split(r'\W+', norm_p))
+        hits = len(keywords & words)
+        return hits / max(len(words), 1)
+
+    scored = sorted(enumerate(paragraphs), key=lambda x: score(x[1]), reverse=True)
+
+    # Always start with first 2000 chars as context baseline
+    baseline = text[:2000]
+    result_parts = [baseline]
+    used_chars = len(baseline)
+    used_indices = set()
+
+    for orig_idx, para in scored:
+        if used_chars >= max_chars:
+            break
+        room = max_chars - used_chars
+        snippet = para[:room]
+        result_parts.append(snippet)
+        used_chars += len(snippet)
+        used_indices.add(orig_idx)
+
+    return "\n".join(result_parts)
+
+
+def extract_criterion_section(student_text: str, code: str, max_chars: int = 16000) -> Optional[str]:
+    """
+    Find the section in student document dedicated to a specific criterion code.
+    Looks for lines like 'P1:', 'A.P1 -', 'معيار P1', 'Task 1 - P1', etc.
+    Returns the section text if found (up to max_chars), or None if not found.
+    """
+    code_upper = code.upper()
+    bare_code = re.sub(r'^[A-Z]+\.', '', code_upper)  # A.P1 -> P1
+
+    # Regex to detect a heading line for THIS criterion
+    # Heading must be short (≤ 80 chars) and contain the criterion code as a word
+    heading_re = re.compile(
+        rf'(?<![A-Z0-9])(?:[A-Z]{{1,2}}\.)?{re.escape(bare_code)}(?![A-Z0-9])',
+        re.IGNORECASE,
+    )
+    # Regex for ANY criterion heading (to detect end of section)
+    any_criterion_re = re.compile(
+        r'(?<![A-Z0-9])(?:[A-Z]{1,2}\.)?(?:P|M|D)\d+(?![A-Z0-9])',
+        re.IGNORECASE,
+    )
+
+    lines = student_text.split('\n')
+    heading_line_idx = None
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # Must be a short line (heading-like) containing the criterion code
+        if 2 <= len(stripped) <= 100 and heading_re.search(stripped):
+            # Extra check: this line should look like a heading, not mid-paragraph
+            # A heading line typically ends with ':' or '-' or is just the code
+            # OR it's short enough (≤ 60 chars) — avoid matching mid-sentence references
+            is_heading = (
+                stripped.endswith((':',  '-', '–')) or
+                len(stripped) <= 60 or
+                re.match(r'^[\s\W]*(?:[A-Z]{1,2}\.)?[PMD]\d+', stripped, re.IGNORECASE)
+            )
+            if is_heading:
+                heading_line_idx = i
+                break
+
+    if heading_line_idx is None:
+        return None
+
+    # Now find where the next criterion section starts
+    section_lines = [lines[heading_line_idx]]
+    for j in range(heading_line_idx + 1, len(lines)):
+        line = lines[j]
+        stripped = line.strip()
+        # Stop if we hit another criterion heading (short line with a different criterion code)
+        if 2 <= len(stripped) <= 100 and any_criterion_re.search(stripped):
+            # Make sure it's actually a different criterion (not just a reference)
+            found_codes = any_criterion_re.findall(stripped)
+            # If the only code found is the current criterion in a non-heading context, skip
+            if found_codes and not all(
+                re.sub(r'^[A-Z]+\.', '', c.upper()) == bare_code
+                for c in found_codes
+            ):
+                is_next_heading = (
+                    stripped.endswith((':', '-', '–')) or
+                    len(stripped) <= 60 or
+                    re.match(r'^[\s\W]*(?:[A-Z]{1,2}\.)?[PMD]\d+', stripped, re.IGNORECASE)
+                )
+                if is_next_heading:
+                    break
+        section_lines.append(line)
+
+    section = '\n'.join(section_lines).strip()
+
+    if len(section) < 100:
+        return None
+
+    return section[:max_chars]
+
+
+def extract_company_section(student_text: str, company_name: str, max_chars: int = 10000) -> Optional[str]:
+    """
+    Find the section in student document dedicated to a specific company.
+    Matches heading lines containing the company name (or a significant substring).
+    Returns the section text if found, or None.
+    """
+    if not company_name or len(company_name) < 2:
+        return None
+
+    # Use the longest word in company name (≥4 chars) as the key search term
+    words = [w for w in re.split(r'\W+', company_name) if len(w) >= 4]
+    if not words:
+        words = [company_name[:8]]
+    search_term = max(words, key=len)  # longest word is most distinctive
+
+    lines = student_text.split('\n')
+    heading_line_idx = None
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # Short heading line containing the company name
+        if 2 <= len(stripped) <= 100 and re.search(re.escape(search_term), stripped, re.IGNORECASE):
+            heading_line_idx = i
+            break
+
+    if heading_line_idx is None:
+        return None
+
+    # Collect lines until the next similar-length heading
+    section_lines = [lines[heading_line_idx]]
+    for j in range(heading_line_idx + 1, len(lines)):
+        line = lines[j]
+        stripped = line.strip()
+        # Stop at next short heading that looks like a new company or criterion section
+        if 2 <= len(stripped) <= 80:
+            looks_like_heading = (
+                stripped.endswith((':', '-', '–')) or
+                re.match(r'^[\s\W]*(?:[A-Z]{1,2}\.)?[PMD]\d+', stripped, re.IGNORECASE) or
+                (len(stripped) <= 50 and re.search(r'[A-Z\u0600-\u06FF]{3,}', stripped))
+            )
+            # Only stop if it's a NEW section (not this company's heading)
+            if looks_like_heading and not re.search(re.escape(search_term), stripped, re.IGNORECASE):
+                # Check it's not just a sub-heading within the same company section
+                if j > heading_line_idx + 3:  # give at least 3 lines before stopping
+                    break
+        section_lines.append(line)
+
+    section = '\n'.join(section_lines).strip()
+    return section[:max_chars] if len(section) >= 50 else None
+
+
+def extract_multi_company_excerpt(
+    student_text: str,
+    code: str,
+    desc: str,
+    company_names: List[str],
+    max_chars: int = 18000,
+) -> Tuple[str, str]:
+    """
+    When student organized document by company (not by criterion code),
+    extract the criterion-relevant content from EACH company section.
+
+    Returns:
+        (combined_excerpt, source_note)
+    """
+    per_company = max_chars // max(len(company_names), 1)
+    parts = []
+    found_companies = []
+
+    for company in company_names:
+        company_section = extract_company_section(student_text, company, max_chars=per_company)
+        if company_section:
+            # From this company section, extract paragraphs most relevant to this criterion
+            relevant = extract_relevant_excerpt(company_section, desc or code, max_chars=per_company)
+            if relevant and len(relevant) > 80:
+                parts.append(f"── محتوى {company} المتعلق بالمعيار {code} ──\n{relevant}")
+                found_companies.append(company)
+
+    if not parts:
+        # Fall back to keyword extraction from full document
+        fallback = extract_relevant_excerpt(student_text, desc or code, max_chars=max_chars)
+        note = (
+            f"⚠️ لم يُعثَر على قسم بعنوان '{code}' أو بأسماء الشركات في وثيقة الطالب.\n"
+            f"   يُعرض المقتطع الأكثر صلة بالمعيار من الوثيقة."
+        )
+        return fallback, note
+
+    combined = "\n\n".join(parts)[:max_chars]
+    note = (
+        f"📂 الطالب نظّم إجابته حسب الشركة — عُثر على محتوى في: {', '.join(found_companies)}\n"
+        f"   ⚠️ قيّم المعيار {code} بالنظر في مجموع ما قدّمه الطالب لكلتا الشركتين.\n"
+        f"   الأدلة موزعة — اجمعها من كلا القسمين قبل الحكم."
+    )
+    return combined, note
+
+
+def smart_student_excerpt(student_text: str, code: str, desc: str, max_chars: int) -> str:
+    """
+    Return as much of the student document as possible within max_chars.
+    - If the full document fits: return ALL of it (AI sees everything — best case).
+    - If too long: use structure-preserving sampling (50% head + 25% mid + 25% tail)
+      rather than keyword scoring, so document flow and section headers are preserved.
+    The AI is then instructed to scan the whole provided text and find the relevant
+    section itself — far more reliable than Python keyword matching.
+    """
+    if len(student_text) <= max_chars:
+        return student_text
+    # Structure-preserving sample — preserves headings and document flow
+    return sample_document(student_text, max_chars=max_chars)
 
 
 def extract_criteria_codes(text: str) -> List[str]:
@@ -262,12 +532,156 @@ def calculate_final_grade_btec(criteria_results: Dict[str, Dict]) -> str:
 
 
 # ========= OpenAI Evaluation for Single Criterion =========
+async def _call_ai_with_retry(prompt: str, max_retries: int = GRADER_MAX_RETRIES) -> str:
+    """
+    Call the configured AI provider with exponential-backoff retry on 429/overloaded.
+    Raises on non-retriable errors. Returns raw text response.
+    """
+    active_client = None
+    if MODEL.startswith("gpt-") or MODEL.startswith("o1-"):
+        active_client = openai_client
+    elif MODEL.startswith("claude-"):
+        active_client = anthropic_client
+
+    if active_client is None:
+        raise RuntimeError("لا يوجد عميل AI نشط — تحقق من مفتاح API وإعداد GRADER_MODEL")
+
+    loop = asyncio.get_event_loop()
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                # Exponential backoff: 5s, 15s, 45s
+                wait = 5 * (3 ** (attempt - 1))
+                logger.info(f"Retry {attempt}/{max_retries} after {wait}s backoff...")
+                await asyncio.sleep(wait)
+
+            if MODEL.startswith("claude-"):
+                response = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: active_client.messages.create(
+                            model=MODEL,
+                            max_tokens=MAX_TOKENS,
+                            messages=[{"role": "user", "content": prompt}],
+                        )
+                    ),
+                    timeout=REQUEST_TIMEOUT
+                )
+                return (response.content[0].text or "").strip()
+            else:
+                response = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: active_client.chat.completions.create(
+                            model=MODEL,
+                            max_tokens=MAX_TOKENS,
+                            messages=[{"role": "user", "content": prompt}],
+                            response_format={"type": "json_object"},
+                            temperature=0,   # deterministic — same input → same output
+                            seed=42,         # extra reproducibility
+                        )
+                    ),
+                    timeout=REQUEST_TIMEOUT
+                )
+                return (response.choices[0].message.content or "").strip()
+
+        except Exception as e:
+            err_msg = str(e).lower()
+            is_retriable = any(x in err_msg for x in ["429", "rate limit", "overloaded", "timeout", "timed out"])
+            last_err = e
+            if is_retriable and attempt < max_retries - 1:
+                logger.warning(f"Retriable API error (attempt {attempt+1}): {e}")
+                continue
+            raise  # Non-retriable or last attempt
+
+    raise last_err or RuntimeError("Unknown error in _call_ai_with_retry")
+
+
+async def pre_analyze_student_work(assignment: str, student: str) -> dict:
+    """
+    PASS 1 — Read the ENTIRE student document ONCE.
+    Build a content map: companies covered, topics, sections.
+    This is shared context injected into every per-criterion evaluation,
+    giving the AI 'memory' about the full document even when evaluating a single criterion.
+    Returns a dict with keys: companies, topics_covered, sections, overall_summary.
+    On failure returns a safe empty map (never blocks grading).
+    """
+    # Sample the document to fit within token limits (~16k chars = ~8k Arabic tokens)
+    # Strategy: beginning 50% + middle 25% + end 25% for representative coverage
+    sampled_student = sample_document(student, max_chars=40000)
+    logger.info(f"Pre-analysis: doc={len(student):,} chars → sampled={len(sampled_student):,} chars")
+
+    prompt = f"""أنت محلل نصوص أكاديمي. مهمتك **قراءة وثيقة الطالب** وإنشاء "خريطة محتوى" موضوعية دقيقة.
+
+لا تُصدر أي حكم جودة الآن. فقط استخرج الحقائق:
+
+الواجب المطلوب (للسياق):
+{assignment[:2000]}
+
+═══════ وثيقة الطالب (مُعاينة شاملة) ═══════
+{sampled_student}
+═══════════════════════════════════
+
+أجب بـ JSON فقط (بدون أي نص خارجه):
+{{
+  "companies": [
+    {{
+      "name": "اسم الشركة/المنظمة",
+      "content_summary": "ملخص ما كتبه الطالب عنها في 3-5 جمل",
+      "topics_addressed": ["موضوع 1", "موضوع 2"],
+      "approx_location": "أول الوثيقة / منتصف الوثيقة / آخر الوثيقة"
+    }}
+  ],
+  "all_topics_covered": [
+    "قائمة بكل الموضوعات التي تناولها الطالب في كامل الوثيقة"
+  ],
+  "document_sections": [
+    "عناوين أو أجزاء رئيسية في الوثيقة إن وُجدت (مثل: P1, M2, عنوان القسم)"
+  ],
+  "criteria_sections": {{
+    "P1": "وصف موجز للقسم الذي خصصه الطالب للمعيار P1 إن وُجد، أو null",
+    "وهكذا لكل معيار موجود في الوثيقة": null
+  }},
+  "legislation_regulations_mentioned": [
+    "أي قوانين أو تشريعات أو لوائح ذكرها الطالب"
+  ],
+  "key_methods_strategies": [
+    "الطرق والاستراتيجيات المذكورة"  
+  ],
+  "overall_summary": "ملخص شامل لعمل الطالب الكامل في 3-4 جمل — ما الذي حقق وما الذي غطّى"
+}}"""
+
+    try:
+        raw = await _call_ai_with_retry(prompt, max_retries=2)
+        m = re.search(r'\{[\s\S]*\}', raw)
+        if m:
+            result = json.loads(m.group())
+            logger.info(
+                f"Pre-analysis done: {len(result.get('companies', []))} companies found, "
+                f"{len(result.get('all_topics_covered', []))} topics"
+            )
+            return result
+    except Exception as e:
+        logger.warning(f"Pre-analysis failed (non-critical): {e}")
+    # Safe empty fallback — grading continues without memory
+    return {
+        "companies": [],
+        "all_topics_covered": [],
+        "document_sections": [],
+        "legislation_regulations_mentioned": [],
+        "key_methods_strategies": [],
+        "overall_summary": ""
+    }
+
+
 async def evaluate_one(
     code: str,
     desc: str,
     assignment: str,
     student: str,
-    adv_constraints: Dict[str, Any]
+    adv_constraints: Dict[str, Any],
+    content_map: Optional[dict] = None,   # NEW: shared memory from pre-analysis
 ) -> Tuple[str, Dict]:
     """Evaluate a single criterion using configured AI provider (OpenAI or Anthropic)."""
 
@@ -302,20 +716,73 @@ async def evaluate_one(
 
     band = band_from_code(code)
 
+    # ── Try to find the dedicated section for this criterion in the student document ──
+    # Large limits so short/medium documents are passed in full to the AI.
+    # Claude claude-sonnet-4-5 context = 200k tokens; 60k Arabic chars ≈ 17k tokens — well within limits.
+    max_excerpt = 60000 if band == 'DISTINCTION' else 50000
+    criterion_section = extract_criterion_section(student, code, max_chars=max_excerpt)
+    if criterion_section:
+        student_excerpt_text = criterion_section
+        section_source_note = (
+            f"✅ عُثر على القسم المخصص للمعيار {code} في وثيقة الطالب.\n"
+            f"   ⚠️ قيّم من هذا القسم تحديداً — هنا قصد الطالب وضع إجابته عن هذا المعيار.\n"
+            f"   لا تبحث خارج هذا القسم إلا إذا كان القسم فارغاً أو مبتوراً."
+        )
+        logger.info(f"[{code}] Dedicated section found ({len(criterion_section):,} chars)")
+    elif content_map and len(content_map.get('companies', [])) >= 2:
+        # Student organized by company — try to extract content from each company's section
+        company_names = [c['name'] for c in content_map.get('companies', []) if c.get('name')]
+        student_excerpt_text, section_source_note = extract_multi_company_excerpt(
+            student, code, desc or code, company_names, max_chars=max_excerpt
+        )
+        logger.info(f"[{code}] Multi-company structure detected ({len(company_names)} companies) — combined excerpt {len(student_excerpt_text):,} chars")
+    else:
+        # No dedicated section, no multi-company structure.
+        # Pass as much of the document as possible (full doc if it fits).
+        # Let the AI locate the relevant content itself — semantic search > keyword scoring.
+        student_excerpt_text = smart_student_excerpt(student, code, desc or code, max_chars=max_excerpt)
+        is_full_doc = len(student) <= max_excerpt
+        if is_full_doc:
+            section_source_note = (
+                f"📄 وثيقة الطالب كاملةً مُرفقة أدناه ({len(student_excerpt_text):,} محرف).\n"
+                f"   🔍 مهمتك: تفحّص النص بالكامل وحدِّد بنفسك المقاطع التي تناول فيها الطالب المعيار {code}.\n"
+                f"   ابحث عن الفهم والمعنى — لا تقتصر على قسم يحمل اسم المعيار بالضبط.\n"
+                f"   الطالب قد يكون قد أجاب على هذا المعيار بأسلوبه الخاص أو ضمن سياق أوسع."
+            )
+        else:
+            section_source_note = (
+                f"📄 يُعرض مقطع واسع جداً من وثيقة الطالب ({len(student_excerpt_text):,} محرف من أصل {len(student):,}).\n"
+                f"   المقطع يغطي: أول الوثيقة + منتصفها + آخرها (بصياغة بنيوية).\n"
+                f"   🔍 مهمتك: تفحّص هذا النص وحدِّد أنت المقاطع المتعلقة بالمعيار {code}.\n"
+                f"   ابحث عن الفهم السياقي — الطالب قد أجاب ضمن إطار أوسع وليس في قسم معلَّم بالضبط."
+            )
+        logger.info(f"[{code}] Full/wide doc provided ({len(student_excerpt_text):,} chars, full={is_full_doc}) — AI to locate section")
+
     # Map BTEC band to expected cognitive verb level
     band_verb_map = {
         "PASS":        "وصف (Describe) — الطالب يُبيّن ما هو الشيء بوضوح مع تفاصيل كافية ومثال من السياق.",
-        "MERIT":       "تحليل (Analyse) — الطالب يُفسّر ويربط: يشرح الأسباب، يكشف العلاقات، ويجيب على لماذا وكيف.",
-        "DISTINCTION": "تقييم (Evaluate/Justify) — الطالب يُقيّم: يزن البدائل، يُبدي حكماً نقدياً مُبرهَناً، ويصل إلى استنتاج مدعوم بأدلة.",
+        "MERIT":       "تحليل (Analyse) — الطالب يُفسّر ويربط: يشرح الأسباب، يكشف العلاقات، ويجيب على لماذا وكيف. يكفي أن يُظهر تفكيراً سببياً واضحاً في أي جزء من إجابته.",
+        "DISTINCTION": "تقييم (Evaluate/Justify) — الطالب يُقيّم بشكل معقول: يُبدي حكماً مُبرَّراً، يبرر آراءه بأدلة، يُشير إلى الأهمية أو التأثير أو النتائج المحتملة. لا يُشترط مقارنة رسمية للبدائل — يكفي الاستنتاج المُبرَّر والتقييم المعقول الملائم لمستوى BTEC Level 3.",
     }
     expected_depth = band_verb_map.get(band, "الإجابة يجب أن تكون واضحة ومدعومة.")
 
-    # Build quantitative requirements warning if present
+    # ── FIX: Quantitative constraints must be scoped to the CRITERION itself ──
+    # Do NOT apply a global task-description constraint (e.g. "شركتين")
+    # to a criterion whose OWN description uses singular wording (e.g. "الشركة المختارة").
+    # Check: does the criterion description itself explicitly mention a number/count?
+    SINGULAR_SCOPE_SIGNALS = [
+        r'الشركة المختارة', r'شركة مختارة', r'the chosen company', r'a company',
+        r'شركة واحدة', r'selected company', r'chosen business',
+    ]
+    criterion_is_singular_scoped = any(
+        re.search(sig, desc, re.IGNORECASE) for sig in SINGULAR_SCOPE_SIGNALS
+    )
+
+    # Build quantitative requirements warning only when constraint applies to THIS criterion
     quant_warning = ""
-    if adv_constraints and adv_constraints.get("by_target"):
+    if adv_constraints and adv_constraints.get("by_target") and not criterion_is_singular_scoped:
         quant_requirements = []
         for target, required_count in adv_constraints["by_target"].items():
-            # Translate target names to Arabic
             target_ar = {
                 "businesses": "شركات/مؤسسات",
                 "examples": "أمثلة",
@@ -327,94 +794,176 @@ async def evaluate_one(
                 "impacts": "تأثيرات/آثار",
             }.get(target, target)
             quant_requirements.append(f"- {target_ar}: {required_count}")
-        
+
         if quant_requirements:
             quant_warning = f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚠️⚠️⚠️ متطلبات كمية إلزامية (CRITICAL) ⚠️⚠️⚠️
-الواجب يحتوي على متطلبات عددية صريحة يجب استيفاؤها:
-
+⚠️ متطلبات كمية صريحة في الواجب — تنطبق على هذا المعيار ⚠️
+الواجب نصّ بوضوح على أعداد محددة:
 {chr(10).join(quant_requirements)}
-
-🔴 قاعدة صارمة: إذا كان المعيار {code} يتطلب عدداً محدداً من العناصر (مثل شركتين، 3 أمثلة، إلخ)،
-يجب على الطالب تقديم العدد المطلوب **بالضبط أو أكثر**. إذا كان النقص واضحاً، المعيار = NOT ACHIEVED.
-
-مثال: إذا طُلب "قارن بين شركتين" والطالب ذكر شركة واحدة فقط → NOT ACHIEVED مهما كانت جودة التحليل.
+تعليمات:
+- إذا قدّم الطالب العدد المطلوب أو أكثر → المتطلب مستوفى، انتقل لتقييم العمق.
+- نقص بسيط (عنصر واحد) مع عمق كافٍ = قيّم بتأنٍّ — قد يُقبل.
+- نقص كبير مع ضعف في المحتوى → NOT ACHIEVED.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
-    prompt = f"""أنت مقيّم أكاديمي متخصص في مؤهلات BTEC. مهمتك الوحيدة: إصدار حكم موضوعي ومُبرهَن على هذا المعيار الواحد.
+    # Build step-0 based on whether quantitative constraints apply to THIS criterion
+    if quant_warning:
+        quant_step = f"""**خطوة 0 — التحقق من المتطلبات الكمية:**
+الواجب يتضمن متطلبات عددية صريحة تنطبق على هذا المعيار (مذكورة أعلاه).
+عدّ العناصر التي قدّمها الطالب وقارن. النقص الكبير عامل ثقيل. النقص البسيط مع عمق = قيّم بتأنٍّ.
+"""
+    else:
+        # Either criterion is singular-scoped OR no global constraints exist
+        scope_note = "لأن المعيار نفسه يحدد شركة مختارة (مفرد)." if criterion_is_singular_scoped else "الواجب لا يتضمن متطلبات عددية صريحة."
+        quant_step = f"""**خطوة 0 — ملاحظة مهمة بشأن التقييم الكمي:**
+🔴 لا تخترع متطلبات كمية. {scope_note}
+✅ قيّم بناءً على عمق الفهم وجودة المحتوى فقط.
+"""
 
-⚠️ تنبيه جوهري: قرارك يؤثر على مستقبل طالب حقيقي. كن دقيقاً وعادلاً ومبنياً حصراً على ما كتبه الطالب.
+    # ── Build content-map block from pre-analysis ──
+    content_map_block = ""
+    if content_map and (content_map.get("companies") or content_map.get("overall_summary")):
+        companies_list = ""
+        for c in content_map.get("companies", []):
+            companies_list += (
+                f"\n  • {c.get('name','؟')}: {c.get('content_summary','')} "
+                f"(الموقع: {c.get('approx_location','')})"
+            )
+        topics_list = "، ".join(content_map.get("all_topics_covered", [])[:20])
+        laws_list   = "، ".join(content_map.get("legislation_regulations_mentioned", [])[:10])
+        methods_list = "، ".join(content_map.get("key_methods_strategies", [])[:15])
 
+        content_map_block = f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-المعيار: {code}  |  المستوى: {band}
-الوصف الكامل: {desc}
-العمق المعرفي المطلوب: {expected_depth}
+📋 ذاكرة الوثيقة — ما كتبه الطالب في كامل وثيقته:
+(هذه المعلومات مستخرجة من القراءة الكاملة للوثيقة — استخدمها كسياق عند البحث عن أدلة للمعيار)
+
+الشركات التي تناولها الطالب:{companies_list if companies_list else " لم تُحدَّد"}
+
+الموضوعات الكلية المغطاة: {topics_list or "غير محددة"}
+
+التشريعات/اللوائح المذكورة: {laws_list or "لم تُذكر"}
+
+الطرق والاستراتيجيات: {methods_list or "لم تُذكر"}
+
+ملخص الوثيقة: {content_map.get('overall_summary', '')}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ تعليمات البحث: المعيار {code} قد يكون أدلته موزعة في أماكن متفرقة من الوثيقة.
+ابحث عن الفهم المفهومي في كامل الوثيقة — ليس فقط في قسم يحمل اسم المعيار.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+
+    calibration_block = get_calibration_block(band)
+
+    prompt = f"""أنت مقيّم أكاديمي معتمد من Pearson لمؤهلات BTEC International Level 3.
+مهمتك: تقييم المعيار {code} بعد فهم السيناريو الكامل للواجب أولاً — لا تشدد ولا تساهل.
+
 {quant_warning}
+{content_map_block}
 
-## تعريف المستويات وحدود كل منها:
+╔══════════════════════════════════════════════════╗
+║  المرحلة 1 — اقرأ وثيقة الواجب كاملاً أولاً    ║
+╚══════════════════════════════════════════════════╝
+اقرأ هذا الواجب بالكامل قبل أي شيء لتفهم:
+  (أ) السيناريو والسياق التجاري/الأكاديمي للواجب — من هي الشركات؟ ما المشكلة المطروحة؟
+  (ب) ما الذي يُفترض أن يُثبته الطالب إجمالاً في هذا الواجب
+  (ج) ما يطلبه المعيار {code} تحديداً **داخل هذا السيناريو** — ليس تعريفاً نظرياً مجرداً
 
-**PASS — الوصف:**
-✅ يكفي: الطالب يُبيّن ما هو المفهوم بأسلوبه الخاص مع تفاصيل كافية وأمثلة من السياق.
-❌ لا يكفي: مجرد ذكر اسم المفهوم، أو تكرار جمل السؤال، أو حشو بلا معنى.
+⚠️ لا تنتقل إلى تقييم إجابة الطالب إلا بعد أن تفهم هذا السيناريو جيداً.
 
-**MERIT — التحليل (يشمل PASS ويتجاوزه):**
-✅ يكفي: الطالب يُفسّر ويربط — يشرح لماذا/كيف، يربط العوامل بالأسباب والنتائج، يُظهر تفكيراً تحليلياً.
-❌ لا يكفي: وصف موسّع بدون تحليل سببي واضح، أو تعداد نقاط مفككة.
-
-**DISTINCTION — التقييم (يشمل MERIT ويتجاوزه):**
-✅ يكفي: الطالب يُقيّم — يقارن بدائل، يُبدي حكماً نقدياً، يزن إيجابيات وسلبيات، يصل إلى استنتاج مُبرَّر.
-❌ لا يكفي: تحليل بدون حكم نقدي أو مقارنة بدائل أو استنتاج مبرر.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-## سياق الواجب (للفهم فقط — لا تقيّم على أساسه):
+وثيقة الواجب:
+───────────────────────────────────────────────────
 {assignment[:15000]}
+───────────────────────────────────────────────────
 
-## إجابة الطالب الكاملة:
-⚠️ ملاحظة هامة جداً: الإجابة قد تتضمن أقساماً متعددة أو تتحدث عن أكثر من شركة/منظمة. اقرأ الإجابة **بالكامل من البداية إلى النهاية** قبل إصدار أي حكم. لا تكتفِ بقراءة البداية فقط.
-{student[:60000]}
+╔══════════════════════════════════════════════════╗
+║  المرحلة 2 — المعيار المستهدف في سياق الواجب   ║
+╚══════════════════════════════════════════════════╝
+الكود: {code}  |  المستوى: {band}
+نص المعيار كما ورد في الواجب:
+  "{desc}"
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-## اتبع هذه الخطوات بالترتيب:
+بناءً على السيناريو الذي قرأتَه، استخلص:
+  • ماذا يعني هذا المعيار تحديداً في سياق هذا الواجب؟
+  • أي مفاهيم أو موضوعات من الواجب يرتبط بها هذا المعيار؟
+  • كيف قد يُثبت طالب هذا المعيار بأسلوبه الخاص داخل هذا السيناريو؟
 
-**خطوة 0 — التحقق من المتطلبات الكمية أولاً (إن وجدت):**
-⚠️ قبل أي شيء: إذا كان المعيار {code} يتطلب عدداً محدداً من العناصر، **عدّها أولاً** في إجابة الطالب:
-- كم شركة ذكرها؟ (إذا طُلبت شركتان)
-- كم مثالاً قدّم؟ (إذا طُلبت 3 أمثلة)
-- كم طريقة/عامل/ميزة؟ (حسب المطلوب)
+{quant_step}
 
-🔴 إذا كان العدد أقل من المطلوب → المعيار NOT ACHIEVED فوراً، بغض النظر عن جودة المحتوى.
+╔══════════════════════════════════════════════════╗
+║  المرحلة 3 — إجابة الطالب                       ║
+╚══════════════════════════════════════════════════╝
+{section_source_note}
 
-**خطوة 1 — استوعب مطلب المعيار في سياق هذا الواجب:**
-ماذا يطلب {code} تحديداً؟ ما الذي يجب أن يُثبته الطالب؟
+───────────────────────────────────────────────────
+{student_excerpt_text}
+───────────────────────────────────────────────────
 
-**خطوة 2 — ابحث في إجابة الطالب عن الأدلة:**
-اقرأ الإجابة كاملة. أين عالج الطالب هذا المعيار؟ قد يكون بأسلوبه الخاص أو بأمثلة مختلفة — هذا مقبول.
+╔══════════════════════════════════════════════════╗
+║  المرحلة 4 — سياسة Pearson للحكم النهائي        ║
+╚══════════════════════════════════════════════════╝
+المبدأ: التقييم يُبنى على ما أثبته الطالب فعلاً — لا على ما يُفترض أنه يعرفه.
 
-**خطوة 3 — قيّم عمق الفهم (ليس الكلمات):**
-السؤال المحوري: هل أثبت الطالب أنه يفهم المفهوم ويستطيع تطبيقه؟
-- ✅ اقبل: الفهم مُثبَت بأسلوبه الخاص، بأمثلة بديلة، أو من زاوية مختلفة
-- ✅ اقبل: إجابة قصيرة لكن دقيقة ومركّزة
-- ❌ ارفض: حشو أو تكرار بدون فهم حقيقي
-- ❌ ارفض: عمق الإجابة أقل من الحد المطلوب لمستوى {band}
+⬛ PASS — (صِف / اشرح / حدِّد / وضِّح)
+   ✅ مستوفى: الطالب وصف الموضوع المطلوب بوضوح مع تفاصيل ذات صلة وأمثلة حقيقية من السياق.
+      المطلوب: فهم واضح + تفصيل كافٍ + مثال أو أكثر يُثبت فهمه.
+   ❌ رفض: مجرد ذكر المصطلح، تكرار جمل السؤال، أو تعداد بلا شرح.
 
-**خطوة 4 — أصدر الحكم بناءً على الأدلة فقط:**
-لا افتراضات، لا تساهل غير مبرر، لا تشدد غير مبرر.
+⬛ MERIT — (حلِّل / قارن / ناقش / فسِّر)
+   ✅ مستوفى: الطالب أظهر تحليلاً سببياً واضحاً — شرح الأسباب أو النتائج أو العلاقات.
+      المطلوب: ربط سببي واضح بما يكفي لإثبات الفهم التحليلي — ليس مجرد وصف مطوّل.
+      يكفي: تحليل واضح في أي جزء من الإجابة ولو لم يكن في كل فقرة.
+   ❌ رفض: وصف مطوّل بدون أي ربط سببي أو تحليلي في الإجابة كلها.
 
-أعد النتيجة بتنسيق JSON التالي فقط (بدون أي نص خارجه):
+⬛ DISTINCTION — (قيِّم / برِّر / استنتج / وزِّن / أبدِ حكماً نقدياً)
+   ✅ مستوفى: الطالب تجاوز التحليل إلى إبداء حكم مُعلَّل — بيَّن لماذا شيء ما مهم أو فعّال أو مناسب.
+      يكفي: حكم واحد واضح مُبرَّر بدليل من الإجابة.
+   ❌ رفض: تحليل سببي بدون أي حكم أو استنتاج، أو حكم بدون أي تبرير أو دليل.
+
+ملاحظات:
+- الأسلوب اللغوي والأخطاء الإملائية لا يؤثران على الحكم.
+- الطالب قد يُثبت الفهم بأسلوبه الخاص — المحك هو الفهم وليس التعبير.
+
+{calibration_block}
+╔══════════════════════════════════════════════════╗
+║  خطوات التقييم — اتبعها بالترتيب               ║
+╚══════════════════════════════════════════════════╝
+
+خطوة 1 — استخلص ماذا يعني المعيار {code} في سياق هذا الواجب تحديداً:
+  • ما السيناريو؟ ما المطلوب من الطالب أن يُثبته في هذا السياق؟
+  • ما المفاهيم المرتبطة بهذا المعيار داخل الواجب؟
+
+خطوة 2 — حدِّد أين وضع الطالب إجابته على هذا المعيار:
+  • إذا كان القسم مخصصاً (✅): قيّم من هذا القسم تحديداً — هذا هو المكان الذي قصد الطالب وضع إجابته.
+  • إذا كان الطالب نظّم حسب الشركات (📂): اجمع كل ما قدّمه عبر جميع أقسام الشركات —
+    قيّم الأداء الكلي بمجموع إجابته لجميع الشركات، وليس شركة واحدة فقط.
+  • إذا كانت الوثيقة كاملة أو مقطعاً واسعاً (📄): أنت من يُحدِّد الموقع —
+    تفحّص بنية الوثيقة (العناوين، التقسيمات، أرقام المعايير إن وُجدت)، ثم قيّم
+    المقاطع التي يكون فيها الطالب قد ناقش الموضوع ذا الصلة بهذا المعيار في سياق هذا الواجب.
+  • في جميع الحالات: ابحث عن الفهم والمعنى السياقي — ليس كلمات مطابقة.
+    الطالب قد يُجيب بأسلوبه الخاص دون استخدام اسم المعيار حرفياً.
+
+خطوة 3 — قيّم الأداء وفق سياسة Pearson:
+  • هل ما أثبته الطالب يُفي بمتطلبات المعيار بمستواه ({band})؟
+  • الدليل يجب أن يكون واضحاً — لا تمنح إذا كان غامضاً، ولا ترفض إذا كان واضحاً كافياً.
+
+خطوة 4 — اقتبس الأدلة الحرفية من نص الطالب الداعمة لحكمك.
+
+أعد النتيجة بـ JSON فقط (بدون أي نص خارجه):
 {{
   "achieved": true أو false,
   "quantitative_check": {{
-    "required": "وصف المتطلب الكمي إن وجد (مثل: شركتان، 3 أمثلة)",
-    "found": "ما وجده الطالب (مثل: شركة واحدة، مثالان)",
-    "satisfied": true أو false
+    "applicable": true أو false,
+    "required": "المتطلب الكمي الصريح من نص المعيار، أو null",
+    "found": "ما قدّمه الطالب فعلاً، أو null",
+    "satisfied": true أو false أو null
   }},
-  "reasoning": "تحليل مفصّل: (1) نتيجة التحقق الكمي إن وجد، (2) ما الذي أثبته الطالب ✓ مع ذكر أجزاء محددة من نصه، (3) ما الذي لم يُثبته أو كان ناقصاً ✗، (4) الحكم النهائي ولماذا بالنسبة لمستوى {band}",
-  "evidence": ["اقتباس حرفي من إجابة الطالب يدعم التقييم", "اقتباس ثانٍ إن وُجد"],
+  "reasoning": "(1) فهمي للسيناريو وما يعنيه المعيار {code} في هذا الواجب: [استخلاصك] | (2) أين وجدت الإجابة في وثيقة الطالب وما الذي قدّمه: [الموقع + الدليل] | (3) الحكم النهائي ولماذا وفق Pearson: [التبرير]",
+  "evidence": ["اقتباس حرفي 1 من إجابة الطالب", "اقتباس حرفي 2 إن وُجد"],
   "quality": "ممتاز / جيد / مقبول / ضعيف",
-  "missing_requirements": ["ما الذي كان يجب إضافته تحديداً لتحقيق هذا المعيار — صياغة واضحة وقابلة للعمل بها"]
+  "missing_requirements": ["ما يحتاج الطالب لإضافته بالضبط لتحقيق هذا المعيار في سياق هذا الواجب"]
 }}"""
 
     async with semaphore:
@@ -422,39 +971,9 @@ async def evaluate_one(
             # تأخير بسيط لتجنب 429 (Rate Limit)
             if GRADER_DELAY_SEC > 0:
                 await asyncio.sleep(GRADER_DELAY_SEC)
-            
-            loop = asyncio.get_event_loop()
-            
-            # Choose API call based on provider
-            if MODEL.startswith("claude-"):
-                # Anthropic Claude
-                response = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None,
-                        lambda: active_client.messages.create(
-                            model=MODEL,
-                            max_tokens=MAX_TOKENS,
-                            messages=[{"role": "user", "content": prompt}],
-                        )
-                    ),
-                    timeout=REQUEST_TIMEOUT
-                )
-                raw_text = (response.content[0].text or "").strip()
-            else:
-                # OpenAI (gpt-4o, etc.)
-                response = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None,
-                        lambda: active_client.chat.completions.create(
-                            model=MODEL,
-                            max_tokens=MAX_TOKENS,
-                            messages=[{"role": "user", "content": prompt}],
-                            response_format={"type": "json_object"},
-                        )
-                    ),
-                    timeout=REQUEST_TIMEOUT
-                )
-                raw_text = (response.choices[0].message.content or "").strip()
+
+            # Use unified retry wrapper — handles 429 / overloaded automatically
+            raw_text = await _call_ai_with_retry(prompt, max_retries=GRADER_MAX_RETRIES)
             
             # Extract JSON from response
             json_match = re.search(r'\{[\s\S]*\}', raw_text)
@@ -530,11 +1049,18 @@ async def evaluate_one(
                 or "rate limit" in err_msg
                 or "overloaded" in err_msg
             )
-            if "429" in err_msg or "rate limit" in err_msg or "overloaded" in err_msg:
-                logger.warning("تجاوز حد طلبات Anthropic (429/overloaded). قلّل GRADER_MAX_CONCURRENT أو زِد GRADER_DELAY_SEC في .env")
-                reason = "تجاوز حد طلبات API. جرب لاحقاً أو قلّل عدد المعايير."
+            if "insufficient_quota" in err_msg or ("429" in err_msg and "quota" in err_msg):
+                logger.error("OpenAI quota exhausted — add billing credits at https://platform.openai.com/billing")
+                reason = "رصيد OpenAI مستنفد. يرجى شحن حساب OpenAI من: platform.openai.com/billing"
+            elif "authentication" in err_msg or "invalid_api_key" in err_msg or ("401" in err_msg and "invalid" in err_msg):
+                logger.error("API key invalid/unauthorized — update OPENAI_API_KEY or ANTHROPIC_API_KEY in .env")
+                reason = "مفتاح API غير صحيح. يرجى تحديث OPENAI_API_KEY أو ANTHROPIC_KEY في ملف backend/.env"
+            elif "429" in err_msg or "rate limit" in err_msg or "overloaded" in err_msg:
+                logger.warning("API rate limit (429/overloaded). قلّل GRADER_MAX_CONCURRENT أو زِد GRADER_DELAY_SEC في .env")
+                reason = "تجاوز حد طلبات API المؤقت. يرجى المسحاولة لاحقاً."
             else:
                 reason = f"خطأ فني: {str(e)}"
+
             logger.exception(f"Error evaluating {code}: {e}")
             result = {
                 "band": band,
@@ -553,16 +1079,24 @@ async def evaluate_one(
 
 # ========= Streaming Engine =========
 async def forensic_grade_stream(assignment_text: str, student_text: str) -> AsyncGenerator[str, None]:
-    """Streaming forensic grading — yields NDJSON lines."""
+    """
+    Streaming forensic grading — yields NDJSON lines.
+
+    Two-pass approach:
+      Pass 1 (pre_analyze): One AI call reads the ENTIRE student document → content_map
+      Pass 2 (evaluate_one): Sequential per-criterion evaluation using content_map as memory
+    """
     start_time = time.monotonic()
     job_id = hashlib.md5(f"{time.time()}".encode()).hexdigest()[:8]
 
     logger.info(f"Job {job_id} started")
 
     try:
-        # Clean and truncate
+        # Clean and keep full text — excerpting happens per criterion in evaluate_one
         assignment_text = clean_and_compress_text(assignment_text)[:30000]
-        student_text = clean_and_compress_text(student_text)[:150000]
+        # Keep the full cleaned student text — evaluate_one will smart-excerpt per criterion
+        student_text_full = clean_and_compress_text(student_text)
+        student_text = student_text_full  # no truncation here
 
         # Extract criteria codes
         codes = extract_criteria_codes(assignment_text)
@@ -584,24 +1118,42 @@ async def forensic_grade_stream(assignment_text: str, student_text: str) -> Asyn
 
         total = len(codes)
 
-        # Send initial status
+        # ── PASS 1: Pre-analysis — read the full document, build content map ──
         yield json.dumps({
             "type": "status",
-            "message": f"بدء تقييم {total} معيار باستخدام {MODEL}...",
+            "message": f"جاري قراءة وثيقة الطالب كاملة لبناء خريطة المحتوى... ({total} معيار)",
             "total": total,
-            "job_id": job_id
+            "job_id": job_id,
+            "phase": "pre_analysis"
         }, ensure_ascii=False) + "\n"
 
-        # Evaluate all criteria concurrently
-        results: Dict[str, Dict] = {}
-        tasks = [
-            evaluate_one(code, descriptions.get(code, f"معيار {code}"), assignment_text, student_text, adv_constraints)
-            for code in codes
-        ]
+        content_map = await pre_analyze_student_work(assignment_text, student_text)
 
-        # Process as they complete
-        for coro in asyncio.as_completed(tasks):
-            code, result = await coro
+        companies_found = len(content_map.get("companies", []))
+        yield json.dumps({
+            "type": "status",
+            "message": f"تم بناء خريطة المحتوى: {companies_found} شركة/منظمة — بدء تقييم المعايير...",
+            "total": total,
+            "job_id": job_id,
+            "phase": "evaluation",
+            "content_map_summary": content_map.get("overall_summary", "")
+        }, ensure_ascii=False) + "\n"
+
+        # ── PASS 2: Sequential per-criterion evaluation (avoids rate limits) ──
+        results: Dict[str, Dict] = {}
+        for idx, code in enumerate(codes):
+            if time.monotonic() - start_time > HARD_DEADLINE:
+                logger.warning(f"Job {job_id} hit hard deadline at {len(results)}/{total}")
+                break
+
+            code, result = await evaluate_one(
+                code,
+                descriptions.get(code, f"معيار {code}"),
+                assignment_text,
+                student_text,
+                adv_constraints,
+                content_map=content_map,
+            )
             results[code] = result
 
             # Yield each criterion result immediately
@@ -612,11 +1164,6 @@ async def forensic_grade_stream(assignment_text: str, student_text: str) -> Asyn
                 "processed": len(results),
                 "total": total
             }, ensure_ascii=False) + "\n"
-
-            # Heartbeat
-            if time.monotonic() - start_time > HARD_DEADLINE:
-                logger.warning(f"Job {job_id} hit hard deadline at {len(results)}/{total}")
-                break
 
         # If API errors occurred (404, invalid model, etc.), return user-friendly error
         # instead of marking student as "not achieved"

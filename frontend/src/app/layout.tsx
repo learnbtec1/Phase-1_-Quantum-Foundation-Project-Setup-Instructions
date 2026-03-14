@@ -5,6 +5,7 @@ import { Cairo } from 'next/font/google';
 import '@/app/globals.css';
 import { ProgressProvider } from '@/context/ProgressContext';
 import LayoutSwitcher from '@/components/LayoutSwitcher';
+import DevLogFilter from '@/app/dev-log-filter';
 
 const cairo = Cairo({
   subsets: ['arabic', 'latin'],
@@ -25,7 +26,8 @@ export default function RootLayout({
 }) {
   return (
     <html lang="ar" dir="rtl" className={`${cairo.variable} h-full`}>
-      <body className="font-cairo bg-midnight text-white min-h-screen h-full antialiased overflow-hidden">
+      <body className="font-cairo bg-midnight text-white min-h-screen antialiased">
+        <DevLogFilter />
         <ProgressProvider>
           <LayoutSwitcher>{children}</LayoutSwitcher>
         </ProgressProvider>

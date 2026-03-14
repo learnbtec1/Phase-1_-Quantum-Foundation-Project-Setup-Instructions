@@ -34,6 +34,8 @@ export interface AvatarAgentState {
   isListening: boolean;
   isConnected: boolean;
   isProcessing: boolean;
+  /** True between VAD send and Whisper returning the transcript. */
+  isTranscribing: boolean;
   lastTranscript: string;
   lastReply: string;
   lastDialogue: string;
@@ -157,6 +159,32 @@ function pcmBytesToWavBlob(pcmBytes: Uint8Array, sampleRate: number): Blob {
   return new Blob([buffer], { type: 'audio/wav' });
 }
 
+// ── Helper: read the most recent BTEC grade from localStorage ─────────────────
+// Written by assessment/page.tsx#saveLastGrade when evaluation completes.
+// Returns null if no valid grade is present (PENDING is excluded — LLM should
+// not reference an in-progress evaluation as a completed one).
+function readLastGrade(): { final_grade: string; subject: string; criteria_summary: string; achieved: number; total: number } | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem('nexus-last-grade');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as {
+      final_grade?: string; subject?: string; criteria_summary?: string;
+      achieved?: number; total?: number;
+    };
+    if (!parsed?.final_grade || parsed.final_grade === 'PENDING') return null;
+    return {
+      final_grade:      parsed.final_grade,
+      subject:          parsed.subject          ?? '—',
+      criteria_summary: parsed.criteria_summary ?? '',
+      achieved:         parsed.achieved         ?? 0,
+      total:            parsed.total            ?? 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ── Hook ─────────────────────────────────────────────────────────────────────
 
 export function useAvatarAgent({
@@ -167,6 +195,7 @@ export function useAvatarAgent({
   // ── State ─────────────────────────────────────────────────────────────────
   const [isConnected, setIsConnected] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [lastTranscript, setLastTranscript] = useState('');
   const [lastReply, setLastReply] = useState('');
   const [lastDialogue, setLastDialogue] = useState('');
@@ -240,6 +269,71 @@ export function useAvatarAgent({
     }
   }, [stopCurrentAudio, lang]);
 
+  /**
+   * Play Azure TTS MP3 bytes (base64) and wire the frame-perfect viseme timeline
+   * to AvatarCanvas via the avatar:visemes:timeline + avatar:audio:element events.
+   *
+   * Unlike playAudioBase64 (Kokoro PCM), this path:
+   *   1. Creates a plain `new Audio('data:audio/mp3;base64,...')` — no WAV wrapping.
+   *   2. Dispatches avatar:visemes:timeline before playback so AvatarCanvas can
+   *      pre-load the cue queue and start the binary-search lip-sync from frame 1.
+   *   3. Dispatches avatar:audio:element so useFrame can poll audio.currentTime.
+   */
+  const playMp3Audio = useCallback((
+    base64: string,
+    visemeCues: Array<{ t: number; id: number }>,
+    fallbackText = '',
+  ) => {
+    stopCurrentAudio();
+    try {
+      const audio = new Audio(`data:audio/mp3;base64,${base64}`);
+      currentAudioRef.current = audio;
+      if (typeof window !== 'undefined') {
+        // 1. Pre-load viseme timeline BEFORE playback starts
+        if (visemeCues.length > 0) {
+          window.dispatchEvent(new CustomEvent('avatar:visemes:timeline', {
+            detail: { cues: visemeCues },
+          }));
+        }
+        // 2. Bind audio element so AvatarCanvas useFrame can poll currentTime each frame
+        window.dispatchEvent(new CustomEvent('avatar:audio:element', {
+          detail: { audio },
+        }));
+      }
+      const cleanup = () => {
+        if (currentAudioRef.current === audio) currentAudioRef.current = null;
+        if (typeof window !== 'undefined')
+          window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+      };
+      audio.addEventListener('ended', cleanup);
+      audio.addEventListener('error', (e) => {
+        console.error('[Audio] MP3 error:', e);
+        cleanup();
+      });
+      // Gap 2-A fix: dispatch speak:start ONLY when play() actually succeeds.
+      // If we dispatch it before the rejection lands, the avatar starts lip-syncing
+      // against viseme cues whose audio is not advancing (currentTime stays 0),
+      // freezing the avatar's mouth on the first phoneme indefinitely.
+      audio.play()
+        .then(() => {
+          if (typeof window !== 'undefined')
+            window.dispatchEvent(new CustomEvent('avatar:speak:start'));
+        })
+        .catch((err) => {
+          console.warn('[Audio] MP3 play() rejected:', err, '— falling back to Web Speech');
+          cleanup();
+          // Flush any pre-loaded viseme cues so the avatar's lips don't freeze
+          // on cues[0] while the audio is blocked by autoplay policy.
+          if (typeof window !== 'undefined')
+            window.dispatchEvent(new CustomEvent('avatar:visemes:clear'));
+          if (fallbackText) speakWebSpeech(fallbackText, HAS_ARABIC(fallbackText) ? 'ar-SA' : 'en-US');
+        });
+    } catch (err) {
+      console.error('[Audio] playMp3Audio error:', err);
+      if (fallbackText) speakWebSpeech(fallbackText, HAS_ARABIC(fallbackText) ? 'ar-SA' : 'en-US');
+    }
+  }, [stopCurrentAudio, lang]);
+
   // ── Audio management ──────────────────────────────────────────────────────
   // currentAudioRef tracks the HTMLAudioElement being played so we can stop
   // it before starting a new one (prevents overlapping voices).
@@ -262,12 +356,41 @@ export function useAvatarAgent({
     const audiolen = type === 'speech' ? String(frame.audio_base64 ?? '').length : 0;
     console.log('[WS] ←', type, audiolen ? `audio=${audiolen}b64chars` : '');
 
-    if (type === 'transcribing' || type === 'llm_thinking') {
+    if (type === 'transcribing') {
+      // Whisper has received the audio and is now transcribing.
+      // Drive isTranscribing true — VRMScene will show "thinking" head pose.
+      setIsTranscribing(true);
       setIsProcessing(true);
-      if (type === 'llm_thinking') setLastDialogue('');
-      // Don't flip avatar to 'listening' state if the user is actively recording
-      // (mic is still open; flipping confuses the button state and disables stop).
+      console.log('[useAvatarAgent] Transcribing…');
+      if (typeof window !== 'undefined')
+        window.dispatchEvent(new CustomEvent('avatar:transcribing', { detail: { active: true } }));
       if (!isRecordingRef.current) emitListening(true);
+      return;
+    }
+
+    if (type === 'llm_thinking') {
+      // Transcript done, LLM is now generating the reply.
+      setIsTranscribing(false);
+      setIsProcessing(true);
+      setLastDialogue('');
+      if (typeof window !== 'undefined')
+        window.dispatchEvent(new CustomEvent('avatar:transcribing', { detail: { active: false } }));
+      if (!isRecordingRef.current) emitListening(true);
+      return;
+    }
+
+    // Whisper result arrives BEFORE the LLM reply — show it in the UI immediately.
+    if (type === 'transcript') {
+      const text = String(frame.text ?? '').trim();
+      setIsTranscribing(false);
+      if (typeof window !== 'undefined')
+        window.dispatchEvent(new CustomEvent('avatar:transcribing', { detail: { active: false } }));
+      if (text) {
+        console.log('[useAvatarAgent] Transcript received:', text);
+        setLastTranscript(text);
+        if (typeof window !== 'undefined')
+          window.dispatchEvent(new CustomEvent('avatar:transcript', { detail: { text } }));
+      }
       return;
     }
 
@@ -279,6 +402,9 @@ export function useAvatarAgent({
 
     if (type === 'speech') {
       setIsProcessing(false);
+      setIsTranscribing(false);
+      if (typeof window !== 'undefined')
+        window.dispatchEvent(new CustomEvent('avatar:transcribing', { detail: { active: false } }));
       emitListening(false);
       setLastTranscript(String(frame.transcript ?? ''));
       setLastReply(String(frame.reply ?? ''));
@@ -300,11 +426,18 @@ export function useAvatarAgent({
       if (isRecordingRef.current) return;
 
       const audiob64 = String(frame.audio_base64 ?? '');
+      const audioFormat = String(frame.audio_format ?? '');
       if (audiob64) {
-        // Play the backend-generated audio (Kokoro raw PCM wrapped in WAV)
-        playAudioBase64(audiob64, Number(frame.sample_rate ?? 24000), String(frame.dialogue ?? ''));
+        const visemeCues = (frame.viseme_cues as Array<{ t: number; id: number }> | undefined) ?? [];
+        if (audioFormat === 'mp3' || visemeCues.length > 0) {
+          // Azure TTS — MP3 with frame-perfect viseme timeline for lip-sync
+          playMp3Audio(audiob64, visemeCues, String(frame.dialogue ?? ''));
+        } else {
+          // Kokoro TTS — raw PCM wrapped in WAV container
+          playAudioBase64(audiob64, Number(frame.sample_rate ?? 24000), String(frame.dialogue ?? ''));
+        }
       } else {
-        // Kokoro returned no audio — fall back to Web Speech API
+        // No audio — fall back to Web Speech API
         stopCurrentAudio();
         speakWebSpeech(String(frame.dialogue ?? ''), lang);
       }
@@ -352,16 +485,21 @@ export function useAvatarAgent({
     if (type === 'cleared' || type === 'pong') {
       // acknowledgements — no action needed
     }
-  }, [lang, stopCurrentAudio, playAudioBase64]);
+  }, [lang, stopCurrentAudio, playAudioBase64, playMp3Audio]);
 
   const connect = useCallback(() => {
     if (!mountedRef.current) return;
     try {
       const ws = new WebSocket(wsUrl);
+      // ── Identity guard against React Strict Mode double-mount echo ─────────
+      // wsRef.current is set to the NEW ws immediately. Any in-flight onclose /
+      // onerror from a previously-created WebSocket (now stale) will see
+      // `wsRef.current !== ws` and exit silently, preventing a ghost reconnect
+      // that would launch a second active connection → double audio output.
       wsRef.current = ws;
 
       ws.onopen = () => {
-        if (!mountedRef.current) { ws.close(); return; }
+        if (!mountedRef.current || wsRef.current !== ws) { ws.close(); return; }
         setIsConnected(true);
         setError(null);
         // Keep-alive ping every 25s
@@ -372,13 +510,18 @@ export function useAvatarAgent({
         (ws as unknown as Record<string, unknown>)._pinger = pinger;
       };
 
-      ws.onmessage = handleMessage;
+      ws.onmessage = (evt: MessageEvent) => {
+        if (wsRef.current !== ws) return; // Stale WS1 from React Strict Mode double-mount — drop silently
+        handleMessage(evt);
+      };
 
       ws.onerror = () => {
+        if (wsRef.current !== ws) return; // Stale connection — ignore
         setIsConnected(false);
       };
 
       ws.onclose = () => {
+        if (wsRef.current !== ws) return; // Stale connection — ignore, prevent reconnect race
         const pinger = (ws as unknown as Record<string, unknown>)._pinger;
         if (pinger) clearInterval(pinger as ReturnType<typeof setInterval>);
         setIsConnected(false);
@@ -417,7 +560,14 @@ export function useAvatarAgent({
       if (audio) { try { audio.pause(); } catch { /* ignore */ } }
       if (typeof window !== 'undefined' && 'speechSynthesis' in window)
         window.speechSynthesis.cancel();
-      wsRef.current?.close();
+      // ── Critical: null wsRef BEFORE close() ───────────────────────────────
+      // When ws.close() is called, ws.onclose fires asynchronously. By the time
+      // it fires, if mountedRef is already true again (React Strict Mode remount),
+      // it would schedule a reconnect → second connection → echo. Setting
+      // wsRef.current = null first makes onclose see a stale ref and abort.
+      const ws = wsRef.current;
+      wsRef.current = null;
+      if (ws) { try { ws.close(); } catch { /* ignore */ } }
     };
   }, [connect]);
 
@@ -440,7 +590,12 @@ export function useAvatarAgent({
         reader.onerror = () => reject(reader.error);
         reader.readAsDataURL(blob);
       });
-      ws.send(JSON.stringify({ type: 'audio', data: b64 }));
+      // Gap 4-A: include grade context in audio frames too so voiced queries
+      // about grades are also answered with the debrief context.
+      const gradeResult = readLastGrade();
+      const audioPayload: Record<string, unknown> = { type: 'audio', data: b64 };
+      if (gradeResult) audioPayload.grade_result = gradeResult;
+      ws.send(JSON.stringify(audioPayload));
     } catch (err) {
       setError(String(err));
     }
@@ -448,9 +603,17 @@ export function useAvatarAgent({
 
   const { isRecording, startListening, stopListening } = useVAD({
     onSpeechEnd: handleSpeechEnd,
-    silenceThreshold: 0.008,  // lower = more sensitive; avoids false silence on noise-suppressed streams
-    silenceGapMs: 3000,
+    // Sprint 3 tuning: 0.004 triggers on whisper-level speech even through
+    // noise-suppression pipelines; 1500 ms gap fires fast after normal speech pauses.
+    silenceThreshold: 0.004,
+    silenceGapMs: 1500,
     lang,
+    onSpeechStart: () => {
+      // Mirror the detection event to the avatar so it can switch from
+      // "listening" pose to "hearing" pose (e.g. lean forward) immediately.
+      if (typeof window !== 'undefined')
+        window.dispatchEvent(new CustomEvent('avatar:userSpeaking', { detail: { active: true } }));
+    },
   });
 
   // Keep isRecordingRef in sync so handleMessage can read without stale closure
@@ -475,7 +638,7 @@ export function useAvatarAgent({
       emitListening(false);
     } else {
       isRecordingRef.current = true; // sync — guards handleMessage immediately
-      console.log('[Mic] starting recording (silenceGapMs=3000, maxDuration=60s)');
+      console.log('[Mic] starting recording (silenceThreshold=0.004, silenceGapMs=1500, maxDuration=60s)');
       stopCurrentAudio(); // interrupt avatar speech immediately
       emitListening(true);
       setError(null);
@@ -514,7 +677,12 @@ export function useAvatarAgent({
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || !text.trim()) return;
     window.dispatchEvent(new CustomEvent('chat:sent'));
-    ws.send(JSON.stringify({ type: 'text', message: text }));
+    // Gap 4-A: attach the most recent BTEC grade so the backend LLM can
+    // reference it in its system prompt via the Debrief Context block.
+    const gradeResult = readLastGrade();
+    const payload: Record<string, unknown> = { type: 'text', message: text };
+    if (gradeResult) payload.grade_result = gradeResult;
+    ws.send(JSON.stringify(payload));
   }, []);
 
   // ── Clear server history ──────────────────────────────────────────────────
@@ -529,6 +697,7 @@ export function useAvatarAgent({
     isListening: isRecording,
     isConnected,
     isProcessing,
+    isTranscribing,
     lastTranscript,
     lastReply,
     lastDialogue,

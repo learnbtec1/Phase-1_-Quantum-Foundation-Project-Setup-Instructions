@@ -136,5 +136,7 @@
         "Invoke-Expression": false,
         "iex": false
     },
-    "git.ignoreLimitWarning": true
+    "git.ignoreLimitWarning": true,
+    "workbench.browser.openLocalhostLinks": true,
+    "workbench.browser.enableChatTools": true
 }

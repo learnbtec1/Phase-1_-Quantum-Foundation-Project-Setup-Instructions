@@ -22,6 +22,8 @@ function useIsMobile() {
 }
 
 import BoardroomAvatar from '@/components/avatar/VRMAvatar';
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const VRMAvatarCompat = BoardroomAvatar as unknown as React.ForwardRefExoticComponent<React.PropsWithoutRef<{ useSimpleFallback?: boolean }> & React.RefAttributes<VRMAvatarRef>>;
 const HolographicPanels = dynamic(
   () => import('@/components/boardroom/HolographicPanels').then((m) => m.default),
   { ssr: false }
@@ -185,7 +187,7 @@ function BoardroomContent({
       <BrandingText />
       <HolographicPanels />
       <Suspense fallback={<FallbackAvatar />}>
-        <BoardroomAvatar ref={avatarRef as React.RefObject<VRMAvatarRef>} useSimpleFallback={useSimpleFallback} />
+        <VRMAvatarCompat ref={avatarRef} useSimpleFallback={useSimpleFallback} />
       </Suspense>
       <ContactShadows position={[0, -0.82, 0]} opacity={0.45} scale={12} blur={2.5} far={4} />
       <Sparkles count={mobile ? 30 : 80} scale={14} size={1.2} opacity={0.08} color="#4a90e2" />
@@ -321,7 +323,7 @@ function SceneManager({
       <group position={isPresenting ? arPosition : [0, 0, 0]}>
         <HolographicPanels />
         <Suspense fallback={<FallbackAvatar />}>
-          <BoardroomAvatar ref={avatarRef as React.RefObject<VRMAvatarRef>} useSimpleFallback={useSimpleFallback} />
+          <VRMAvatarCompat ref={avatarRef} useSimpleFallback={useSimpleFallback} />
         </Suspense>
         {isPresenting && (
           <ContactShadows

@@ -1,22 +1,75 @@
 {
-	"version": "2.0.0",
-	"tasks": [
-		{
-			"label": "dev",
-			"type": "shell",
-			"command": "C:\\Program Files\\nodejs\\npm.cmd",
-			"args": [
-				"run",
-				"dev"
-			],
-			"options": {
-				"env": {
-					"Path": "C:\\Program Files\\nodejs;${env:Path}"
-				}
-			},
-			"isBackground": true,
-			"problemMatcher": [],
-			"group": "build"
-		}
-	]
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Frontend: dev",
+      "type": "shell",
+      "command": "npm",
+      "args": ["run", "dev"],
+      "options": { "cwd": "${workspaceFolder}/frontend" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "group": "build"
+    },
+    {
+      "label": "Compose: Up (build)",
+      "type": "shell",
+      "command": "docker compose -f \"${workspaceFolder}/docker-compose.yml\" up -d --build",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Compose: Down",
+      "type": "shell",
+      "command": "docker compose -f \"${workspaceFolder}/docker-compose.yml\" down",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Compose: Restart (backend+frontend)",
+      "type": "shell",
+      "command": "docker compose -f \"${workspaceFolder}/docker-compose.yml\" restart backend frontend",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Backend: Logs -f",
+      "type": "shell",
+      "command": "docker compose -f \"${workspaceFolder}/docker-compose.yml\" logs -f backend",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Health: GET /api/health",
+      "type": "shell",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"try{ Invoke-RestMethod -Method GET -Uri 'http://127.0.0.1:8000/api/health' -TimeoutSec 10 | Format-List * } catch { Write-Error $_ }\"",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "TTS Smoke: POST /api/v1/tts-with-timing",
+      "type": "shell",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$b=@{text='مرحباً! هذا اختبار للمنظومة.';voice='ar-SA-HamedNeural';language='ar-SA';format='wav';sample_rate=24000;with_timing=$true} | ConvertTo-Json -Depth 6 -Compress; $r=Invoke-RestMethod -Method POST -Uri 'http://127.0.0.1:8000/api/v1/tts-with-timing' -ContentType 'application/json; charset=utf-8' -Body $b -TimeoutSec 25; $r | Select-Object format,sample_rate,timing_mode,provider | Format-List; if ($r.audio_wav_base64){[IO.File]::WriteAllBytes('tts.wav',[Convert]::FromBase64String($r.audio_wav_base64)); 'Saved tts.wav'} elseif ($r.audio_mp3_base64){[IO.File]::WriteAllBytes('tts.mp3',[Convert]::FromBase64String($r.audio_mp3_base64)); 'Saved tts.mp3'}\"",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Open UI: /avatar-agent",
+      "type": "shell",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Start-Process 'http://localhost:3011/avatar-agent'\"",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Stack: Up → Health → TTS → Open UI",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "Compose: Up (build)",
+        "Health: GET /api/health",
+        "TTS Smoke: POST /api/v1/tts-with-timing",
+        "Open UI: /avatar-agent"
+      ]
+    }
+  ]
 }
+``

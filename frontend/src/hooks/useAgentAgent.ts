@@ -24,6 +24,7 @@
  *     isConnected, emotion, lastTranscript, lastReply, error,
  *   } = useAgentAgent();
  */
+// @refresh reset
 'use client';
 
 import {
@@ -37,6 +38,17 @@ import { useBrainStore }                   from '@/store/useBrainStore';
 import { agentDirector }                   from '@/ai/avatar/AgentDirector';
 import { emotionalMemoryManager }          from '@/ai/avatar/EmotionalMemoryManager';
 import type { EmotionLabel, AgentFrame }   from '@/types/ai';
+import {
+  ensureMicOpen,
+  onDeviceChangeReopen,
+  pickPreferredInputId,
+}                                          from '@/utils/micManager';
+import {
+  HEARTBEAT_INTERVAL_SEC,
+  TTS_CIRCUIT_BREAKER_THRESHOLD,
+  TTS_COOLDOWN_SEC,
+  PROACTIVE_QUESTION_MS,
+} from '@/config/avatar';
 
 // ─── Public hook interface ────────────────────────────────────────────────────
 
@@ -56,6 +68,8 @@ export interface AgentAgentState {
   isConnected:     boolean;
   /** True while waiting for a backend reply */
   isProcessing:    boolean;
+  /** True between VAD send and Whisper returning transcript (Verona "hearing") */
+  isTranscribing:  boolean;
   /** Current avatar emotion label (from last speech frame) */
   emotion:         string;
   /** Last speech-to-text transcript received from the backend */
@@ -66,6 +80,12 @@ export interface AgentAgentState {
   lastDialogue:    string;
   /** Last error string, or null */
   error:           string | null;
+  /** True if no audio input device found (no microphone connected) */
+  micNotFound:     boolean;
+  /** True if user denied microphone permission */
+  permissionDenied: boolean;
+  /** Clear permissionDenied/micNotFound flags so the user can retry after granting permission in browser/OS settings */
+  resetPermissionDenied: () => void;
 
   startListening:  () => Promise<void>;
   stopListening:   () => void;
@@ -88,6 +108,21 @@ function emitListeningEvent(active: boolean): void {
 
 /** Detect Arabic script in a string. */
 const hasArabic = (s: string): boolean => /[\u0600-\u06FF]/.test(s);
+
+/** Read last BTEC grade from localStorage (assessment page). Fallback to sessionStorage in private mode. */
+function readLastGrade(): Record<string, unknown> | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem('nexus-last-grade')
+      ?? sessionStorage.getItem('nexus-last-grade');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed?.final_grade || parsed.final_grade === 'PENDING') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
 
 /** Convert ArrayBuffer audio bytes to Base64 using browser btoa. */
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -190,12 +225,27 @@ function pcmToWavBlob(pcm: Uint8Array, sampleRate: number): Blob {
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
-/** Milliseconds of silence before the avatar proactively greets the student. */
-const IDLE_TIMEOUT = 8_000;
-
-/** System prompt the avatar sends after the idle threshold is reached. */
+/** Milliseconds after WS connect before the avatar sends the welcome greeting.
+ * Kept short (1 s) so the greeting fires as soon as the connection is live.
+ * PROACTIVE_QUESTION_MS (30 s) is still used for re-engagement after long silence
+ * inside the smartHeartbeat effect — but only when hasInitiated is still false. */
+const IDLE_TIMEOUT = 1_000;
+/** Generate a compact request id for WS frame correlation. */
+function generateReqId(): string {
+  return `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+/** System prompt the avatar sends once on WS connect (welcome greeting). */
 const PROACTIVE_PROMPT =
-  '[SYSTEM_EVENT: The student has been silent. Please proactively greet them, or ask an engaging ice-breaker question related to the lesson.]';
+  '[SYSTEM_EVENT: قدّم نفسك باللهجة الأردنية — ابدأ بـ "السلام عليكم"، وعرّف نفسك كـ دكتور حمزة معلم BTEC، واسأل الطالب بأسلوبك الأردني الدافئ شو يودّ يتعلم اليوم. لا تتجاوز جملتين.]';
+
+// ─── LLM rate-limit cooldown (module-level, survives re-renders) ─────────────
+/** Unix-ms timestamp after which LLM calls are allowed again. */
+let __LLM_COOLDOWN_UNTIL = 0;
+function isLlmCooling(): boolean { return Date.now() < __LLM_COOLDOWN_UNTIL; }
+function setCooldownS(sec: number): void {
+  __LLM_COOLDOWN_UNTIL = Date.now() + Math.max(1000, sec * 1000);
+  console.warn('[useAgentAgent] LLM cooldown set for %.0fs', sec);
+}
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
@@ -208,6 +258,7 @@ export function useAgentAgent({
   // ── React state ─────────────────────────────────────────────────────────
   const [isConnected,    setIsConnected]    = useState(false);
   const [isProcessing,   setIsProcessing]   = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [lastTranscript, setLastTranscript] = useState('');
   const [lastReply,      setLastReply]      = useState('');
   const [lastDialogue,   setLastDialogue]   = useState('');
@@ -217,14 +268,68 @@ export function useAgentAgent({
   const [hasInitiated,   setHasInitiated]   = useState(false);
 
   // ── Refs ─────────────────────────────────────────────────────────────────
-  const wsRef           = useRef<WebSocket | null>(null);
-  const reconnectTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const mountedRef      = useRef(true);
+  const wsRef              = useRef<WebSocket | null>(null);
+  const reconnectTimer     = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttempts  = useRef(0);
+  const mountedRef         = useRef(true);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const isListeningRef  = useRef(false);
   const idleTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Tracks avatar-speaking state via window events — kept as a ref to avoid re-renders. */
   const isSpeakingRef   = useRef(false);
+  /** Number of consecutive server heartbeat frames missed (≥ 2 → reconnect). */
+  const missedHeartbeatsRef       = useRef(0);
+  /** Consecutive TTS audio decode / play failures. */
+  const ttsFailuresRef            = useRef(0);
+  /** If > Date.now(), TTS circuit is OPEN and we skip audio playback. */
+  const ttsCircuitOpenUntilRef    = useRef(0);
+  /** Set true before intentional WS close to suppress auto-reconnect. */
+  const wasClosedIntentionallyRef = useRef(false);  /** Consecutive tts_unavailable frames — reset to 0 on first successful audio play. */
+  const ttsUnavailableRetryRef    = useRef(0);
+  /** True when VAD was recording before the avatar started speaking (auto-resume flag). */
+  const wasListeningBeforeAvatarRef = useRef(false);  /** Timestamp (ms) of the last “لم أسمع شيئاً” (empty_transcript) error shown in UI.
+   *  Rate-limits the message to at most once every 2 s so rapid re-tries
+   *  don’t flood the error banner. */
+  const lastEmptyErrorMsRef = useRef(0);
+  /** True when the last sendText() was a SYSTEM_EVENT (heartbeat / proactive greeting). */
+  const lastSentWasGreetRef = useRef(false);
+
+  // ── VAD (declared first — before other callbacks — to keep hook call order stable) ─
+  // onSpeechEnd uses only refs + stable state setters; empty deps array is intentional.
+  const onSpeechEnd = useCallback(async (blob: Blob): Promise<void> => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.warn('[useAgentAgent] WS not ready — dropping audio blob');
+      return;
+    }
+    setIsProcessing(true);
+    try {
+      const audioBase64 = await audioInputToBase64(blob);
+
+      // Schema contract: E_WS_SCHEMA — reject before touching the socket
+      if (!audioBase64) {
+        console.error('[useAgentAgent] E_WS_SCHEMA: audioBase64 is empty — blob may be corrupt or zero-length');
+        setIsProcessing(false);
+        return;
+      }
+
+      const reqId = generateReqId();
+      const payload: Record<string, unknown> = { v: 1.1, id: reqId, type: 'audio', data: audioBase64 };
+      const gradeResult = readLastGrade();
+      if (gradeResult) payload.grade_result = gradeResult;
+      ws.send(JSON.stringify(payload));
+      console.log('[useAgentAgent] Sent VAD audio payload id=%s len=%d', reqId, audioBase64.length);
+    } catch (e) {
+      setIsProcessing(false);
+      setError('Failed to encode microphone audio');
+      console.error('[useAgentAgent] Audio encoding error:', e);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const { isRecording, startListening: vadStart, stopListening: vadStop, micNotFound, permissionDenied, resetPermissionDenied } = useVAD({
+    lang,
+    onSpeechEnd,
+  });
 
   // ── Audio ────────────────────────────────────────────────────────────────
 
@@ -261,7 +366,13 @@ export function useAgentAgent({
         window.dispatchEvent(new CustomEvent('avatar:audio:element', { detail: { audio } }));
       }
 
+      // Guard: only fall back to Web Speech if the MP3 element never actually
+      // started playing.  Without this, a mid-decode onerror would fire *after*
+      // audio.play() resolved, launching Web Speech while the MP3 is still audible.
+      let playStarted = false;
+
       audio.onplay  = () => {
+        playStarted = true;
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('avatar:speak:start'));
         }
@@ -277,13 +388,25 @@ export function useAgentAgent({
       };
       audio.onerror = () => {
         URL.revokeObjectURL(url);
-        speakWebSpeech(fallbackText, lang);
+        // Only use Web Speech fallback when the audio element never started;
+        // if it already started, it means the audio was partially decoded —
+        // calling speakWebSpeech here would play audio twice.
+        if (!playStarted) speakWebSpeech(fallbackText, lang);
       };
 
       await audio.play();
     } catch (err) {
-      console.warn('[useAgentAgent] playMp3Audio failed:', err);
-      speakWebSpeech(fallbackText, lang);
+      const domErr = err as DOMException;
+      if (domErr?.name === 'NotAllowedError') {
+        // Browser autoplay policy — play deferred to first user gesture
+        console.warn('[useAgentAgent] playMp3Audio blocked by autoplay policy — will replay on first click');
+        document.addEventListener('click', () => {
+          currentAudioRef.current?.play().catch(() => speakWebSpeech(fallbackText, lang));
+        }, { once: true });
+      } else {
+        console.warn('[useAgentAgent] playMp3Audio failed:', err);
+        speakWebSpeech(fallbackText, lang);
+      }
     }
   }, [stopAudio, lang]);
 
@@ -304,7 +427,12 @@ export function useAgentAgent({
       const audio = new Audio(url);
       currentAudioRef.current = audio;
 
+      // Guard: only fall back to Web Speech if the PCM audio element never
+      // actually started playing (same pattern as playMp3Audio).
+      let pcmPlayStarted = false;
+
       audio.onplay   = () => {
+        pcmPlayStarted = true;
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('avatar:speak:start'));
         }
@@ -323,7 +451,7 @@ export function useAgentAgent({
       audio.onerror  = () => {
         URL.revokeObjectURL(url);
         console.warn('[useAgentAgent] PCM audio error — falling back to Web Speech');
-        speakWebSpeech(fallbackText, lang);
+        if (!pcmPlayStarted) speakWebSpeech(fallbackText, lang);
       };
 
       await audio.play();
@@ -344,13 +472,30 @@ export function useAgentAgent({
 
     switch (type) {
 
+      // ── STT transcribing (Verona "hearing") ────────────────────────────
+      case 'transcribing': {
+        setIsTranscribing(true);
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('avatar:transcribing', { detail: { active: true } }));
+        }
+        console.log('[useAgentAgent] Transcribing…');
+        break;
+      }
+
       // ── STT transcript ────────────────────────────────────────────────
       case 'transcript': {
+        setIsTranscribing(false);
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('avatar:transcribing', { detail: { active: false } }));
+        }
         const transcript = ((frame.text ?? frame.transcript ?? '') as string).trim();
         if (!transcript) break;
         setLastTranscript(transcript);
         useBrainStore.getState().pushTurn({ role: 'user', text: transcript });
-        console.log('[useAgentAgent] Transcript:', transcript.slice(0, 80));
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('avatar:transcript', { detail: { text: transcript } }));
+        }
+        console.log('[useAgentAgent] Transcript received:', transcript.slice(0, 80));
         break;
       }
 
@@ -376,7 +521,17 @@ export function useAgentAgent({
 
         if (!dialogue) break;
 
+        // Mark greeting as done when the backend-initiated welcome arrives so the
+        // smart-heartbeat idle timer doesn't fire a second greeting.
+        if ((frame.id as string | undefined) === 'greet_0') {
+          setHasInitiated(true);
+        }
+
         setIsProcessing(false);
+        setIsTranscribing(false);
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('avatar:transcribing', { detail: { active: false } }));
+        }
         setLastReply(dialogue);
         setLastDialogue(dialogue);
         setEmotion(rawEmotion);
@@ -425,18 +580,92 @@ export function useAgentAgent({
         }
 
         if (type === 'speech' && frame.audio_base64) {
-          const fmt = (frame.audio_format ?? 'pcm') as string;
-          if (fmt === 'mp3') {
-            playMp3Audio(frame.audio_base64 as string, dialogue);
+          const now = Date.now();
+          // TTS circuit breaker: if too many consecutive audio failures, skip to text TTS
+          if (ttsCircuitOpenUntilRef.current > now) {
+            console.warn('[useAgentAgent] TTS circuit OPEN — falling back to AgentDirector TTS');
+            agentDirector.scheduleTTS(dialogue, emotionLabel);
           } else {
-            // tts_arabic backend produces PCM at 22 050 Hz; honour explicit sample_rate if present
-            const sampleRate = (frame.sample_rate ?? 22050) as number;
-            playPCMAudio(frame.audio_base64 as string, sampleRate, dialogue);
+            const fmt = (frame.audio_format ?? 'pcm') as string;
+            const playPromise = fmt === 'mp3'
+              ? playMp3Audio(frame.audio_base64 as string, dialogue)
+              : playPCMAudio(frame.audio_base64 as string, (frame.sample_rate ?? 22050) as number, dialogue);
+            playPromise.catch(() => {
+              ttsFailuresRef.current += 1;
+              if (ttsFailuresRef.current >= TTS_CIRCUIT_BREAKER_THRESHOLD) {
+                ttsCircuitOpenUntilRef.current = Date.now() + TTS_COOLDOWN_SEC * 1000;
+                ttsFailuresRef.current = 0;
+                console.warn(
+                  `[useAgentAgent] TTS circuit OPENED for ${TTS_COOLDOWN_SEC}s after ${TTS_CIRCUIT_BREAKER_THRESHOLD} failures`,
+                );
+              }
+              agentDirector.scheduleTTS(dialogue, emotionLabel);
+            }).then(() => {
+              // Reset failure counter and unavailable-retry counter on success
+              ttsFailuresRef.current = 0;
+              ttsUnavailableRetryRef.current = 0;
+            });
           }
         } else {
-          // AgentDirector.scheduleTTS uses speakWithTTS (Kokoro /api/tts-with-timing)
-          // with correct voice params; final fallback to Web Speech is inside speakWithTTS.
-          agentDirector.scheduleTTS(dialogue, emotionLabel);
+          // tts_unavailable: retry via AgentDirector REST TTS with jitter backoff;
+          // fall directly to Web Speech after 2 consecutive backend TTS failures.
+          if (type === 'tts_unavailable') {
+            // ── System-greet path: retry via /api/chat for server-side WAV audio ──
+            if (lastSentWasGreetRef.current) {
+              lastSentWasGreetRef.current = false; // consume flag
+              fetch('/api/chat', {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ message: dialogue || PROACTIVE_PROMPT }),
+              })
+                .then(r => r.json())
+                .then((j: Record<string, unknown>) => {
+                  const audioUrl = (j?.tts as Record<string, unknown> | undefined)?.audioUrl as string | undefined;
+                  if (audioUrl) {
+                    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+                      window.speechSynthesis.cancel();
+                    }
+                    const a = new Audio(audioUrl);
+                    currentAudioRef.current = a;
+                    a.onplay  = () => {
+                      useBrainStore.getState().setTalking(true);
+                      if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('avatar:speak:start'));
+                    };
+                    a.onended = () => {
+                      currentAudioRef.current = null;
+                      useBrainStore.getState().setTalking(false);
+                      if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+                    };
+                    a.play().catch(() => speakWebSpeech(dialogue, lang));
+                    console.log('[useAgentAgent] tts_unavailable+greet → served WAV from /api/chat');
+                  } else {
+                    speakWebSpeech(dialogue, lang);
+                  }
+                })
+                .catch(() => speakWebSpeech(dialogue, lang));
+            } else {
+              ttsUnavailableRetryRef.current += 1;
+              const jitterMs = 300 + Math.random() * 400; // 300–700 ms
+              if (ttsUnavailableRetryRef.current > 2) {
+                // Max retries exceeded — bypass REST TTS and go straight to Web Speech
+                ttsUnavailableRetryRef.current = 0;
+                setTimeout(() => speakWebSpeech(dialogue, lang), jitterMs);
+                console.warn('[useAgentAgent] tts_unavailable x3 — falling back directly to Web Speech');
+              } else {
+                // Retry via AgentDirector REST TTS (it has its own Web Speech fallback)
+                setTimeout(
+                  () => agentDirector.scheduleTTS(dialogue, emotionLabel),
+                  jitterMs,
+                );
+                console.warn(
+                  `[useAgentAgent] tts_unavailable — retrying via AgentDirector (attempt ${ttsUnavailableRetryRef.current}/2) in ${Math.round(jitterMs)}ms`,
+                );
+              }
+            }
+          } else {
+            // type === 'speech' but audio_base64 missing: delegate to AgentDirector.
+            agentDirector.scheduleTTS(dialogue, emotionLabel);
+          }
         }
 
         console.log(
@@ -448,23 +677,62 @@ export function useAgentAgent({
       // ── Backend error ─────────────────────────────────────────────────
       case 'error': {
         const errorObj = frame.error as Record<string, unknown> | undefined;
-        const msg = ((errorObj?.message ?? frame.message ?? frame.detail ?? 'Unknown backend error') as string);
+        const msg = ((errorObj?.message ?? frame.message ?? frame.detail ?? 'Unknown backend error') as string);        const errCode = ((errorObj?.code ?? frame.code ?? '') as string);
+
+        // Rate-limit “لم أسمع شيئاً” (empty_transcript / no_speech_detected) to once per 2 s.
+        // Rapid VAD re-tries would otherwise spam the error banner on every 900 ms cycle.
+        const isEmptyTranscript = errCode === 'empty_transcript' || errCode === 'no_speech_detected';
+        if (isEmptyTranscript) {
+          const now = Date.now();
+          if (now - lastEmptyErrorMsRef.current < 2000) {
+            console.warn('[useAgentAgent] empty_transcript suppressed (rate-limit 2 s)');
+            setIsProcessing(false);
+            setIsTranscribing(false);
+            break;
+          }
+          lastEmptyErrorMsRef.current = now;
+        }
         setError(msg);
         setIsProcessing(false);
+        setIsTranscribing(false);
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('avatar:transcribing', { detail: { active: false } }));
+        }
         console.error('[useAgentAgent] Backend error:', msg);
         break;
       }
 
+      // ── WS protocol heartbeat (← server sends every HEARTBEAT_INTERVAL_SEC) ──────
+      case 'heartbeat': {
+        // Reset missed-counter and reply with pong (v1.1: echo the server's id)
+        missedHeartbeatsRef.current = 0;
+        const ws = wsRef.current;
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ v: 1.1, id: (frame.id ?? 'pong') as string, type: 'pong' }));
+        }
+        break;
+      }
+
       default:
-        console.log('[useAgentAgent] Unhandled frame type:', type);
+        console.warn('[useAgentAgent] Unhandled frame type:', type, '(v=' + (frame.v ?? '?') + ', id=' + (frame.id ?? '?') + ')');
     }
   }, [lang, playPCMAudio, playMp3Audio]);
 
   // ── WebSocket connection ───────────────────────────────────────────────────
 
   const connect = useCallback((): void => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      console.log('[useAgentAgent] Already connected, skipping new connection');
+      return;
+    }
     if (typeof window === 'undefined') return;
+
+    // Close any stale/half-open connection before creating a fresh one
+    if (wsRef.current) {
+      try { wsRef.current.close(); } catch { /* ignore */ }
+      wsRef.current = null;
+    }
+    wasClosedIntentionallyRef.current = false;
 
     console.log(`[useAgentAgent] Connecting → ${wsUrl}`);
     const ws = new WebSocket(wsUrl);
@@ -474,6 +742,7 @@ export function useAgentAgent({
       if (!mountedRef.current) return;
       setIsConnected(true);
       setError(null);
+      reconnectAttempts.current = 0;   // reset backoff counter on success
       console.log('[useAgentAgent] WS connected');
     };
 
@@ -489,64 +758,84 @@ export function useAgentAgent({
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (evt: CloseEvent) => {
       if (!mountedRef.current) return;
       setIsConnected(false);
-      console.warn('[useAgentAgent] WS closed');
-      if (autoReconnect && mountedRef.current) {
-        console.log('[useAgentAgent] Reconnecting in 3 s...');
-        reconnectTimer.current = setTimeout(connect, 3000);
+      // Code 1000 = normal closure (server shut down cleanly); 1001 = going away.
+      const normal = evt.code === 1000 || evt.code === 1001;
+      if (normal) {
+        console.log(`[useAgentAgent] WS closed normally (code=${evt.code})`);
+      } else {
+        console.warn(`[useAgentAgent] WS closed unexpectedly (code=${evt.code} reason=${evt.reason || 'none'})`);
+      }
+      const maxRetries = 5;
+      if (autoReconnect && mountedRef.current && !wasClosedIntentionallyRef.current) {
+        if (reconnectAttempts.current >= maxRetries) {
+          console.error(`[useAgentAgent] Max reconnect attempts (${maxRetries}) reached — giving up`);
+          setError('تعذّر الاتصال بالخادم بعد عدة محاولات — يرجى إعادة تحميل الصفحة');
+          return;
+        }
+        // Exponential back-off: 2s, 4s, 8s, 16s … capped at 30s
+        reconnectAttempts.current += 1;
+        const delay = Math.min(2000 * Math.pow(2, reconnectAttempts.current - 1), 30000);
+        console.log(`[useAgentAgent] Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts.current}/${maxRetries})...`);
+        reconnectTimer.current = setTimeout(connect, delay);
       }
     };
 
-    ws.onerror = () => {
-      setError('WebSocket connection error');
-      console.error('[useAgentAgent] WS error');
+    ws.onerror = (evt: Event) => {
+      // onerror always fires just before onclose — the useful diagnostic is in
+      // onclose (code + reason).  Log as warn (not error) to avoid a red
+      // stack-trace storm while the backend is starting up.
+      // We do NOT call setError() here — onopen resets it to null on success.
+      const url = (evt.target as WebSocket | null)?.url ?? wsUrl;
+      console.warn(`[useAgentAgent] WS error on ${url} — waiting for onclose to reconnect`);
     };
   }, [wsUrl, autoReconnect, handleFrame]);
 
   // ── VAD integration ──────────────────────────────────────────────────────
-
-  // Memoised so vadStart / startListening / toggleListening stay stable across renders.
-  // wsRef.current is accessed at call-time (not captured); state setters from useState
-  // are guaranteed stable by React, so empty deps are correct here.
-  const onSpeechEnd = useCallback(async (blob: Blob): Promise<void> => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      console.warn('[useAgentAgent] WS not ready — dropping audio blob');
-      return;
-    }
-    setIsProcessing(true);
-    try {
-      const audioBase64 = await audioInputToBase64(blob);
-      const payload = { type: 'audio', data: audioBase64 };
-      ws.send(JSON.stringify(payload));
-      console.log('[useAgentAgent] Sent VAD audio payload as JSON base64:', audioBase64.length, 'chars');
-    } catch (e) {
-      setIsProcessing(false);
-      setError('Failed to encode microphone audio');
-      console.error('[useAgentAgent] Audio encoding error:', e);
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const { isRecording, startListening: vadStart, stopListening: vadStop } = useVAD({
-    lang,
-    onSpeechEnd,
-  });
+  // onSpeechEnd + useVAD are declared at the top of the hook body (before audio/WS
+  // callbacks) to guarantee identical hook call order on every render (Rules of Hooks).
 
   // ── Public API ────────────────────────────────────────────────────────────
 
   const startListening = useCallback(async (): Promise<void> => {
     if (isListeningRef.current) return;
+
+    // Don't attempt to start if we know there's no mic or permission was denied
+    if (micNotFound || permissionDenied) {
+      console.log('[useAgentAgent] Cannot start listening — micNotFound=' + micNotFound + ' permissionDenied=' + permissionDenied);
+      return;
+    }
+
     isListeningRef.current = true;
+
+    // ── Barge-in: stop avatar speech immediately when mic opens ──────────
+    if (isSpeakingRef.current) {
+      stopAudio();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('avatar:stopSpeech'));
+      }
+    }
 
     // Interrupt any ongoing speech before listening (prevents echo)
     agentDirector.interruptSpeech();
     useBrainStore.getState().setPhysical({ isListening: true });
     emitListeningEvent(true);
 
-    await vadStart();
-    console.log('[useAgentAgent] Listening started');
+    try {
+      await vadStart();
+      console.log('[useAgentAgent] Listening started');
+    } catch (err) {
+      // vadStart() only throws for truly unexpected errors — NotFoundError and
+      // NotAllowedError are handled inside useVAD (sets micNotFound/permissionDenied
+      // state and returns silently), so they never reach here.
+      isListeningRef.current = false;
+      useBrainStore.getState().setPhysical({ isListening: false });
+      emitListeningEvent(false);
+      setError('تعذّر تشغيل الميكروفون — تأكد من توصيل جهاز صوتي');
+      console.error('[useAgentAgent] VAD start failed (unexpected):', err);
+    }
   }, [vadStart]);
 
   const stopListening = useCallback((): void => {
@@ -575,10 +864,18 @@ export function useAgentAgent({
       setError('Not connected to agent');
       return;
     }
-    const payload = JSON.stringify({ type: 'text', text: text.trim(), lang });
-    ws.send(payload);
+    // Track whether this is a system/greeting message (for tts_unavailable retry path)
+    lastSentWasGreetRef.current = text.trim().startsWith('[SYSTEM_EVENT');
+    const payload: Record<string, unknown> = { type: 'text', text: text.trim(), lang };
+    const gradeResult = readLastGrade();
+    if (gradeResult) payload.grade_result = gradeResult;
+    ws.send(JSON.stringify(payload));
     useBrainStore.getState().pushTurn({ role: 'user', text: text.trim() });
-    setLastTranscript(text.trim());
+    // Only surface real user text — filter out internal system event prompts
+    // (e.g. '[SYSTEM_EVENT: The student has been silent...]' from smart heartbeat)
+    if (!text.trim().startsWith('[SYSTEM_EVENT')) {
+      setLastTranscript(text.trim());
+    }
     setIsProcessing(true);
     console.log('[useAgentAgent] Sent text:', text.slice(0, 80));
   }, [lang]);
@@ -595,6 +892,59 @@ export function useAgentAgent({
     console.log('[useAgentAgent] History cleared');
   }, [stopAudio]);
 
+  // ── Microphone lifecycle manager ─────────────────────────────────────────────
+  // • Registers device-change auto-reopen once.
+  // • Opens the mic after the welcome greeting finishes (avatar:speak:end),
+  //   or after 1.2 s if no greeting plays (e.g. autoplay blocked).
+  // • Emits 'mic:needs-user-gesture' so PermissionBanner shows a visible prompt.
+  // • Does NOT create AudioContext / VAD graph until the stream is live.
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    onDeviceChangeReopen();
+    let preferId: string | undefined;
+
+    const openSafe = async (reason: string): Promise<void> => {
+      if (
+        (window as unknown as Record<string, unknown>).__BOOT_GREETING_ACTIVE__ ||
+        (window as unknown as Record<string, unknown>).__DISABLE_VAD__
+      ) return;
+      try {
+        if (!preferId) preferId = await pickPreferredInputId();
+        await ensureMicOpen({
+          sampleRate:      48000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl:  false,
+          deviceId:         preferId,
+        });
+        if (process.env.NODE_ENV === 'development')
+          console.log('[MIC] opened:', reason);
+      } catch (e: unknown) {
+        const err = e as { name?: string; message?: string };
+        console.warn('[MIC] open failed:', reason, err?.name, err?.message);
+        window.dispatchEvent(new CustomEvent('mic:needs-user-gesture'));
+      }
+    };
+
+    const onSpeakEnd  = (): void => { setTimeout(() => openSafe('after-greet-wav'), 250); };
+    const onFocus     = (): void => { openSafe('window-focus'); };
+    const onVisible   = (): void => { if (document.visibilityState === 'visible') openSafe('visible'); };
+
+    window.addEventListener('avatar:speak:end',   onSpeakEnd);
+    window.addEventListener('focus',              onFocus);
+    document.addEventListener('visibilitychange', onVisible);
+
+    const t0 = setTimeout(() => openSafe('initial-mount'), 1_200);
+
+    return (): void => {
+      clearTimeout(t0);
+      window.removeEventListener('avatar:speak:end',   onSpeakEnd);
+      window.removeEventListener('focus',              onFocus);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, []);
+
   // ── Avatar speaking tracker (keeps isSpeakingRef in sync via window events) ──
 
   useEffect(() => {
@@ -609,6 +959,111 @@ export function useAgentAgent({
     };
   }, []);
 
+  // ── VAD auto-stop / auto-resume around avatar speech (barge-in guard) ────────
+  //
+  // When the avatar starts playing audio we pause VAD so the microphone doesn't
+  // pick up the speakers.  When the avatar finishes, VAD resumes automatically
+  // if it was running before (wasListeningBeforeAvatarRef).
+  //
+  // This is the complement of the barge-in path already in startListening()
+  // (which stops avatar speech when the USER presses the mic button).
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const onAvatarSpeakStart = (): void => {
+      if (!isListeningRef.current) return;
+      wasListeningBeforeAvatarRef.current = true;
+      // Pause recording without toggling the UI mic button
+      vadStop();
+      isListeningRef.current = false;
+      useBrainStore.getState().setPhysical({ isListening: false });
+      emitListeningEvent(false);
+      console.log('[useAgentAgent] Avatar speaking — VAD paused (barge-in guard)');
+    };
+
+    const onAvatarSpeakEnd = (): void => {
+      if (!wasListeningBeforeAvatarRef.current) return;
+      wasListeningBeforeAvatarRef.current = false;
+      // Brief tail-gap: give the audio driver a tick to flush before the mic opens
+      setTimeout(async () => {
+        if (!mountedRef.current || isListeningRef.current) return;
+        try {
+          isListeningRef.current = true;
+          await vadStart();
+          useBrainStore.getState().setPhysical({ isListening: true });
+          emitListeningEvent(true);
+          console.log('[useAgentAgent] Avatar finished — VAD auto-resumed');
+        } catch {
+          isListeningRef.current = false;
+        }
+      }, 400);
+    };
+
+    window.addEventListener('avatar:speak:start', onAvatarSpeakStart);
+    window.addEventListener('avatar:speak:end',   onAvatarSpeakEnd);
+    return () => {
+      window.removeEventListener('avatar:speak:start', onAvatarSpeakStart);
+      window.removeEventListener('avatar:speak:end',   onAvatarSpeakEnd);
+    };
+  }, [vadStop, vadStart]);
+
+  // ── WS protocol heartbeat watchdog — reconnect after 2 missed server beats ──
+
+  useEffect(() => {
+    if (!isConnected) return;
+    // The backend sends a heartbeat every HEARTBEAT_INTERVAL_SEC.
+    // We check every (HEARTBEAT_INTERVAL_SEC + 5) seconds; if missedHeartbeatsRef
+    // hits >= 2 consecutive misses the WS is likely stale → force reconnect.
+    const WATCH_MS = (HEARTBEAT_INTERVAL_SEC + 5) * 1000;
+    const watchdog = setInterval(() => {
+      if (!mountedRef.current) return;
+      missedHeartbeatsRef.current += 1;
+      if (missedHeartbeatsRef.current >= 2) {
+        console.warn('[useAgentAgent] 2 missed heartbeats — forcing WS reconnect');
+        missedHeartbeatsRef.current = 0;
+        wsRef.current?.close();   // triggers ws.onclose → autoReconnect
+      }
+    }, WATCH_MS);
+    return () => clearInterval(watchdog);
+  }, [isConnected]);
+
+  // ── Auto-start VAD when WS connects (no mic button press needed) ────────────
+  // Fires 1.5 s after connect so the welcome greeting can begin playing first.
+  // If the avatar is still speaking at the 1.5 s mark (fast backend response),
+  // defer VAD start to avatar:speak:end to avoid interrupting the greeting.
+
+  useEffect(() => {
+    if (!isConnected) return;
+    let cancelled = false;
+
+    const doStart = (): void => {
+      if (cancelled || !mountedRef.current || isListeningRef.current) return;
+      startListening().catch(() => {});
+      console.log('[useAgentAgent] Auto-started VAD after WS connect');
+    };
+
+    const t = setTimeout(() => {
+      if (cancelled) return;
+      if (isSpeakingRef.current || currentAudioRef.current !== null) {
+        // Avatar is still delivering the greeting — defer until speech ends
+        console.log('[useAgentAgent] Auto-VAD deferred — avatar speaking at 1.5 s mark');
+        const onSpeakEnd = (): void => {
+          window.removeEventListener('avatar:speak:end', onSpeakEnd);
+          setTimeout(doStart, 400); // tail gap: let audio driver flush before mic opens
+        };
+        window.addEventListener('avatar:speak:end', onSpeakEnd);
+      } else {
+        doStart();
+      }
+    }, 1_500);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [isConnected, startListening]);
+
   // ── Smart heartbeat — proactive greeting after IDLE_TIMEOUT of silence ───
 
   useEffect(() => {
@@ -622,8 +1077,15 @@ export function useAgentAgent({
     if (hasInitiated || !isConnected || isProcessing || isRecording) return;
 
     idleTimerRef.current = setTimeout(() => {
-      // Re-check live state via refs before firing (guards against stale closure)
-      if (!mountedRef.current || isSpeakingRef.current) return;
+      // Re-check live state via refs before firing (guards against stale closure).
+      // Also block when an audio element is actively playing (isSpeakingRef covers
+      // the window-event path; currentAudioRef covers the element directly).
+      if (!mountedRef.current || isSpeakingRef.current || currentAudioRef.current !== null) return;
+      // Skip heartbeat if LLM is in rate-limit cooldown
+      if (isLlmCooling()) {
+        console.warn('[useAgentAgent] Smart heartbeat skipped — LLM cooling');
+        return;
+      }
       sendText(PROACTIVE_PROMPT);
       setHasInitiated(true);
       console.log('[useAgentAgent] Smart heartbeat fired — proactive greeting sent');
@@ -648,14 +1110,33 @@ export function useAgentAgent({
     // Open WebSocket
     connect();
 
+    // bfcache support: close WS when page is hidden (saved to cache), reopen on restore
+    const onPageHide = (): void => {
+      wasClosedIntentionallyRef.current = true;
+      wsRef.current?.close();
+      wsRef.current = null;
+    };
+    const onPageShow = (e: PageTransitionEvent): void => {
+      if (e.persisted) {
+        wasClosedIntentionallyRef.current = false;
+        connect();
+      }
+    };
+    window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('pageshow', onPageShow);
+
     return () => {
       mountedRef.current = false;
+
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('pageshow', onPageShow);
 
       // Clean up connections and playback
       agentDirector.stop();
       vadStop();
       stopAudio();
 
+      wasClosedIntentionallyRef.current = true;  // prevent auto-reconnect on teardown
       wsRef.current?.close();
       wsRef.current = null;
 
@@ -673,11 +1154,15 @@ export function useAgentAgent({
     isListening:     isRecording,
     isConnected,
     isProcessing,
+    isTranscribing,
     emotion,
     lastTranscript,
     lastReply,
     lastDialogue,
     error,
+    micNotFound,
+    permissionDenied,
+    resetPermissionDenied,
     startListening,
     stopListening,
     toggleListening,

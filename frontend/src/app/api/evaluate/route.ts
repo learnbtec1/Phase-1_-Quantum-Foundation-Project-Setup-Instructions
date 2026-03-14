@@ -50,10 +50,11 @@ export async function POST(req: NextRequest) {
     }
 
     const backendUrl = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
+    const student_id = body?.student_id ?? undefined;
     const backendResponse = await fetch(`${backendUrl}/api/v1/assessment/forensic-grade-v3`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ assignment_text, student_text }),
+      body: JSON.stringify({ assignment_text, student_text, ...(student_id && { student_id }) }),
       signal: controller.signal,
     });
 
@@ -106,6 +107,8 @@ export async function POST(req: NextRequest) {
         },
         criteria: criteriaArray,
         final_grade: result.final_grade || 'PENDING',
+        evaluation_id: result.evaluation_id ?? undefined,
+        ephemeral: result.ephemeral ?? undefined,
       },
       report: result.summary || '',
     };

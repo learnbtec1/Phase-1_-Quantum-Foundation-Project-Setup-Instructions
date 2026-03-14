@@ -12,6 +12,8 @@ const BoardroomAvatar = dynamic(
   () => import('@/components/avatar/VRMAvatar').then((m) => m.default),
   { ssr: false }
 );
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const BoardroomAvatarEl = BoardroomAvatar as unknown as React.ComponentType<{ scale?: number }>;
 
 /** Handles WebGL context loss/restore inside the MR Canvas */
 function MRContextEvents() {
@@ -79,7 +81,7 @@ function MRContent() {
       <group ref={groupRef} position={[0, 0, 0]} visible={false}>
         <Float speed={1} floatIntensity={0.03}>
           <group scale={0.6}>
-            <BoardroomAvatar scale={1} />
+            <BoardroomAvatarEl scale={1} />
           </group>
         </Float>
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]}>

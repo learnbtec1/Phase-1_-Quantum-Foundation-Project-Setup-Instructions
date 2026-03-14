@@ -1,28 +1,32 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Optional
+import logging
 import os, json, asyncio, re
 from openai import AsyncOpenAI
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not OPENAI_API_KEY:
-    raise HTTPException(500, "OpenAI API key is missing. Please set the OPENAI_API_KEY environment variable.")
-
 class Submission(BaseModel):
     assignment_text: str
-    student_text: str
+    student_text:    str
+    student_id:      Optional[str] = "anonymous"  # temporary until auth is wired
+    title:           Optional[str] = "BTEC Submission"
 
 class CriterionResult(BaseModel):
-    band: str
+    band:     str
     achieved: bool
     feedback: str
 
+
 class EvaluationResponse(BaseModel):
-    final_grade: str
-    summary: str
-    criteria: Dict[str, CriterionResult]
+    final_grade:    str
+    summary:        str
+    criteria:       Dict[str, CriterionResult]
+    evaluation_id:  str         # always present — ephemeral or DB-persisted
+    ephemeral:      bool = True  # true when USE_DB=false
 
 def is_likely_brief(text: str) -> bool:
     return len(re.findall(r'\b(?:[A-Z]{1,2}\.)?(?:P|M|D)\d+\b', text, flags=re.I)) >= 2
@@ -134,4 +138,45 @@ async def evaluate_submission(submission: Submission):
     if not re.search(r'[\u0600-\u06FF]', summary):
         summary = "تم التقييم وفق ورقة الواجب فقط."
 
-    return EvaluationResponse(final_grade=final_grade, summary=summary, criteria=results)
+    # ── Persist via repository (InMemory or Postgres depending on USE_DB) ─────
+    evaluation_id = "ephemeral"
+    is_ephemeral  = True
+    try:
+        import sys, os
+        # Ensure backend root is on path (works both locally and in Docker)
+        _root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        if _root not in sys.path:
+            sys.path.insert(0, _root)
+        from repository.evaluations import get_evaluation_repo  # type: ignore[import]
+        repo = get_evaluation_repo()
+        criteria_dict = {
+            code: {"band": r.band, "achieved": r.achieved, "feedback": r.feedback}
+            for code, r in results.items()
+        }
+        evaluation_id = repo.create(
+            student_id=submission.student_id or "anonymous",
+            title=submission.title or "BTEC Submission",
+            original_text=submission.student_text[:4000],  # store preview
+            status="evaluated",
+            criteria=criteria_dict,
+            final_grade=final_grade,
+            feedback=summary,
+        )
+        stored = repo.get_by_id(evaluation_id)
+        is_ephemeral = bool(stored and stored.get("ephemeral", True))
+        logger.info(
+            "[Evaluate] Persisted evaluation_id=%s grade=%s ephemeral=%s",
+            evaluation_id, final_grade, is_ephemeral,
+        )
+    except Exception as exc:
+        logger.warning("[Evaluate] Repository save skipped: %s", exc)
+        evaluation_id = "ephemeral"
+        is_ephemeral  = True
+
+    return EvaluationResponse(
+        final_grade=final_grade,
+        summary=summary,
+        criteria=results,
+        evaluation_id=evaluation_id,
+        ephemeral=is_ephemeral,
+    )

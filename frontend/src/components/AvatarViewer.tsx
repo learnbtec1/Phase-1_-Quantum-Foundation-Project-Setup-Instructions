@@ -185,6 +185,14 @@ export const AvatarHumanProUltra = forwardRef<AvatarUltraHandle, AvatarUltraProp
 
       // ── تشغيل ملف صوتي مع تحليل فوري للحركة الشفهية ──────────────────
       async playAudioAndAnalyze(audioUrl: string) {
+        // Skip self audio when server TTS is active (prevents echo)
+        if (typeof window !== 'undefined' && (window as typeof window & { __SERVER_TTS_ACTIVE__?: boolean }).__SERVER_TTS_ACTIVE__) {
+          if (process.env.NODE_ENV === 'development') {
+            console.warn('[Viewer] playAudioAndAnalyze skipped (__SERVER_TTS_ACTIVE__)');
+          }
+          return;
+        }
+
         stopAudio();
 
         if (!audioCtxRef.current) {
@@ -736,6 +744,18 @@ export default function AvatarViewer({
   height   = '520px',
   avatarRef,
 }: AvatarViewerProps) {
+  // ── Feature flag: only mount when NEXT_PUBLIC_ENABLE_ULTRA_VIEWER=1 AND no canonical renderer ──
+  if (typeof window !== 'undefined') {
+    const w = window as typeof window & { __ENABLE_ULTRA_VIEWER__?: boolean; __AVATAR_CANONICAL__?: string };
+    const enabled = w.__ENABLE_ULTRA_VIEWER__ === true || process.env.NEXT_PUBLIC_ENABLE_ULTRA_VIEWER === '1';
+    if (!enabled || w.__AVATAR_CANONICAL__) {
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[Viewer] Disabled (flag off) or canonical renderer present:', w.__AVATAR_CANONICAL__);
+      }
+      return null as unknown as React.ReactElement;
+    }
+  }
+
   const innerRef    = useRef<AvatarUltraHandle>(null);
   const resolvedRef = (avatarRef ?? innerRef) as React.RefObject<AvatarUltraHandle>;
 

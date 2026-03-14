@@ -24,6 +24,7 @@ import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-v
 import type { VRMAnimation } from '@pixiv/three-vrm-animation';
 import styles from './AvatarCanvas.module.css';
 import { perlinNoise, Easing, lerp } from './utils';
+import { VRM_FALLBACKS } from '@/config/avatar';
 import { RoomShell, ROOM_BOUNDS } from './scene/RoomShell';
 import { LightingRig }       from './scene/LightingRig';
 import { OfficeSetLoader }   from './scene/OfficeSetLoader';
@@ -39,6 +40,7 @@ import RoyalMaterialsOverride from '@/components/RoyalMaterialsOverride';
 import { ParquetFloor }      from './scene/ParquetFloor';
 import { resolveIfEnabled }  from './physics/WorldColliders';
 import { OfficeDebugHUD }    from './debug/OfficeDebugHUD';
+import { selectFemaleArabicVoice } from '@/utils/selectFemaleArabicVoice';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const AVATAR_BASE_Y = -1.0;   // matches ROOM_BOUNDS.floorY — avatar feet on GLB floor
@@ -107,6 +109,35 @@ const AZURE_VISEME_TO_VRM: ReadonlyArray<Partial<{ aa: number; ih: number; ou: n
   /* 20 t/d/s/z  */ { ih: 0.10 },
   /* 21 b/p/m    */ {},
 ];
+
+// ── VRM version-agnostic blendshape key mapping ───────────────────────────────
+// When a VRM 1.0 key (left) is not found in the expression manager, the loader
+// falls back to its VRM 0.x equivalent (right).  Keys are probed once per session
+// and the result is cached in resolvedKeysRef so subsequent frames pay zero cost.
+const VRM1_TO_VRM0: Readonly<Record<string, string>> = {
+  aa:        'A',
+  ih:        'I',
+  ou:        'U',
+  ee:        'E',
+  oh:        'O',
+  happy:     'Joy',
+  sad:       'Sorrow',
+  angry:     'Angry',
+  relaxed:   'Relaxed',
+  surprised: 'Surprised',
+  lookUp:    'LookUp',
+};
+
+// ── SimpleAvatarPlaceholder — rendered when all VRM candidates fail ────────
+function SimpleAvatarPlaceholder(): React.JSX.Element {
+  return (
+    <div className="flex flex-col items-center justify-center w-full h-full bg-[radial-gradient(ellipse_at_center,#1a1a2e_0%,#0a0a14_100%)] text-gray-400">
+      <div className="text-6xl mb-4">🤖</div>
+      <div className="text-lg opacity-80">Verona Avatar</div>
+      <div className="text-sm opacity-50 mt-2">3D model unavailable</div>
+    </div>
+  );
+}
 
 // ── VRMScene — lives inside <Canvas> ────────────────────────────────────────
 function VRMScene({
@@ -194,6 +225,45 @@ function VRMScene({
   // Sitting state
   const isSittingRef      = useRef(false);
 
+  // ── Transcribing / thinking state ───────────────────────────────────────
+  // Set true while Whisper is transcribing; drives a subtle "thinking" pose
+  // (raised gaze, relaxed blendshape, gentle head tilt) so the avatar looks
+  // attentive rather than frozen during the STT latency window.
+  const isTranscribingRef   = useRef(false);
+  const savedEmotionRef     = useRef<string>('neutral'); // restored post-transcription
+
+  // ── VRM blendshape probe cache ───────────────────────────────────────────
+  // Maps canonical VRM 1.0 key → the actual key that the loaded model supports.
+  // Populated lazily on first use; each key is probed at most once.
+  const resolvedKeysRef   = useRef<Record<string, string>>({});
+
+  // Smart expression setter: tries VRM 1.0 key first, falls back to VRM 0.x.
+  // Uses the probe cache so the fallback probe only runs once per key per session.
+  const setEM = useCallback((
+    em: NonNullable<VRM['expressionManager']>,
+    key: string,
+    value: number,
+  ) => {
+    const cache = resolvedKeysRef.current;
+    const resolved = cache[key];
+    if (resolved !== undefined) {
+      try { em.setValue(resolved as never, value); } catch { /* silent */ }
+      return;
+    }
+    // First use: probe the VRM 1.0 key
+    try {
+      em.setValue(key as never, value);
+      cache[key] = key;
+    } catch {
+      // VRM 1.0 key not present — try VRM 0.x fallback
+      const fb = VRM1_TO_VRM0[key];
+      if (fb) {
+        try { em.setValue(fb as never, value); cache[key] = fb; return; } catch { /* silent */ }
+      }
+      cache[key] = key; // store original so we don't re-probe
+    }
+  }, []);
+
   // ── VRMA animation system ────────────────────────────────────────────────
   const mixerRef      = useRef<THREE.AnimationMixer | null>(null);
   const vrmaActions   = useRef<Map<string, THREE.AnimationAction>>(new Map());
@@ -222,8 +292,13 @@ function VRMScene({
   // ── Load VRM ────────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
-    const loader = new GLTFLoader();
-    loader.register((parser: unknown) => new VRMLoaderPlugin(parser as never));
+
+    // Build a deduped candidate list: prop url first, then global fallbacks.
+    const seen = new Set<string>();
+    const candidates: string[] = [];
+    for (const u of [vrmUrl, ...VRM_FALLBACKS]) {
+      if (u && !seen.has(u)) { seen.add(u); candidates.push(u); }
+    }
 
     // Suppress noisy LookAtDegreeMap warnings from three-vrm
     const origWarn = console.warn;
@@ -232,8 +307,21 @@ function VRMScene({
       origWarn.apply(console, a);
     };
 
-    loader.load(
-      vrmUrl,
+    /** Try each candidate URL in order; call onError('allFailed') when exhausted. */
+    function attemptLoad(idx: number): void {
+      if (cancelled || idx >= candidates.length) {
+        if (!cancelled) {
+          console.warn = origWarn;
+          console.error('[AvatarCanvas] ❌ All VRM URLs failed — mounting placeholder');
+          onError('allFailed');
+        }
+        return;
+      }
+      const urlToTry = candidates[idx];
+      const loader = new GLTFLoader();
+      loader.register((parser: unknown) => new VRMLoaderPlugin(parser as never));
+      loader.load(
+        urlToTry,
       (gltf) => {
         if (cancelled) { setTimeout(() => { console.warn = origWarn; }, 0); return; }
         setTimeout(() => { console.warn = origWarn; }, 0);
@@ -319,12 +407,14 @@ function VRMScene({
       undefined,
       (err) => {
         if (!cancelled) {
-          console.warn = origWarn;
-          console.error('[AvatarCanvas] ❌ VRM load error:', (err as Error)?.message ?? err);
-          onError(String((err as Error)?.message ?? err));
+          console.warn(`[AvatarCanvas] ❌ ${urlToTry} failed: ${(err as Error)?.message ?? err} — trying next`);
+          attemptLoad(idx + 1);  // try next fallback URL
         }
       },
     );
+    } // end attemptLoad
+
+    attemptLoad(0);
 
     return () => {
       cancelled = true;
@@ -429,6 +519,31 @@ function VRMScene({
         }
       }
     };
+    // avatar:transcribing — fired by useAvatarAgent when Whisper is processing.
+    // Drives a subtle "thinking" head pose + relaxed blendshape so the avatar
+    // looks attentive during the STT latency window instead of standing idle.
+    const onTranscribing = (e: Event) => {
+      const active = (e as CustomEvent<{ active?: boolean }>).detail?.active ?? false;
+      if (active) {
+        savedEmotionRef.current   = emotionRef.current;
+        emotionRef.current        = 'thinking';
+        isTranscribingRef.current = true;
+        // Subtle upward head tilt — avatar appears to be "listening carefully"
+        headPitchRef.current = -0.06;
+        headUntilRef.current = Date.now() + 30_000; // hold until cleared
+        console.log('[BRAIN] avatar:transcribing — thinking pose active');
+      } else {
+        isTranscribingRef.current = false;
+        // Restore emotion; neutral reset handled by emotion linger (Sprint 1)
+        emotionRef.current   = savedEmotionRef.current === 'thinking'
+          ? 'neutral'
+          : savedEmotionRef.current;
+        headPitchRef.current = 0;
+        headUntilRef.current = Date.now() + 800;
+        console.log('[BRAIN] avatar:transcribing — thinking pose cleared');
+      }
+    };
+
     const onSpeakStart = () => {
       isTalkingRef.current   = true;
       talkElapsedRef.current = 0;
@@ -442,9 +557,25 @@ function VRMScene({
       visemeCueQueueRef.current   = [];
       lipSyncAudioRef.current     = null;
       lastLoggedVisemeRef.current = -1;
-      emotionRef.current = 'neutral';
       if (isSittingRef.current && vrmaReadyRef.current) playVRMA('sit', true, 0.4);
-      console.log('[BRAIN] avatar:speak:end — resetting to neutral');
+      // Gap 3-B: Hold the current emotion for 2.5 s post-speech before fading to
+      // neutral. This prevents robotic emotional snapping after the avatar talks.
+      const lingeredEmotion = emotionRef.current;
+      setTimeout(() => {
+        if (emotionRef.current === lingeredEmotion) {
+          emotionRef.current = 'neutral';
+          console.log(`[BRAIN] Emotion linger ended — fading "${lingeredEmotion}" → neutral`);
+        }
+      }, 2500);
+      console.log(`[BRAIN] avatar:speak:end — holding emotion "${lingeredEmotion}" for 2.5 s`);
+    };
+    // Gap 2-A: explicit viseme queue clear dispatched by useAvatarAgent when
+    // audio.play() is rejected (autoplay policy) before the cue queue can run.
+    const onVisemesClear = () => {
+      visemeCueQueueRef.current   = [];
+      azureVisemeActive.current   = false;
+      lastLoggedVisemeRef.current = -1;
+      console.log('[LipSync] avatar:visemes:clear — queue flushed');
     };
     // avatar:viseme:start — legacy: real visemes are incoming; switch from procedural
     const onVisemeStart = () => { azureVisemeActive.current = true; };
@@ -467,6 +598,9 @@ function VRMScene({
     };
     // avatar:audio:element — NEW: the HTMLAudioElement being played (for currentTime reads)
     const onAudioElement = (e: Event) => {
+      // Cancel any in-flight Web Speech utterance before WAV starts (prevents echo)
+      try { if ('speechSynthesis' in window) window.speechSynthesis.cancel(); } catch { /* ignore */ }
+      (window as typeof window & { __SERVER_TTS_ACTIVE__?: boolean }).__SERVER_TTS_ACTIVE__ = true;
       const d = (e as CustomEvent<{ audio?: HTMLAudioElement }>).detail;
       if (d?.audio) {
         lipSyncAudioRef.current = d.audio;
@@ -525,15 +659,18 @@ function VRMScene({
         console.log(`[BRAIN] avatar:play → ${clip}`);
       }
     };
-    // avatar:speak:text — TTS via Web Speech API; also parses sentence boundaries for nods
+    // avatar:speak:text — dev-only Web Speech fallback (no-op in production)
     const onSpeakText = (e: Event) => {
+      if (process.env.NODE_ENV !== 'development') return;
       const text = (e as CustomEvent<{ text?: string }>).detail?.text ?? '';
       if (!text) return;
       window.dispatchEvent(new CustomEvent('avatar:speak:start'));
       try {
         const u = new SpeechSynthesisUtterance(text);
         u.lang  = /[\u0600-\u06FF]/.test(text) ? 'ar-SA' : 'en-US';
-        u.rate  = voiceRateRef.current;
+        u.rate  = Math.min(1.0, voiceRateRef.current);
+        const v = selectFemaleArabicVoice();
+        if (v) u.voice = v;
         u.onend = () => window.dispatchEvent(new CustomEvent('avatar:speak:end'));
         window.speechSynthesis?.speak(u);
       } catch {
@@ -550,6 +687,7 @@ function VRMScene({
       });
     };
 
+    window.addEventListener('avatar:transcribing',  onTranscribing);
     window.addEventListener('avatar:gesture',       onGesture);
     window.addEventListener('avatar:emotion',       onEmotion);
     window.addEventListener('avatar:speak:start',   onSpeakStart);
@@ -558,6 +696,7 @@ function VRMScene({
     window.addEventListener('avatar:viseme:start',      onVisemeStart);
     window.addEventListener('avatar:viseme',            onViseme);
     window.addEventListener('avatar:visemes:timeline',  onVisemesTimeline);
+    window.addEventListener('avatar:visemes:clear',     onVisemesClear);
     window.addEventListener('avatar:audio:element',     onAudioElement);
     window.addEventListener('avatar:walk',          onWalk);
     window.addEventListener('avatar:nod',           onNod);
@@ -571,6 +710,7 @@ function VRMScene({
     window.addEventListener('avatar:play',          onPlay);
 
     return () => {
+      window.removeEventListener('avatar:transcribing', onTranscribing);
       window.removeEventListener('avatar:gesture',      onGesture);
       window.removeEventListener('avatar:emotion',      onEmotion);
       window.removeEventListener('avatar:speak:start',  onSpeakStart);
@@ -579,6 +719,7 @@ function VRMScene({
       window.removeEventListener('avatar:viseme:start',     onVisemeStart);
       window.removeEventListener('avatar:viseme',            onViseme);
       window.removeEventListener('avatar:visemes:timeline',  onVisemesTimeline);
+      window.removeEventListener('avatar:visemes:clear',     onVisemesClear);
       window.removeEventListener('avatar:audio:element',     onAudioElement);
       window.removeEventListener('avatar:walk',         onWalk);
       window.removeEventListener('avatar:nod',          onNod);
@@ -768,20 +909,20 @@ function VRMScene({
           lw.ou = lerp(lw.ou, target.ou ?? 0, spd);
           lw.ee = lerp(lw.ee, target.ee ?? 0, spd);
           lw.oh = lerp(lw.oh, target.oh ?? 0, spd);
-          try { em.setValue('aa' as never, lw.aa); } catch {}
-          try { em.setValue('ih' as never, lw.ih); } catch {}
-          try { em.setValue('ou' as never, lw.ou); } catch {}
-          try { em.setValue('ee' as never, lw.ee); } catch {}
-          try { em.setValue('oh' as never, lw.oh); } catch {}
+          setEM(em, 'aa', lw.aa);
+          setEM(em, 'ih', lw.ih);
+          setEM(em, 'ou', lw.ou);
+          setEM(em, 'ee', lw.ee);
+          setEM(em, 'oh', lw.oh);
         } else {
           // ── Procedural fallback: sine-wave when no Azure timeline available ──
           const fastJaw = 0.5 * Math.sin(talkElapsedRef.current * 9.1);
           const slowJaw = 0.2 * Math.sin(talkElapsedRef.current * 3.7);
           const jaw = Math.max(0, Math.min(1, 0.35 + fastJaw + slowJaw));
           lw.aa = jaw; lw.ih = 0; lw.ou = 0; lw.ee = 0; lw.oh = 0;
-          try { em.setValue('aa' as never, jaw); } catch {}
+          setEM(em, 'aa', jaw);
           const oh = Math.max(0, Math.min(0.4, 0.15 * Math.sin(talkElapsedRef.current * 5.3 + 1)));
-          try { em.setValue('oh' as never, oh); } catch {}
+          setEM(em, 'oh', oh);
         }
       } else {
         // Mouth closed: smoothly decay all 5 lip shapes to zero
@@ -792,11 +933,11 @@ function VRMScene({
         lw.ou = lerp(lw.ou, 0, spd);
         lw.ee = lerp(lw.ee, 0, spd);
         lw.oh = lerp(lw.oh, 0, spd);
-        try { em.setValue('aa' as never, lw.aa); } catch {}
-        try { em.setValue('ih' as never, lw.ih); } catch {}
-        try { em.setValue('ou' as never, lw.ou); } catch {}
-        try { em.setValue('ee' as never, lw.ee); } catch {}
-        try { em.setValue('oh' as never, lw.oh); } catch {}
+        setEM(em, 'aa', lw.aa);
+        setEM(em, 'ih', lw.ih);
+        setEM(em, 'ou', lw.ou);
+        setEM(em, 'ee', lw.ee);
+        setEM(em, 'oh', lw.oh);
       }
 
       // 4. Emotion blendshapes — smooth lerp between states
@@ -828,7 +969,7 @@ function VRMScene({
         const current = emotionBlendRef.current[key] ?? 0;
         const next    = lerp(current, target, delta * blendSpeed);
         emotionBlendRef.current[key] = next;
-        try { em.setValue(key as never, next); } catch {}
+        setEM(em, key, next);
       });
 
       // Micro-expressions overlay
@@ -837,18 +978,27 @@ function VRMScene({
         const mIntensity = Math.sin(mProgress * Math.PI) * 0.5;
         const mType = microExprTypeRef.current;
         if (mType === 'eyebrowRaise') {
-          try { em.setValue('lookUp' as never, mIntensity * 0.3); } catch {}
-          try { em.setValue('surprised' as never, (emotionBlendRef.current['surprised'] ?? 0) + mIntensity * 0.3); } catch {}
+          setEM(em, 'lookUp',    mIntensity * 0.3);
+          setEM(em, 'surprised', (emotionBlendRef.current['surprised'] ?? 0) + mIntensity * 0.3);
         } else if (mType === 'squint') {
-          // Subtle squint via angry blend
-          try { em.setValue('angry' as never, (emotionBlendRef.current['angry'] ?? 0) + mIntensity * 0.15); } catch {}
+          setEM(em, 'angry', (emotionBlendRef.current['angry'] ?? 0) + mIntensity * 0.15);
         } else if (mType === 'halfSmile') {
-          try { em.setValue('happy' as never, (emotionBlendRef.current['happy'] ?? 0) + mIntensity * 0.2); } catch {}
+          setEM(em, 'happy', (emotionBlendRef.current['happy'] ?? 0) + mIntensity * 0.2);
         }
       } else if (microExprTypeRef.current !== 'none') {
         microExprTypeRef.current = 'none';
-        try { em.setValue('lookUp' as never, 0); } catch {}
+        setEM(em, 'lookUp', 0);
       }
+
+      // ── Transcribing overlay — additive "attentive listening" blendshapes ──
+      // Applied on top of the emotion system while Whisper is transcribing.
+      // Uses smooth lerp so there's no abrupt pop when the state changes.
+      if (isTranscribingRef.current) {
+        // Relaxed + slight upward gaze = "I'm processing what you said"
+        setEM(em, 'relaxed', lerp(0, 0.45, Math.min(1, delta * 6)));
+        setEM(em, 'lookUp',  lerp(0, 0.18, Math.min(1, delta * 6)));
+      }
+      // Decay when no longer transcribing (handled implicitly by emotion lerp)
 
       // §1-A Spine breathing (+nod) — additive on top of VRMA ───────────────
       if (v.humanoid) {
@@ -978,8 +1128,18 @@ function VRMScene({
         neckGazePitchRef.current = lerp(neckGazePitchRef.current, neckPitch, delta * 6);
         const neckBone = v.humanoid.getRawBoneNode('neck' as never);
         if (neckBone) {
-          neckBone.rotation.y += neckGazeYawRef.current;
-          neckBone.rotation.x += neckGazePitchRef.current;
+          // Use absolute assignment when VRMA is not driving the bone this frame;
+          // otherwise gaze yaw/pitch accumulates unboundedly → 360° spin.
+          const vrmaLiveGaze = vrmaReadyRef.current && !isWalkingNow;
+          const safeYaw   = isNaN(neckGazeYawRef.current)   ? 0 : Math.max(-0.35, Math.min(0.35, neckGazeYawRef.current));
+          const safePitch = isNaN(neckGazePitchRef.current)  ? 0 : Math.max(-0.25, Math.min(0.25, neckGazePitchRef.current));
+          if (vrmaLiveGaze) {
+            neckBone.rotation.y += safeYaw;
+            neckBone.rotation.x += safePitch;
+          } else {
+            neckBone.rotation.y  = safeYaw;   // absolute — no accumulation when VRMA idle
+            neckBone.rotation.x  = safePitch;
+          }
         }
       }
     }
@@ -1290,9 +1450,28 @@ function ExposureSync({ exposure }: { exposure: number }) {
 
 export default function AvatarCanvas({
   vrmUrl = '/models/teach.vrm',
+  fallbackVrmUrl: _fallbackVrmUrl,
 }: {
   vrmUrl?: string;
+  /** Optional fallback VRM path (reserved for future use). */
+  fallbackVrmUrl?: string;
 }) {
+  // ── Canonical renderer lock: prevent double-mount ────────────────────────
+  if (typeof window !== 'undefined') {
+    const w = window as typeof window & { __AVATAR_CANONICAL__?: string };
+    if (w.__AVATAR_CANONICAL__ && w.__AVATAR_CANONICAL__ !== 'AvatarCanvas') {
+      if (process.env.NODE_ENV === 'development') {
+        console.warn(
+          '[Guard] Another avatar renderer is already mounted:',
+          w.__AVATAR_CANONICAL__,
+          '\u2014 AvatarCanvas will not mount.',
+        );
+      }
+      return null as unknown as React.ReactElement;
+    }
+    w.__AVATAR_CANONICAL__ = 'AvatarCanvas';
+  }
+
   const [loaded,    setLoaded]    = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [okOffice,  setOkOffice]  = useState(false);
@@ -1348,7 +1527,12 @@ export default function AvatarCanvas({
       {!loaded && !loadError && (
         <div className={styles.loadingOverlay}>جاري تحميل الدكتور حمزة…</div>
       )}
-      {loadError && (
+      {loadError === 'allFailed' && (
+        <div className="absolute inset-0 z-10">
+          <SimpleAvatarPlaceholder />
+        </div>
+      )}
+      {loadError && loadError !== 'allFailed' && (
         <div className={styles.errorOverlay}>⚠️ تعذّر تحميل الأفاتار</div>
       )}
       {process.env.NODE_ENV === 'development' && (

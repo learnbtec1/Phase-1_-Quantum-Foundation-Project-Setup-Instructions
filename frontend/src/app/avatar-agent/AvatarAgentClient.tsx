@@ -2,7 +2,8 @@
 
 import { useState, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
-import { useAgentAgent } from '@/hooks/useAgentAgent';
+import { useAgentAgent }   from '@/hooks/useAgentAgent';
+import PermissionBanner    from '@/components/PermissionBanner';
 
 // AvatarCanvas is loaded dynamically (SSR off) — it drives all avatar events
 // via window listeners. The vrmUrl prop must remain unchanged.
@@ -44,6 +45,11 @@ function emitAvatarCmd(type: string, detail: Record<string, unknown> = {}) {
   window.dispatchEvent(new CustomEvent(type, { detail }));
 }
 
+/** Primary VRM — file lives at frontend/public/models/teach.vrm.
+ *  Rename/replace with verona.vrm and update this constant when the model is ready. */
+const VERONA_VRM = '/models/teach.vrm';
+const TEACH_VRM  = '/models/teach.vrm';
+
 // ── Session history entry ────────────────────────────────────────────────────
 interface HistoryEntry { role: 'user' | 'teacher'; text: string; emotion?: string }
 
@@ -56,6 +62,9 @@ export default function AvatarAgentClient() {
     lastDialogue,
     emotion,
     error,
+    micNotFound,
+    permissionDenied,
+    resetPermissionDenied,
     toggleListening,
     sendText,
     clearHistory,
@@ -71,12 +80,12 @@ export default function AvatarAgentClient() {
   // Accumulate session history from transcript + dialogue
   useEffect(() => {
     if (lastTranscript) {
-      setHistory(h => [...h.slice(-19), { role: 'user', text: lastTranscript }]);
+      setHistory(h => [...h.slice(-11), { role: 'user', text: lastTranscript }]);
     }
   }, [lastTranscript]);
   useEffect(() => {
     if (lastDialogue) {
-      setHistory(h => [...h.slice(-19), { role: 'teacher', text: lastDialogue, emotion }]);
+      setHistory(h => [...h.slice(-11), { role: 'teacher', text: lastDialogue, emotion }]);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastDialogue]);
@@ -89,7 +98,7 @@ export default function AvatarAgentClient() {
   const onSend = () => {
     if (!userInput.trim()) return;
     sendText(userInput.trim());
-    setHistory(h => [...h.slice(-19), { role: 'user', text: userInput.trim() }]);
+    setHistory(h => [...h.slice(-11), { role: 'user', text: userInput.trim() }]);
     setUserInput('');
     inputRef.current?.focus();
   };
@@ -126,7 +135,7 @@ export default function AvatarAgentClient() {
 
       {/* ── Avatar canvas — fills screen ──────────────────────────────────── */}
       <div className="absolute inset-0">
-        <AvatarCanvas vrmUrl="/models/teach.vrm" />
+        <AvatarCanvas vrmUrl={VERONA_VRM} fallbackVrmUrl={TEACH_VRM} />
       </div>
 
       {/* ── Top-left: persona badge ───────────────────────────────────────── */}
@@ -257,7 +266,17 @@ export default function AvatarAgentClient() {
           </span>
         </div>
 
-        {/* Error display */}
+        {/* Microphone not found banner */}
+        {micNotFound && (
+          <div className="text-xs text-amber-300 bg-amber-950/60 border border-amber-500/40 rounded px-3 py-2 flex items-center gap-2">
+            <span>🎤</span>
+            <span>لم يتم العثور على ميكروفون — يرجى توصيل ميكروفون وإعادة تحميل الصفحة.</span>
+          </div>
+        )}
+
+        {/* Microphone permission denied — handled by PermissionBanner (fixed bottom overlay) */}
+
+        {/* General error display */}
         {error && (
           <div className="text-xs text-red-400 bg-red-950/50 rounded px-3 py-1">
             ⚠️ {error}
@@ -285,10 +304,10 @@ export default function AvatarAgentClient() {
           </button>
           <button
             onClick={toggleListening}
-            disabled={!isConnected}
             className={`px-4 py-2 text-white rounded-md text-sm transition ${
               isListening ? 'bg-red-600 hover:bg-red-500' : 'bg-cyan-600 hover:bg-cyan-500'
-            } disabled:opacity-40`}
+            }`}
+            title={isConnected ? (isListening ? 'إيقاف الاستماع' : 'ابدأ التحدث') : 'الميكروفون يعمل — الباكند غير متصل'}
           >
             {isListening ? '⛔' : '🎤'}
           </button>
@@ -315,6 +334,10 @@ export default function AvatarAgentClient() {
           ))}
         </div>
       </div>
+
+      {/* ── Microphone permission banner (fixed bottom overlay) ──────────── */}
+      <PermissionBanner />
+
     </main>
   );
 }

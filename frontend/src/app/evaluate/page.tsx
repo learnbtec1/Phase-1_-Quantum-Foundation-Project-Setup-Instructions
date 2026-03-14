@@ -41,20 +41,94 @@ const EMOTION_TO_PERF: Record<string, string> = {
 export default function EvaluatePage() {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const avatarRef = useRef<AvatarCanvasRef | null>(null);
-  const handleAvatarReady = useCallback((ref: AvatarCanvasRef) => {
+  // Guard: prevent double-boot from HMR / React StrictMode double-invoke
+  const bootedRef = useRef(false);
+
+  const handleAvatarReady = useCallback(async (ref: AvatarCanvasRef) => {
     avatarRef.current = ref;
-    // ── BOOT: fire AFTER VRM loads + event listeners are registered (fixes timing race) ──
+    // Guard 1: in-memory — blocks HMR re-fire within same module lifecycle
+    if (bootedRef.current) return;
+    bootedRef.current = true;
+    // Guard 2: sessionStorage — blocks same-tab reload double-boot
+    if (typeof window !== 'undefined' && sessionStorage.getItem('avatar_boot_done') === '1') return;
+    // Disable VAD + interrupts while boot greeting plays
+    if (typeof window !== 'undefined') {
+      (window as unknown as Record<string, unknown>).__BOOT_GREETING_ACTIVE__ = true;
+      (window as unknown as Record<string, unknown>).__DISABLE_VAD__ = true;
+      (window as unknown as Record<string, unknown>).__SKIP_AGENT_INTERRUPTS__ = true;
+    }
     // eslint-disable-next-line no-console
-    console.log('%c[HUMANIZE][BOOT] avatar ready → firing boot greeting', 'color:lime;font-weight:bold');
-    const greetingText = 'يا هلا والله! أنا د. حمزة، معلمك في BTEC Business. شو بدنا نتعلم اليوم؟';
-    setMessages((prev) =>
-      prev.length === 0 ? [{ role: 'assistant', content: greetingText }] : prev,
-    );
-    const bootPlan = inferResponsePlan(greetingText);
-    bootPlan.emotion = 'friendly';
-    directAvatarPerformance(bootPlan);
-    ref.speak(greetingText);
-    selfCheckTelemetry({ intent: 'greeting', emotion: 'friendly', gesture: 'openHand', preroll: '0.2s', voice: { rate: 1.00, pitch: '+0st' }, errors: 0 });
+    console.log('%c[HUMANIZE][BOOT] avatar ready → requesting dynamic greeting from AI', 'color:lime;font-weight:bold');
+
+    try {
+      const r = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: '__GREET__', context: { intent: 'greeting', boot: true } }),
+      });
+      if (!r.ok) throw new Error('chat_api_non_200');
+      const data = await r.json();
+
+      // Prefer structured `text` field → fall back to `dialogue` → `reply`
+      const rawText = (typeof data?.text === 'string' && data.text.trim())
+        ? data.text
+        : (typeof data?.dialogue === 'string' && data.dialogue.trim())
+          ? data.dialogue
+          : String(data?.reply ?? '');
+      const cleanText = rawText
+        .replace(/\*[^*]+\*/g, '')
+        .replace(/\[EMOTION:\s*\w+\]/gi, '')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim();
+
+      if (cleanText) {
+        setMessages((prev) => prev.length === 0 ? [{ role: 'assistant', content: cleanText }] : prev);
+        const bootPlan = inferResponsePlan(cleanText);
+        const backendEmotion = String(data?.emotion ?? data?.tts?.emotion ?? '').toLowerCase();
+        bootPlan.emotion = (backendEmotion || 'friendly') as typeof bootPlan.emotion;
+        directAvatarPerformance(bootPlan);
+        selfCheckTelemetry({ intent: 'greeting', emotion: bootPlan.emotion, gesture: 'openHand', preroll: '0.2s', voice: { rate: 1.00, pitch: '+0st' }, errors: 0 });
+      }
+
+      // Prefer server audioUrl → fall back to base64 → cancel Web Speech first
+      const audioUrl: string | undefined = data?.tts?.audioUrl;
+      const audioBase64: string | undefined = data?.tts?.audioBase64 ?? data?.audio_wav_base64;
+      const audioSrc = audioUrl ?? (audioBase64 ? `data:audio/wav;base64,${audioBase64}` : undefined);
+      const _clearBootFlags = () => {
+        if (typeof window === 'undefined') return;
+        (window as unknown as Record<string, unknown>).__BOOT_GREETING_ACTIVE__ = false;
+        (window as unknown as Record<string, unknown>).__DISABLE_VAD__ = false;
+        (window as unknown as Record<string, unknown>).__SKIP_AGENT_INTERRUPTS__ = false;
+      };
+      if (audioSrc) {
+        try {
+          if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+          (window as Window & { __SERVER_TTS_ACTIVE__?: boolean }).__SERVER_TTS_ACTIVE__ = true;
+          const a = new Audio(audioSrc);
+          a.addEventListener('ended', _clearBootFlags, { once: true });
+          a.addEventListener('error', _clearBootFlags, { once: true });
+          window.dispatchEvent(new CustomEvent('avatar:audio:element', { detail: { audio: a } }));
+          await a.play().catch(() => { _clearBootFlags(); /* autoplay policy */ });
+        } catch { _clearBootFlags(); }
+      } else if (cleanText) {
+        _clearBootFlags();
+        // Fallback: female Web-Speech via AvatarCanvas event listener
+        window.dispatchEvent(new CustomEvent('avatar:speak:text', { detail: { text: cleanText } }));
+      } else {
+        _clearBootFlags();
+      }
+
+      if (typeof window !== 'undefined') sessionStorage.setItem('avatar_boot_done', '1');
+    } catch {
+      // eslint-disable-next-line no-console
+      console.warn('[Boot] dynamic greet failed — falling back to web-speech');
+      if (typeof window !== 'undefined') {
+        (window as unknown as Record<string, unknown>).__BOOT_GREETING_ACTIVE__ = false;
+        (window as unknown as Record<string, unknown>).__DISABLE_VAD__ = false;
+        (window as unknown as Record<string, unknown>).__SKIP_AGENT_INTERRUPTS__ = false;
+        window.dispatchEvent(new CustomEvent('avatar:speak:text', { detail: { text: 'مرحباً! جاهزون للانطلاق.' } }));
+      }
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -65,6 +139,15 @@ export default function EvaluatePage() {
   const sttRef = useRef<{ start: (...a: any[]) => void; stop: () => void } | null>(null);
   // Hybrid Persona Kernel: silence detection timer ref
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clear stale boot flag on each fresh hard-load (not HMR)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const nav = (performance?.getEntriesByType?.('navigation') ?? [])[0] as PerformanceNavigationTiming | undefined;
+    if (!nav || nav.type !== 'back_forward') {
+      sessionStorage.removeItem('avatar_boot_done');
+    }
+  }, []);
 
   // Full Human Persona Kernel: BOOT log (greeting now fires in handleAvatarReady after VRM loads)
   useEffect(() => {

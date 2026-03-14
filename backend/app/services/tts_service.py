@@ -117,7 +117,61 @@ def _chunk_to_ssml(chunk: str) -> str:
     return ''.join(_render_segment(k, v) for k, v in _split_segments(chunk))
 
 
-def _build_ssml(text: str, voice_name: str, rate: float = 0.95) -> str:
+def _clean_tts_text(text: str) -> str:
+    """
+    Final defensive pass: strip all formatting markers before passing text to Azure.
+
+    agent_ws.py already strips emotion/action tags via _parse_reply(), but edge cases
+    still reach here — e.g. multi-word emotion names (\x5bEMOTION: strict evaluation\x5d),
+    lowercase variants (\x5bemotion: sad\x5d), nested brackets, or markdown that the LLM
+    occasionally outputs inside the dialogue line.  Azure TTS reads every character it
+    receives, so ANY residual bracket/asterisk content produces unintended English speech.
+
+    Strips:
+      - [EMOTION: tag], [ACTION: ...] and ANY [...] sequence regardless of content
+      - *action stage directions* and **bold** markers (1 or 2 asterisks)
+      - __underscore emphasis__
+      - Redundant whitespace / blank lines produced by the above deletions
+    """
+    # Remove any [...] block (greedy-safe: max 300 chars, no nested brackets)
+    text = _re.sub(r'\[[^\]]{0,300}\]', '', text)
+    # Remove *...* and **...** blocks (action lines, markdown bold)
+    text = _re.sub(r'\*{1,2}[^*]{0,400}\*{1,2}', '', text)
+    # Remove __emphasis__
+    text = _re.sub(r'_{2}[^_]{0,200}_{2}', '', text)
+    # Collapse extra spaces / blank lines left by the deletions above
+    text = _re.sub(r'[ \t]{2,}', ' ', text)
+    text = _re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+# ── Emotion → SSML prosody mapping ─────────────────────────────────────────
+# Tuple: (rate_float, styledegree_str, pitch_str)
+# styledegree controls Azure express-as style intensity (0.0 – 2.0).
+# pitch_str is a relative percentage applied globally to the utterance.
+_EMOTION_PROSODY: dict[str, tuple[float, str, str]] = {
+    'thinking':    (0.80, '0.9', '+1%'),
+    'sad':         (0.82, '1.0', '-2%'),
+    'concerned':   (0.86, '1.0', '+0%'),
+    'empathetic':  (0.87, '1.1', '+1%'),
+    'strict':      (0.87, '1.3', '+0%'),
+    'calm':        (0.92, '1.0', '+1%'),
+    'relax':       (0.92, '1.0', '+1%'),
+    'neutral':     (0.93, '1.0', '+2%'),
+    'attentive':   (0.97, '1.1', '+2%'),
+    'curious':     (0.97, '1.1', '+2%'),
+    'friendly':    (0.97, '1.2', '+2%'),
+    'proud':       (1.00, '1.3', '+2%'),
+    'happy':       (1.02, '1.4', '+3%'),
+    'encouraging': (1.05, '1.5', '+3%'),
+    'excited':     (1.10, '1.8', '+4%'),
+    'surprised':   (1.08, '1.6', '+4%'),
+    'celebrate':   (1.12, '2.0', '+5%'),
+    'celebration': (1.12, '2.0', '+5%'),
+}
+
+
+def _build_ssml(text: str, voice_name: str, rate: float = 0.95, emotion: str = 'neutral') -> str:
     """
     Build production-quality SSML for ar-JO-TaimNeural:
 
@@ -126,8 +180,16 @@ def _build_ssml(text: str, voice_name: str, rate: float = 0.95) -> str:
     • Other English words → en-GB phonetics (no more Arabic letter-reading)
     • Sentence-boundary breath pauses (200–320 ms)
     • Questions → ``<prosody pitch="+8%">`` for natural Arabic intonation rise
-    • Global rate + 2 % pitch lift above neutral baseline
+    • Emotion-aware rate/styledegree/pitch via _EMOTION_PROSODY table
     """
+    # Override rate/styledegree/pitch from emotion table when emotion is known
+    prosody_entry = _EMOTION_PROSODY.get((emotion or 'neutral').lower())
+    if prosody_entry:
+        rate, styledegree, pitch_extra = prosody_entry
+    else:
+        styledegree = '1.2'
+        pitch_extra = '+2%'
+
     rate_pct = f"{int(round(rate * 100))}%"
 
     tokens = _SENT_BOUNDARY.split(text)
@@ -165,9 +227,9 @@ def _build_ssml(text: str, voice_name: str, rate: float = 0.95) -> str:
         f'xmlns="http://www.w3.org/2001/10/synthesis" '
         f'xmlns:mstts="https://www.w3.org/2001/mstts" '
         f'xml:lang="ar-JO">'
-        f'<voice name="{voice_name}">'
-        f'<mstts:express-as style="friendly" styledegree="1.2">'
-        f'<prosody rate="{rate_pct}" pitch="+2%">'
+        f'<voice name="{voice_name}" xml:lang="ar-JO">'
+        f'<mstts:express-as style="friendly" styledegree="{styledegree}" xml:lang="ar-JO">'
+        f'<prosody rate="{rate_pct}" pitch="{pitch_extra}">'
         f'{body}'
         f'</prosody>'
         f'</mstts:express-as>'
@@ -244,6 +306,7 @@ class AzureTTSService:
         text: str,
         voice_name: Optional[str] = None,
         timeout: Optional[float] = None,
+        emotion: str = 'neutral',
     ) -> Tuple[bytes, List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Synthesize *text* to MP3 bytes with temporal cues.
@@ -259,9 +322,9 @@ class AzureTTSService:
             - List of viseme cues [{"t": ms, "id": viseme_id}, ...].
             - List of word boundary cues [{"t": ms, "w": "word"}, ...].
         """
-        text = (text or "").strip()
+        text = _clean_tts_text((text or "").strip())
         if not text:
-            raise ValueError("TTS text cannot be empty")
+            raise ValueError("TTS text cannot be empty after cleanup")
 
         if not _SDK_AVAILABLE:
             raise RuntimeError(
@@ -273,7 +336,7 @@ class AzureTTSService:
         if not voice:
             raise RuntimeError("No voice name provided and no default configured.")
 
-        ssml = _build_ssml(text, voice, self._prosody_rate)
+        ssml = _build_ssml(text, voice, self._prosody_rate, emotion=emotion)
 
         # Ensure synthesizer is ready
         synthesizer = await self._ensure_synthesizer()

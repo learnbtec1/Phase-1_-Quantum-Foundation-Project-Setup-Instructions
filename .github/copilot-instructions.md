@@ -1,5 +1,24 @@
 # NEXUS PLATFORM v3.0 — AI Coding Agent Guide
 
+## ⚠️ ذاكرة المشروع — اقرأ أولاً
+
+**المصدر الأول للحقيقة**: `F:\MEMORY\PROJECT_MEMORY.md`
+- يحتوي: الوضع الحالي + القواعد الحرجة + أنماط الكود + نتائج الاختبارات
+- **اقرأه قبل أي تعديل** — خصوصاً لملفات Avatar/TTS/Grading
+- **حدّثه بعد كل جلسة** بآخر التعديلات
+
+### ملخص القواعد الحرجة
+| القاعدة | القيمة |
+|---------|--------|
+| Frontend port | **3011** (ليس 3000) |
+| TTS Voice | `ar-SA-ZariyahNeural` (ثابت) |
+| `v.update(delta)` | قبل bone rotation دائماً |
+| `combineSkeletons()` | **محظور** في evaluate/ |
+| `hooks/` path | root, ليس `src/hooks/` |
+| localStorage keys | لا تغيّرها (nexus-auth, nexus-assessments, nexus-vr, btec_platform_progress) |
+
+---
+
 ## Architecture Overview
 **Multi-tier system**: Next.js 14+ frontend (RTL Arabic UI) + dual backends (Express.js + FastAPI) + Python teacher GUI.
 

@@ -1,8 +1,9 @@
 /**
- * Client-side TTS: speaks text via /api/tts-with-timing, dispatches avatar:speak for lip-sync.
+ * Client-side TTS: speaks text via /api/tts-proxy, dispatches avatar:speak for lip-sync.
  * Supports avatar:interrupt to stop playback when user types or speaks.
  * Phase 2: schedules avatar:viseme events from real word-boundary timing (edge-tts).
  */
+import toast from 'react-hot-toast';
 import type { WordTiming } from '@/ai/lipsync/timing';
 import { azureVisemeToWeights } from '@/ai/lipsync/azureViseme';
 
@@ -69,14 +70,14 @@ const _visemeTimers: ReturnType<typeof setTimeout>[] = [];
 
 /** Wrap raw 16-bit mono PCM bytes (Kokoro output) in a valid WAV container. */
 function pcmBytesToWavBlob(pcmBytes: Uint8Array, sampleRate: number): Blob {
-  const numChannels  = 1;
+  const numChannels   = 1;
   const bitsPerSample = 16;
-  const byteRate  = sampleRate * numChannels * (bitsPerSample / 8);
-  const blockAlign = numChannels * (bitsPerSample / 8);
-  const dataSize   = pcmBytes.length;
-  const bufferSize = 44 + dataSize;
-  const buffer = new ArrayBuffer(bufferSize);
-  const view   = new DataView(buffer);
+  const byteRate      = sampleRate * numChannels * (bitsPerSample / 8);
+  const blockAlign    = numChannels * (bitsPerSample / 8);
+  const dataSize      = pcmBytes.length;
+  const bufferSize    = 44 + dataSize;
+  const buffer        = new ArrayBuffer(bufferSize);
+  const view          = new DataView(buffer);
   const writeStr = (offset: number, s: string) => {
     for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
   };
@@ -103,9 +104,13 @@ function pcmBytesToWavBlob(pcmBytes: Uint8Array, sampleRate: number): Blob {
 export function stopTTS(): void {
   // Cancel pending viseme events
   while (_visemeTimers.length) clearTimeout(_visemeTimers.pop()!);
+
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('avatar:viseme', { detail: { id: 0, weights: { aa: 0, ih: 0, ou: 0 } } }));
+    window.dispatchEvent(new CustomEvent('avatar:viseme', {
+      detail: { id: 0, weights: { aa: 0, ih: 0, ou: 0 } }
+    }));
   }
+
   if (currentAudio) {
     try {
       currentAudio.pause();
@@ -113,88 +118,124 @@ export function stopTTS(): void {
     } catch { /* ignore */ }
     currentAudio = null;
   }
+
   if (currentUrl) {
     try {
-      URL.revokeObjectURL(currentUrl);
+      // لا تُلغِ إلا لو كان blob: URL أنشأناه نحن
+      if (currentUrl.startsWith('blob:')) URL.revokeObjectURL(currentUrl);
     } catch { /* ignore */ }
     currentUrl = null;
   }
+
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('avatar:speak:end'));
   }
 }
 
 /**
- * Speak text using TTS API. Returns true if successful, false to use Web Speech fallback.
+ * Speak text using TTS API (via /api/tts-proxy). Returns true on success, false to use Web Speech fallback.
+ * - Prefers server-provided audioUrl (no blob lifecycle issues).
+ * - Falls back to audioBase64 -> Blob URL (revoked only after ended/error).
+ * - Cancels Web‑Speech before playing to avoid echo.
+ * - Retries audio.play() once if AudioContext/device balks.
  */
 export async function speakWithTTS(
   text: string,
   options?: SpeakOptions
 ): Promise<boolean> {
   if (typeof window === 'undefined' || !text?.trim()) return false;
+
+  // Guard future concurrent speaks
   const mySid = ++_ttsSessionId;
   stopTTS();
 
+  // Helper: retry play() once on failure
+  const safePlay = async (a: HTMLAudioElement) => {
+    try { await a.play(); return true; }
+    catch {
+      // Small grace then retry once
+      await new Promise(r => setTimeout(r, 400));
+      try { await a.play(); return true; } catch { return false; }
+    }
+  };
+
   try {
-    const res = await fetch('/api/tts-with-timing', {
+    // Compose payload for proxy; keep your emotion/rate mapping
+    const payload: any = {
+      text,
+      speed:   options?.rate ?? EMOTION_SPEED[options?.emotion ?? ''] ?? 0.97,
+      emotion: options?.emotion ?? 'neutral',
+      ...(options?.pitch ? { pitch: options.pitch } : {}),
+      // Auto-select Jordanian Arabic voice for Arabic script unless overridden
+      ar_voice: options?.arVoice ?? (_ARABIC_RE.test(text) ? 'male' : undefined),
+      format: 'wav',
+      timing_mode: 'native'
+    };
+
+    const res = await fetch('/api/tts-proxy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text,
-        speed:   options?.rate ?? EMOTION_SPEED[options?.emotion ?? ''] ?? 0.97,
-        emotion: options?.emotion ?? 'neutral',
-        ...(options?.pitch   ? { pitch:    options.pitch }                   : {}),
-        // Auto-select Jordanian Arabic voice when text contains Arabic script.
-        // Caller can override with arVoice: 'female' for the فورينا character.
-        ar_voice: options?.arVoice ?? (_ARABIC_RE.test(text) ? 'male' : undefined),
-      }),
+      body: JSON.stringify(payload),
     });
 
     if (!res.ok) return false;
+    const j = await res.json().catch(() => null);
+    if (!j?.ok || !j?.tts) return false;
 
-    const data = await res.json().catch(() => null);
-    const audioBase64 = data?.audio_base64;
-    const wordTimings = (data?.word_timings ?? []) as WordTiming[];
-    const sampleRate = data?.sample_rate ?? 24000;
+    // Extract meta
+    const fmt        = (j.tts.format ?? 'wav') as string;
+    const timingMode = (j.tts.timing_mode ?? 'native') as string;
+    const sampleRate = j.tts.sampleRate ?? 24000;
 
-    if (!audioBase64) return false;
+    // Prefer audioUrl if present
+    let url: string | null = j.tts.audioUrl || null;
+    let createdObjectUrl = false;
 
-    const binary = Uint8Array.from(atob(audioBase64), (c) => c.charCodeAt(0));
-    // Backend returns format:"pcm" for Kokoro (raw int16) or format:"mp3" for edge-tts/gTTS.
-    const fmt = (data?.format ?? 'mp3') as string;
-    const blob = fmt === 'pcm'
-      ? pcmBytesToWavBlob(binary, sampleRate)
-      : new Blob([binary], { type: 'audio/mpeg' });
-    const url = URL.createObjectURL(blob);
-    currentUrl = url;
+    // If only base64 present, build Blob URL
+    if (!url && j.tts.audioBase64) {
+      const b64 = j.tts.audioBase64 as string;
+      const binary = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const blob =
+        fmt === 'pcm'
+          ? pcmBytesToWavBlob(binary, sampleRate)
+          : fmt === 'wav'
+            ? new Blob([binary], { type: 'audio/wav' })
+            : new Blob([binary], { type: 'audio/mpeg' });
+      url = URL.createObjectURL(blob);
+      createdObjectUrl = true;
+    }
+
+    if (!url) return false;
+
+    // Warn when format/timing is suboptimal (informational only)
+    if (fmt !== 'wav' || timingMode === 'approx') {
+      toast('TTS: دقة تقريبية للتوقيتات — كل شيء يعمل 👍', {
+        icon: '⚠️',
+        duration: 3500,
+        style: { direction: 'rtl', fontFamily: 'Cairo, sans-serif', fontSize: '13px' },
+      });
+    }
+
+    // Cancel any Web‑Speech before WAV to prevent echo
+    try { if ('speechSynthesis' in window) window.speechSynthesis.cancel(); } catch {}
+
+    // Allocate and bind audio
     const audio = new Audio(url);
     currentAudio = audio;
+    currentUrl   = url;
 
-    const cleanup = () => {
-      URL.revokeObjectURL(url);
-      if (mySid === _ttsSessionId) {
-        currentAudio = null;
-        currentUrl   = null;
-      }
-      window.dispatchEvent(new CustomEvent('avatar:speak:end'));
-      options?.onEnd?.();
-    };
+    // Visemes and word timings
+    const visemeEvents = (j.tts.viseme_events ?? []) as { offset_ms: number; viseme_id: number }[];
+    const wordTimings  = (j.tts.word_timings  ?? []) as WordTiming[];
 
-    audio.addEventListener('ended', cleanup);
-    audio.addEventListener('error', cleanup);
-
+    // Start callbacks & lip‑sync events
     options?.onStart?.();
-
-    window.dispatchEvent(
-      new CustomEvent('avatar:speak', {
-        detail: { text, timings: wordTimings, sampleRate, audio },
-      })
-    );
+    window.dispatchEvent(new CustomEvent('avatar:speak', {
+      detail: { text, timings: wordTimings, sampleRate, audio },
+    }));
     window.dispatchEvent(new CustomEvent('avatar:speak:start'));
-    // ── Phase 2: Real viseme scheduling from edge-tts word-boundary events ──
-    // viseme_events: [{ offset_ms, viseme_id }] — fired at correct audio position
-    type VisemeEvent = { offset_ms: number; viseme_id: number };
-    const visemeEvents = (data?.viseme_events ?? []) as VisemeEvent[];
+
+    // Schedule visemes (Azure mapping)
     if (visemeEvents.length > 0) {
       window.dispatchEvent(new CustomEvent('avatar:viseme:start'));
       visemeEvents.forEach((ve) => {
@@ -208,27 +249,23 @@ export async function speakWithTTS(
         );
       });
     }
-    // ── Phase 10: Sentence-boundary head nods ──────────────────────────────
-    // When we have actual word timings, schedule a nod 120ms after each sentence-
-    // ending word — more accurate than director’s character-count estimates.
+
+    // Sentence-boundary nods (timing or heuristic)
     if (wordTimings.length > 0) {
       const sentenceEnd = /[.!?\u061f\u060c]+$/;
       wordTimings.forEach((wt) => {
-        if (sentenceEnd.test(wt.word ?? '') && wt.end_time > 0) {
+        if (sentenceEnd.test((wt.word ?? '')) && wt.end_time > 0) {
           setTimeout(() => {
             window.dispatchEvent(new CustomEvent('avatar:nod', {
               detail: {
                 intensity: 0.16 + Math.random() * 0.18,
-                // AvatarCanvas onNod expects seconds and multiplies ×1000 internally
-                duration: (360 + Math.random() * 160) / 1000,
+                duration:  (360 + Math.random() * 160) / 1000
               },
             }));
-          }, wt.end_time + 120);   // end_time is already in ms from Kokoro; add 120ms grace
+          }, wt.end_time + 120);
         }
       });
-    }
-    // Fallback: character-count-based nods when word timings are absent
-    else if (text.split(/[.!?\u061f]+/).filter(s => s.trim().length > 3).length > 1) {
+    } else if (text.split(/[.!?\u061f]+/).filter(s => s.trim().length > 3).length > 1) {
       const sentences = text.split(/[.!?\u061f]+/).filter(s => s.trim().length > 3);
       const totalMs   = Math.max(1500, text.length * 190);
       let cumLen = 0;
@@ -237,35 +274,54 @@ export async function speakWithTTS(
         const delay = Math.max(300, (cumLen / text.length) * totalMs) + 80;
         setTimeout(() => {
           window.dispatchEvent(new CustomEvent('avatar:nod', {
-            // AvatarCanvas onNod expects seconds and multiplies ×1000 internally
-            detail: { intensity: 0.14 + Math.random() * 0.16, duration: (340 + Math.random() * 130) / 1000 },
+            detail: {
+              intensity: 0.14 + Math.random() * 0.16,
+              duration:  (340 + Math.random() * 130) / 1000
+            },
           }));
         }, delay);
       });
     }
 
-    if (mySid !== _ttsSessionId) {
-      // Preempted by a subsequent speakWithTTS call — abort without playing.
-      URL.revokeObjectURL(url);
+    // Cleanup that respects whether we created the blob URL
+    const cleanup = () => {
+      try {
+        if (createdObjectUrl && url) URL.revokeObjectURL(url);
+      } catch { /* ignore */ }
+      if (mySid === _ttsSessionId) {
+        currentAudio = null;
+        currentUrl   = null;
+      }
+      window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+      options?.onEnd?.();
+    };
+
+    audio.addEventListener('ended', cleanup, { once: true });
+    audio.addEventListener('error', cleanup,  { once: true });
+
+    // Finally, play with one retry on failure
+    const ok = await (async () => {
+      try { await audio.play(); return true; }
+      catch {
+        await new Promise(r => setTimeout(r, 400));
+        try { await audio.play(); return true; } catch { return false; }
+      }
+    })();
+
+    if (!ok) {
+      cleanup();
       return false;
     }
 
-    await audio.play();
+    (window as any).__SERVER_TTS_ACTIVE__ = true;
     return true;
+
   } catch {
-    // audio.play() may reject with NotAllowedError (autoplay policy) or
-    // any of the earlier awaits may throw. In every case we must dispatch
-    // avatar:speak:end so the UI never gets stuck with a permanently-open
-    // mouth after avatar:speak:start was already dispatched.
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('avatar:speak:end'));
-    }
+    // Always close the mouth & cleanup on failure
+    try { window.dispatchEvent(new CustomEvent('avatar:speak:end')); } catch {}
     options?.onEnd?.();
     if (mySid === _ttsSessionId) {
-      // Revoke the blob URL that was allocated before play() was called.
-      if (currentUrl) {
-        try { URL.revokeObjectURL(currentUrl); } catch { /* ignore */ }
-      }
+      try { if (currentUrl?.startsWith('blob:')) URL.revokeObjectURL(currentUrl); } catch { /* ignore */ }
       currentAudio = null;
       currentUrl   = null;
     }

@@ -2,8 +2,9 @@ import type { Metadata } from 'next';
 import { Suspense } from 'react';
 import AvatarAgentClient from './AvatarAgentClient';
 
-// [COPILOT_FORCE_DYNAMIC] Prevent stale RSC optimisation that causes 500 on HMR refresh
-export const dynamic = 'force-dynamic';
+// [COPILOT_FORCE_DYNAMIC] Removed: force-dynamic caused Cache-Control: no-store which blocks bfcache.
+// Using 'auto' lets Next.js cache the RSC shell while the 'use client' component handles its own state.
+export const dynamic = 'auto';
 
 export const metadata: Metadata = {
   title: 'Avatar Agent — NEXUS',

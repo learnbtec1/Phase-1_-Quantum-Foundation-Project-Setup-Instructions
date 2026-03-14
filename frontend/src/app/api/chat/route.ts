@@ -1,10 +1,13 @@
 /**
  * Chat bridge: forwards to backend POST /api/v1/chat
  * Accepts { message } and returns { reply } without exposing API keys.
- * 503=unreachable, 502=upstream error, 408=timeout.
+ * Always returns HTTP 200 — errors are encoded as { ok: false, error: '...' }.
  * Falls back to structured OpenAI call (with full avatar metadata) when backend
  * is unreachable. If no API key, falls back to LOCAL_PERSONA static replies.
  */
+export const runtime = 'nodejs';
+export const dynamic  = 'force-dynamic';
+
 import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
@@ -152,10 +155,8 @@ Map to: teach_btec | answer_question | assist_request | calm_student | friendly_
 • إذا كرر الطالب نفس الخطأ → زد نسبة التشجيع
 • إذا تتالت إجابات صحيحة → قلل السقالات تدريجياً
 
-══ BOOT ══
-عند بداية الجلسة: *(أتنفس بعمق، أبتسم ابتسامة عريضة، عيناي تلمعان حماساً)*
-"يا هلا والله! أنا د. حمزة، معلمك في BTEC Business. نورت، شو بدنا نتعلم اليوم؟"
-emotion=friendly, strategy=greet, intent=greeting.
+══ BOOT / GREETING ══
+عند أول رسالة أو '__GREET__': ولّد ترحيباً أصيلاً حاراً من الطبقة 4 (اللاوعي التربوي) — بلا نص مجمّد — كل جلسة ترحيب فريد يعكس الذكاء العاطفي للـ 20 طبقة.
 
 ══ SAFETY ══
 • ابقَ ضمن محتوى BTEC التعليمي فقط. للخروج: "هاد خارج تخصصي يا صديقي! خلينا نرجع على BTEC."
@@ -302,6 +303,87 @@ function localFallback(message: string): string | null {
 const MAX_MESSAGE_LENGTH = 4000;
 const FETCH_TIMEOUT_MS = 30_000;
 
+/**
+ * __GREET__ fast-path: calls backend tutor to generate a dynamic greeting,
+ * then synthesises it with the female Arabic TTS voice.
+ * Returns a structured payload the client can play directly (audioBase64 → data URL).
+ */
+async function greetWithTTS(
+  reqId: string,
+  base: string,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const chatUpstream = process.env.CHAT_BACKEND_URL || `${base.replace(/\/$/, '')}/api/v1/chat`;
+    const ttsUpstream  = `${base.replace(/\/$/, '')}/api/v1/tts-with-timing`;
+
+    // Step 1: ask tutor LLM for a dynamic greeting (no fixed text)
+    const chatRes = await fetch(chatUpstream, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Request-ID': reqId },
+      body:    JSON.stringify({ message: '__GREET__', context: { boot: true, intent: 'greeting' } }),
+      signal:  AbortSignal.timeout(15_000),
+    });
+    if (!chatRes.ok) return null;
+    const chatData = await chatRes.json().catch(() => null);
+    if (!chatData) return null;
+
+    const rawText = String(chatData?.dialogue ?? chatData?.reply ?? '').trim();
+    const text = rawText
+      .replace(/\*[^*]+\*/g, '')
+      .replace(/\[EMOTION:\s*\w+\]/gi, '')
+      .replace(/[ \t]{2,}/g, ' ')
+      .trim();
+    if (!text) return null;
+
+    const emotion  = String(chatData?.emotion  ?? 'friendly');
+    const intent   = String(chatData?.intent   ?? 'greeting');
+    const strategy = String(chatData?.strategy ?? 'greet');
+
+    // Step 2: synthesise with female Arabic voice
+    const voiceFemale = process.env.TTS_ARABIC_VOICE_FEMALE || 'ar-SA-ZariyahNeural';
+    const ttsRes = await fetch(ttsUpstream, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Request-ID': reqId },
+      body:    JSON.stringify({
+        text,
+        voice:       voiceFemale,
+        language:    'ar-SA',
+        format:      'wav',
+        sample_rate: 24000,
+        with_timing: true,
+      }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    let ttsData: Record<string, unknown> | null = null;
+    if (ttsRes.ok) ttsData = await ttsRes.json().catch(() => null);
+
+    const rawBase64 = (ttsData?.audio_wav_base64 as string | null) ?? null;
+    const audioUrl  = rawBase64 ? `data:audio/wav;base64,${rawBase64}` : null;
+
+    return {
+      ok:       true,
+      text,
+      dialogue: text,
+      reply:    text,
+      emotion,
+      intent,
+      strategy,
+      source:   'greet',
+      tts: {
+        provider:    ttsData?.provider    ?? 'edge-tts',
+        voice:       ttsData?.voice       ?? voiceFemale,
+        format:      ttsData?.format      ?? 'wav',
+        sampleRate:  ttsData?.sample_rate ?? 24000,
+        audioBase64: rawBase64,
+        audioUrl,
+        visemes:     Array.isArray(ttsData?.viseme_events) ? (ttsData.viseme_events as unknown[]).length : 0,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(req: NextRequest) {
   const reqId = randomUUID();
   const headers: Record<string, string> = { "X-Request-ID": reqId };
@@ -319,6 +401,13 @@ export async function POST(req: NextRequest) {
 
     const base = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
     const upstream = process.env.CHAT_BACKEND_URL || `${base.replace(/\/$/, "")}/api/v1/chat`;
+
+    // ── __GREET__ fast-path: dynamic greeting + server TTS ───────────────────────
+    if (message === '__GREET__' && payload?.context?.boot === true) {
+      const greetPayload = await greetWithTTS(reqId, base);
+      if (greetPayload) return NextResponse.json(greetPayload, { headers });
+      // fall through to regular chat path if both steps fail
+    }
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -372,8 +461,8 @@ export async function POST(req: NextRequest) {
       }
 
       return NextResponse.json(
-        { error: "Backend unreachable", reqId },
-        { status: 503, headers }
+        { ok: false, error: "Backend unreachable", reqId },
+        { status: 200, headers }
       );
     }
     clearTimeout(timeoutId);
@@ -381,8 +470,8 @@ export async function POST(req: NextRequest) {
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       return NextResponse.json(
-        { error: "Upstream error", details: text.slice(0, 300), reqId },
-        { status: 502, headers }
+        { ok: false, error: "Upstream error", details: text.slice(0, 300), reqId },
+        { status: 200, headers }
       );
     }
 
@@ -441,10 +530,11 @@ export async function POST(req: NextRequest) {
     const isTimeout = err instanceof Error && err.name === "AbortError";
     return NextResponse.json(
       {
+        ok: false,
         error: isTimeout ? "Timeout contacting upstream" : "Server error",
         reqId,
       },
-      { status: isTimeout ? 408 : 500, headers }
+      { status: 200, headers }
     );
   }
 }

@@ -1,5 +1,18 @@
 'use client';
 
+/**
+ * @deprecated VRMAvatar.tsx is the LEGACY avatar component and must NOT be used.
+ *
+ * The canonical VRM renderer is AvatarCanvas.tsx (avatar-agent/AvatarCanvas.tsx).
+ * AvatarCanvas is a self-contained R3F canvas that loads /models/teach.vrm directly
+ * and reacts to window avatar:* events dispatched by useAvatarAgent.ts.
+ *
+ * VRMAvatar.tsx is retained only as a historical reference; it will be removed in
+ * Sprint 2. Any new feature work MUST target AvatarCanvas.tsx exclusively.
+ *
+ * DO NOT import, mount, or extend this file.
+ */
+
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { Float } from '@react-three/drei';
@@ -965,4 +978,10 @@ const VRMAvatarInner = forwardRef<VRMAvatarRef, BoardroomAvatarProps>(function V
   );
 });
 
-export default VRMAvatarInner;
+const __LEGACY_ERR__ = '[VRMAvatar] LEGACY component mounted. Use AvatarCanvas.tsx instead.';
+
+export default function VRMAvatarDisabled() {
+  if (process.env.NODE_ENV === 'development') { throw new Error(__LEGACY_ERR__); }
+  console.error(__LEGACY_ERR__);
+  return null as unknown as React.ReactElement;
+}

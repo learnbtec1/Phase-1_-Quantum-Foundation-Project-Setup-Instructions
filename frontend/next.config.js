@@ -6,6 +6,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const nextConfig = {
+  // standalone: bundles server runtime + deps; required for multi-stage Docker production image
+  output: process.env.NODE_ENV === 'production' ? 'standalone' : undefined,
   outputFileTracingRoot: __dirname,
   reactStrictMode: false, // ⚠️ true يكسر WebGL context في dev mode
 

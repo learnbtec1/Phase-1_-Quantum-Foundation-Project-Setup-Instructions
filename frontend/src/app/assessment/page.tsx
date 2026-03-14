@@ -193,7 +193,27 @@ export default function AssessmentPage() {
     return text;
   };
 
-  const extractDocxText = async (file: File) => (await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() })).value;
+  /**
+   * استخراج نص docx عبر السيرفر (python-docx) بدلاً من mammoth.
+   * python-docx يقرأ الجداول بشكل صحيح — mammoth يتجاهلها.
+   */
+  const extractDocxText = async (file: File): Promise<string> => {
+    try {
+      const fd = new FormData();
+      fd.append('files', file, file.name);
+      const res = await fetch('/api/extract-text', { method: 'POST', body: fd });
+      if (!res.ok) {
+        // fallback to mammoth if backend unavailable
+        console.warn('[extractDocxText] backend failed, falling back to mammoth');
+        return (await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() })).value;
+      }
+      const data = await res.json();
+      return data.text || '';
+    } catch {
+      // fallback to mammoth
+      return (await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() })).value;
+    }
+  };
 
   // دالة البوربوينت المحسنة (DOMParser)
   const extractPptxText = async (file: File) => {
@@ -317,6 +337,30 @@ export default function AssessmentPage() {
     try { localStorage.setItem('nexus-assessment-history', JSON.stringify(next)); } catch { /* empty */ }
   };
 
+  /**
+   * Persist a compact, avatar-ready grade snapshot to localStorage so that
+   * useAvatarAgent.ts can inject it into the next WebSocket message as
+   * `grade_result: { final_grade, subject, criteria_summary }`.
+   * This lets Dr. Hamza say things like "أرى إنك حصلت على Merit…" naturally.
+   */
+  const saveLastGrade = (evalResult: EvaluationResult) => {
+    try {
+      const criteria = evalResult.data.criteria ?? [];
+      const criteriaSummary = criteria
+        .map(c => `${c.code}: ${c.verdict === 'Achieved' ? '✓ Achieved' : '✗ Not Achieved'}`)
+        .join(' | ');
+      const snapshot = {
+        final_grade:       evalResult.data.final_grade || 'PENDING',
+        subject:           selectedSubject || '—',
+        criteria_summary:  criteriaSummary,
+        achieved:          evalResult.data.summary.achievedCount,
+        total:             evalResult.data.summary.totalCriteria,
+        ts:                new Date().toISOString(),
+      };
+      localStorage.setItem('nexus-last-grade', JSON.stringify(snapshot));
+    } catch { /* ignore storage errors */ }
+  };
+
   const normalizeIntegratedResult = (payload: any): EvaluationResult => {
     const rawCriteria = payload?.criteria;
 
@@ -410,6 +454,7 @@ export default function AssessmentPage() {
         setLocalSimilarity(sim);
         setComplianceVerdict(computeCompliance(studentAnswer || '', sim));
         saveToHistory(evalResult.data.final_grade || 'PENDING', sim);
+        saveLastGrade(evalResult);
         return;
       }
 
@@ -436,6 +481,7 @@ export default function AssessmentPage() {
       setLocalSimilarity(sim);
       setComplianceVerdict(computeCompliance(studentAnswer, sim));
       saveToHistory(evalResult.data.final_grade || 'PENDING', sim);
+      saveLastGrade(evalResult);
     } catch (e: unknown) { alert(getErrorMessage(e)); } finally { setLoading(false); }
   };
 

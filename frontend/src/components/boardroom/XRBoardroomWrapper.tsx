@@ -17,6 +17,8 @@ import * as THREE from 'three';
 import dynamic from 'next/dynamic';
 import type { VRMAvatarRef } from '@/components/avatar/VRMAvatar';
 import BoardroomAvatar from '@/components/avatar/VRMAvatar';
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const VRMAvatarCompat = BoardroomAvatar as unknown as React.ForwardRefExoticComponent<React.PropsWithoutRef<{ useSimpleFallback?: boolean }> & React.RefAttributes<VRMAvatarRef>>;
 
 const HolographicPanels = dynamic(
   () => import('@/components/boardroom/HolographicPanels').then((m) => m.default),
@@ -211,7 +213,7 @@ function SceneManager({
       <group position={isPresenting ? arPosition : [0, 0, 0]}>
         <HolographicPanels />
         <Suspense fallback={<FallbackAvatar />}>
-          <BoardroomAvatar ref={avatarRef as React.RefObject<VRMAvatarRef>} useSimpleFallback={useSimpleFallback} />
+          <VRMAvatarCompat ref={avatarRef} useSimpleFallback={useSimpleFallback} />
         </Suspense>
         {isPresenting && (
           <ContactShadows position={[0, -0.02, 0]} opacity={0.35} scale={2} blur={1.5} far={1} />

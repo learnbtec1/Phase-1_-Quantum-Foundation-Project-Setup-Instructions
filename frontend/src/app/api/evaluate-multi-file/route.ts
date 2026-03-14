@@ -37,14 +37,15 @@ export async function POST(req: NextRequest) {
     }
 
     // Merge all uploaded files into a single student_text, labelled per file
+    // No truncation here — the backend's extract_relevant_excerpt handles smart sampling
+    // per criterion, so sending the full text is correct and necessary.
     const student_text = solutions
       .map((f) => {
         const label = f.file_label || 'ملف';
         const desc = f.description ? ` — ${f.description}` : '';
         return `=== ${label}${desc} ===\n${f.file_content}`;
       })
-      .join('\n\n')
-      .slice(0, 25_000); // frontend limit
+      .join('\n\n');
 
     if (student_text.replace(/=+.*?===/g, '').trim().length < 50) {
       return new Response(JSON.stringify({
@@ -119,6 +120,8 @@ export async function POST(req: NextRequest) {
         criteria: Object.fromEntries(criteriaArray.map((c) => [c.code, c])),
         final_grade: result.final_grade || 'PENDING',
         consolidated_summary: result.summary || '',
+        evaluation_id: result.evaluation_id ?? undefined,
+        ephemeral: result.ephemeral ?? undefined,
       },
       report: result.summary || '',
     };

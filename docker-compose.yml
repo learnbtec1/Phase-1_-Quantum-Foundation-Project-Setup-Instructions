@@ -1,0 +1,85 @@
+name: nexus
+
+services:
+  # 🧠 1. الذاكرة الدائمة (PostgreSQL)
+  db:
+    image: postgres:16-alpine
+    container_name: nexus_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nexus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nexus_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-nexus_db}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus} -d ${POSTGRES_DB:-nexus_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+  # ⚙️ 2. العقل المدبر (FastAPI + Whisper STT + PDF)
+  backend:
+    image: nexus_backend_image:latest
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nexus_backend
+    env_file:
+      - ./backend/.env
+    environment:
+      # ربط الباك إند بقاعدة البيانات داخل شبكة دوكر
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nexus}:${POSTGRES_PASSWORD:-nexus_secret}@db:5432/${POSTGRES_DB:-nexus_db}
+      USE_DB: "${USE_DB:-true}"
+      # إعدادات Whisper (حماية من انهيار كرت الشاشة)
+      WHISPER_DEVICE: "cpu"
+      WHISPER_COMPUTE: "int8"
+      STT_MIN_MS: "400"
+      STT_MAX_MB: "8"
+      STT_MIME_OK: "audio/webm,audio/ogg,audio/wav"
+      # إعدادات الأمان
+      CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app  # Hot-reload للتطوير
+    ports:
+      - "8000:8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/api/health\")' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # 🖥️ 3. الواجهة التفاعلية (Next.js + VRM Verona)
+  frontend:
+    image: nexus_frontend_image:latest
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: nexus_frontend
+    environment:
+      # إعدادات ضرورية لويندوز (WSL) لضمان تحديث الكود تلقائياً
+      CHOKIDAR_USEPOLLING: "1"
+      WATCHPACK_POLLING: "true"
+      NEXT_TELEMETRY_DISABLED: "1"
+      # روابط الاتصال
+      NEXT_PUBLIC_BACKEND_URL: http://localhost:8000
+      NEXT_PUBLIC_AVATAR_VRM_URL: "/models/verona.vrm"
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./frontend:/usr/src/app
+      - /usr/src/app/node_modules # عزل مكتبات دوكر عن جهازك
+    ports:
+      - "3000:3000"
+    command: ["npm", "run", "dev", "--", "-p", "3000"]
+
+volumes:
+  pgdata:
