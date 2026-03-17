@@ -2,6 +2,12 @@ import sys
 import subprocess
 import os
 
+# Force UTF-8 on stdout/stderr — prevents charmap/cp1252 errors on Windows when logging Arabic text
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 # Change to backend directory
 backend_dir = r"e:\Phase 1_ Quantum Foundation Project Setup Instructions\backend"
 os.chdir(backend_dir)

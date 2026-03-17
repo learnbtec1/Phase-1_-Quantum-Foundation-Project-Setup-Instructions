@@ -452,3 +452,56 @@ EGYPTIAN_TO_JORDANIAN: list[tuple[str, str]] = [
     (r'\bكمان\b',              'كمان'),      # مشترك — حفاظ
     (r'\bيعني\b',              'يعني'),      # مشترك — حفاظ
 ]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STT / Whisper Mis-transcription Corrections (BTEC Academic Terms)
+# Applied to every Whisper transcript before it reaches the LLM.
+# Whisper frequently phonetic-maps English academic vocabulary into Arabic
+# pronunciation spellings:  "BTEC" → "بتسيه",  "Distinction" → "ديستنكشن".
+# ══════════════════════════════════════════════════════════════════════════════
+import re as _re
+
+# Each entry: (compiled_regex, replacement_string)
+_STT_CORRECTIONS: list[tuple] = [
+    # ── BTEC grading levels ────────────────────────────────────────────────
+    (_re.compile(r'بتسيه|بتسي|بيتيسي|بى\s*تى\s*سى|بي\s*تي\s*سي', _re.I), 'BTEC'),
+    (_re.compile(r'\bميريت\b|\bميرت\b',                              _re.I), 'Merit'),
+    (_re.compile(r'ديستنكشن|دستنكشن|ديستنكشين|ديستينكشن',           _re.I), 'Distinction'),
+    (_re.compile(r'\bباسات?\b|\bباص\b(?!\s*(?:تقرير|رقم))',          _re.I), 'Pass'),
+
+    # ── BTEC analysis frameworks ───────────────────────────────────────────
+    (_re.compile(r'\bبيستل\b|\bبيسطل\b|\bبيستلي\b',                  _re.I), 'PESTLE'),
+    (_re.compile(r'\bسووت\b|\bسذوت\b|\bسوووت\b',                     _re.I), 'SWOT'),
+
+    # ── Course & qualification vocabulary ─────────────────────────────────
+    (_re.compile(r'(?:وحده|يونت)\s*(\d+)',                           _re.I), r'Unit \1'),
+    (_re.compile(r'\bكرايتيريا\b|\bكرتيريا\b',                       _re.I), 'criteria'),
+    (_re.compile(r'\bبورتفوليو\b|\bبرتفوليو\b',                      _re.I), 'portfolio'),
+    (_re.compile(r'\bأسيسمنت\b|\bأسسمنت\b',                         _re.I), 'assessment'),
+
+    # ── Common Whisper phonological artifacts (only safe, high-confidence) ─
+    (_re.compile(r'\bإيفيدنس\b|\bايفيدنس\b',                        _re.I), 'evidence'),
+    (_re.compile(r'\bسيناريو\b',                                      _re.I), 'scenario'),
+]
+
+
+def normalize_stt_transcript(text: str) -> str:
+    """Apply BTEC academic corrections to a raw Whisper transcript.
+
+    Whisper frequently mis-transcribes English academic terms embedded in
+    Arabic speech — e.g. "BTEC" → "بتسيه", "Distinction" → "ديستنكشن".
+    This function restores them to their recognised English forms so the
+    LLM can match them against BTEC criteria patterns.
+
+    Args:
+        text: Raw Arabic transcript from Whisper.
+
+    Returns:
+        Corrected transcript string (stripped).
+    """
+    if not text:
+        return text
+    for pattern, replacement in _STT_CORRECTIONS:
+        text = pattern.sub(replacement, text)
+    return text.strip()
+

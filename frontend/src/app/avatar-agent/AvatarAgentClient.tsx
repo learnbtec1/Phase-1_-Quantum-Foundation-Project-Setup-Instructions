@@ -4,6 +4,8 @@ import { useState, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { useAgentAgent }   from '@/hooks/useAgentAgent';
 import PermissionBanner    from '@/components/PermissionBanner';
+import ConversationManager from '@/components/ConversationManager';
+import styles              from './AvatarCanvas.module.css';
 
 // AvatarCanvas is loaded dynamically (SSR off) — it drives all avatar events
 // via window listeners. The vrmUrl prop must remain unchanged.
@@ -11,7 +13,7 @@ const AvatarCanvas = dynamic(() => import('./AvatarCanvas'), {
   ssr: false,
   loading: () => (
     <div className="flex items-center justify-center min-h-screen bg-[#0a0a12] text-gray-300 text-sm">
-      جاري تحميل الدكتور حمزة...
+      جاري تحميل Cogni...
     </div>
   ),
 });
@@ -53,6 +55,15 @@ const TEACH_VRM  = '/models/teach.vrm';
 // ── Session history entry ────────────────────────────────────────────────────
 interface HistoryEntry { role: 'user' | 'teacher'; text: string; emotion?: string }
 
+// Resolve WebSocket URL from env so Docker containers use the service name
+// instead of the hardcoded 127.0.0.1. Falls back safely for native dev.
+// NEXT_PUBLIC_API_URL is set in docker-compose.yml → "http://backend:8000"
+// In native dev (.env.local) it is "http://127.0.0.1:8000" or left unset.
+const _apiBase = (
+  process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000'
+).replace(/\/$/, '');
+const WS_AGENT_URL = _apiBase.replace(/^http/, 'ws') + '/ws/agent';
+
 export default function AvatarAgentClient() {
   const {
     isConnected,
@@ -61,6 +72,9 @@ export default function AvatarAgentClient() {
     lastTranscript,
     lastDialogue,
     emotion,
+    personaLevel,
+    setPersonaLevel,
+    btecProgress,
     error,
     micNotFound,
     permissionDenied,
@@ -68,14 +82,57 @@ export default function AvatarAgentClient() {
     toggleListening,
     sendText,
     clearHistory,
-  } = useAgentAgent({});
+  } = useAgentAgent({ wsUrl: WS_AGENT_URL });
 
   const [userInput,  setUserInput]  = useState('');
   const [history,    setHistory]    = useState<HistoryEntry[]>([]);
   const [isSitting,  setIsSitting]  = useState(false);
-  const [showHistory,setShowHistory]= useState(false);
+  const [showHistory,setShowHistory]= useState(true);
+  const [audioBlocked, setAudioBlocked] = useState(false);
+  const [blockedAudio, setBlockedAudio] = useState<HTMLAudioElement | null>(null);
   const inputRef       = useRef<HTMLInputElement>(null);
   const historyRef     = useRef<HTMLDivElement>(null);
+
+  // Show/hide the "click to unmute" banner when browser blocks autoplay
+  useEffect(() => {
+    const onBlocked = (e: Event): void => {
+      const evt = e as CustomEvent;
+      setAudioBlocked(true);
+      setBlockedAudio(evt.detail?.audio ?? null);
+    };
+    const onUnblock = (): void => {
+      setAudioBlocked(false);
+      setBlockedAudio(null);
+    };
+    window.addEventListener('cogni:autoplay-blocked', onBlocked);
+    window.addEventListener('avatar:speak:start',    onUnblock);
+    return () => {
+      window.removeEventListener('cogni:autoplay-blocked', onBlocked);
+      window.removeEventListener('avatar:speak:start',    onUnblock);
+    };
+  }, []);
+
+  // ── Wire isListening → avatar physical behavior (phase state machine) ────
+  // Dispatches avatar:listening so AvatarCanvas.tsx can adapt posture,
+  // breathing amplitude, and head bias without requiring WS coupling.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(
+      new CustomEvent('avatar:listening', { detail: { active: isListening } }),
+    );
+  }, [isListening]);
+
+  // ── AudioContext auto-resume on first user interaction ───────────────────
+  // Browser autoplay policy suspends AudioContext until a user gesture fires.
+  // A single click anywhere on the page resumes it, unblocking all audio.
+  useEffect(() => {
+    const resumeAudio = () => {
+      const ctx = (window as typeof window & { __AUDIO_CTX__?: AudioContext }).__AUDIO_CTX__;
+      if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+    };
+    window.addEventListener('click', resumeAudio, { once: true });
+    return () => window.removeEventListener('click', resumeAudio);
+  }, []);
 
   // Accumulate session history from transcript + dialogue
   useEffect(() => {
@@ -133,24 +190,148 @@ export default function AvatarAgentClient() {
   return (
     <main className="relative w-full h-screen bg-[#0a0a12] overflow-hidden" dir="rtl">
 
+      {/* ── Phase 4 Conversation Manager — initial interaction overlay + turn-taking ── */}
+      <ConversationManager
+        onSessionStart={() => {
+          console.log('[AvatarAgentClient] Session started, ready for conversation');
+        }}
+        onUserSpeaking={() => {
+          console.log('[AvatarAgentClient] User is speaking — may interrupt avatar');
+        }}
+        onUserSilent={() => {
+          console.log('[AvatarAgentClient] User finished speaking');
+        }}
+      />
+
+      {/* ── Permission banner (microphone/camera) ────────────────────────── */}
+      <PermissionBanner
+        permissionDenied={permissionDenied}
+        micNotFound={micNotFound}
+        onRetry={resetPermissionDenied}
+      />
+
+      {/* ── Audio unlock banner — shown when browser blocks autoplay ──────── */}
+      {audioBlocked && (
+        <div className="absolute top-0 inset-x-0 z-50 flex justify-center pointer-events-auto">
+          <div className="mt-3 bg-amber-900/90 backdrop-blur-md border border-amber-500/60
+              rounded-full px-6 py-2 text-amber-200 text-xs font-medium shadow-lg flex items-center gap-3">
+            <span>🔇 تم حجب الصوت — </span>
+            {blockedAudio ? (
+              <button
+                onClick={() => {
+                  if (blockedAudio) {
+                    blockedAudio.muted = false;
+                    blockedAudio.play().catch(err => console.warn('Unmute failed:', err));
+                    setAudioBlocked(false);
+                    setBlockedAudio(null);
+                  }
+                }}
+                className="px-3 py-1 bg-amber-500 text-amber-900 rounded-full font-semibold text-xs
+                  hover:bg-amber-400 transition active:scale-95"
+              >
+                🔊 شغّل الصوت
+              </button>
+            ) : (
+              <span>انقر في أي مكان لتفعيل الصوت</span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Thinking indicator — prominent floating banner when LLM is processing */}
+      {isProcessing && (
+        <div className="absolute top-16 inset-x-0 z-40 flex justify-center pointer-events-none">
+          <div className="bg-blue-950/80 backdrop-blur-md border border-blue-400/50
+              rounded-full px-5 py-2 text-blue-200 text-sm font-medium shadow-xl flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
+            <span>💭 Cogni يفكر...</span>
+          </div>
+        </div>
+      )}
+
       {/* ── Avatar canvas — fills screen ──────────────────────────────────── */}
-      <div className="absolute inset-0">
+      <div className={`absolute inset-0 ${isListening ? styles.listeningPulse : ''}`}>
         <AvatarCanvas vrmUrl={VERONA_VRM} fallbackVrmUrl={TEACH_VRM} />
       </div>
+
+      {/* ── Triple-Persona glow overlay (passive ring showing active level) ── */}
+      <div className={`absolute inset-0 pointer-events-none ${
+        personaLevel === 'merit'       ? styles.personaMerit :
+        personaLevel === 'distinction' ? styles.personaDistinction : ''
+      }`} />
 
       {/* ── Top-left: persona badge ───────────────────────────────────────── */}
       <div className="absolute top-4 right-4 flex items-center gap-2 bg-black/50 backdrop-blur-md
           border border-violet-500/40 rounded-full px-3 py-1 text-xs text-white shadow-lg">
         <span className="w-2 h-2 rounded-full bg-violet-400 animate-pulse" />
-        <span className="text-violet-300 font-bold">د. حمزة</span>
+        <span className="text-violet-300 font-bold">Cogni</span>
         <span className="text-violet-500">|</span>
-        <span className="text-gray-300">20 طبقة · سقالات معرفية</span>
+        <span className="text-gray-300">إيدوفيرس التعليمية</span>
       </div>
 
+      {/* ── BTEC Level switcher (Triple-Persona) ───────────────────────────────── */}
+      <div className="absolute top-12 right-4 flex items-center gap-1.5 bg-black/40 backdrop-blur-md
+          border border-white/10 rounded-full px-2 py-1 text-[10px] shadow">
+        {(['pass', 'merit', 'distinction'] as const).map(lvl => (
+          <button
+            key={lvl}
+            onClick={() => setPersonaLevel(lvl)}
+            className={`px-2 py-0.5 rounded-full font-medium transition-all ${
+              personaLevel === lvl
+                ? lvl === 'pass'        ? 'bg-blue-600  text-white'
+                : lvl === 'merit'       ? 'bg-yellow-500 text-black'
+                :                         'bg-red-600    text-white'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            {lvl === 'pass' ? 'P' : lvl === 'merit' ? 'M' : 'D'}
+          </button>
+        ))}
+      </div>
+      {/* ── BTEC criterion progress bar (shown when server has sent btec_progress_ack) */}
+      {btecProgress?.unit_id && (
+        <div className="absolute top-32 left-4 bg-black/60 backdrop-blur-md border border-violet-500/30
+            rounded-lg px-3 py-2 text-xs text-white shadow-lg min-w-[170px] z-20">
+          <div className="flex justify-between mb-1.5">
+            <span className="text-violet-400 font-bold uppercase text-[10px] tracking-wide">
+              {btecProgress.unit_id.toUpperCase()}
+            </span>
+            <span className={`font-bold text-[10px] ${
+              btecProgress.current_level === 'distinction' ? 'text-red-400' :
+              btecProgress.current_level === 'merit'       ? 'text-yellow-400' :
+                                                            'text-blue-400'
+            }`}>
+              {btecProgress.current_level?.toUpperCase()}
+            </span>
+          </div>
+          {(['pass', 'merit', 'distinction'] as const).map(lvl => {
+            const s = btecProgress.summary?.[lvl];
+            if (!s || s.total === 0) return null;
+            return (
+              <div key={lvl} className="mb-1.5">
+                <div className="flex justify-between text-[9px] text-gray-400 mb-0.5">
+                  <span className="uppercase">{lvl}</span>
+                  <span>{s.achieved}/{s.total}</span>
+                </div>
+                <div className="h-1 bg-gray-700 rounded-full overflow-hidden">
+                  <div
+                    className={`${styles.btecBar} ${
+                      lvl === 'distinction' ? 'bg-red-500' :
+                      lvl === 'merit'       ? 'bg-yellow-500' :
+                                             'bg-blue-500'
+                    }`}
+                    {...{ style: { '--btec-pct': `${(s.achieved / s.total) * 100}%` } as React.CSSProperties }}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
       {/* ── Top-left: scaffolding level indicator ────────────────────────── */}
       <div className="absolute top-4 left-4 bg-black/50 backdrop-blur-md border border-cyan-500/30
           rounded-lg px-3 py-2 text-xs text-white shadow-lg min-w-[140px]">
-        <div className="text-cyan-400 font-bold mb-1">🧠 الذكاء المزروع</div>
+        <div className="text-cyan-400 font-bold mb-1">🧠 Cogni</div>
         <div className="flex items-center gap-1 text-gray-300">
           <span className={emo.colour + ' text-sm'}>{emo.icon}</span>
           <span className={emo.colour}>{emotion}</span>
@@ -292,7 +473,7 @@ export default function AvatarAgentClient() {
             onKeyDown={(e) => e.key === 'Enter' && onSend()}
             className="flex-1 px-3 py-2 text-sm bg-white/10 text-white border border-white/20 rounded-md
               focus:outline-none focus:border-cyan-500 placeholder-gray-500"
-            placeholder="اكتب رسالة للدكتور حمزة..."
+            placeholder="اكتب رسالة لـ Cogni..."
           />
           <button
             onClick={onSend}

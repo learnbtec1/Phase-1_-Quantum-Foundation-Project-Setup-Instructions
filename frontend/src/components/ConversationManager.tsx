@@ -1,0 +1,195 @@
+'use client';
+
+/**
+ * ConversationManager.tsx — Phase 4 Turn-Taking System
+ *
+ * Manages the lifecycle of human-avatar conversation with strict turn-taking:
+ *   1. Initial Interaction: "Start Session" overlay until user clicks
+ *   2. State Machine: tracks isUserSpeaking, isAvatarSpeaking states
+ *   3. Interruption Logic: When user speaks, immediately silence the avatar
+ *   4. Sequential Processing: Avatar only speaks after user finishes
+ *
+ * Events dispatched:
+ *   - 'cogni:conversation:started' when AudioContext is unlocked
+ *   - 'cogni:user:speaking'        when VAD detects speech
+ *   - 'cogni:user:silent'          when user stops speaking
+ *   - 'cogni:avatar:interrupt'     forces avatar to stop speaking
+ */
+
+import { useEffect, useRef, useState } from 'react';
+import { stopTTS } from '@/ai/io/tts';
+
+export interface ConversationManagerProps {
+  /** Callback when initial session starts (AudioContext is unlocked) */
+  onSessionStart?: () => void;
+  /** Callback when user starts speaking (VAD enabled) */
+  onUserSpeaking?: () => void;
+  /** Callback when user stops speaking */
+  onUserSilent?: () => void;
+}
+
+/**
+ * Phase 4 Conversation Manager — handles AudioContext unlock + turn-taking
+ */
+export default function ConversationManager({
+  onSessionStart,
+  onUserSpeaking,
+  onUserSilent,
+}: ConversationManagerProps) {
+  const [sessionStarted, setSessionStarted] = useState(false);
+  const [isUserSpeaking, setIsUserSpeaking] = useState(false);
+  const [isAvatarSpeaking, setIsAvatarSpeaking] = useState(false);
+
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const hasInteractedRef = useRef(false);
+
+  // ── Initialize AudioContext on first user gesture ──────────────────────
+  const initializeAudio = async () => {
+    if (!hasInteractedRef.current) {
+      try {
+        // Create or resume AudioContext
+        let ctx = audioContextRef.current;
+        if (!ctx) {
+          ctx = new AudioContext();
+          audioContextRef.current = ctx;
+        }
+
+        // Resume if suspended
+        if (ctx.state === 'suspended') {
+          await ctx.resume();
+        }
+
+        hasInteractedRef.current = true;
+        setSessionStarted(true);
+
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('cogni:conversation:started'));
+        }
+
+        onSessionStart?.();
+
+        console.log('[ConversationManager] ✅ AudioContext initialized, session started');
+      } catch (err) {
+        console.error('[ConversationManager] Failed to initialize AudioContext:', err);
+      }
+    }
+  };
+
+  // ── Listen for avatar speaking events ────────────────────────────────────
+  useEffect(() => {
+    const onAvatarSpeakStart = () => {
+      setIsAvatarSpeaking(true);
+      console.log('[ConversationManager] Avatar is now speaking');
+    };
+
+    const onAvatarSpeakEnd = () => {
+      setIsAvatarSpeaking(false);
+      console.log('[ConversationManager] Avatar finished speaking');
+    };
+
+    if (typeof window === 'undefined') return;
+
+    window.addEventListener('avatar:speak:start', onAvatarSpeakStart);
+    window.addEventListener('avatar:speak:end', onAvatarSpeakEnd);
+
+    return () => {
+      window.removeEventListener('avatar:speak:start', onAvatarSpeakStart);
+      window.removeEventListener('avatar:speak:end', onAvatarSpeakEnd);
+    };
+  }, []);
+
+  // ── Listen for VAD/user speaking events ──────────────────────────────────
+  useEffect(() => {
+    const onUserStart = () => {
+      setIsUserSpeaking(true);
+      
+      // Force silence avatar immediately
+      if (isAvatarSpeaking) {
+        console.log('[ConversationManager] 🛑 User is speaking — interrupting avatar');
+        stopTTS();
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('cogni:avatar:interrupt'));
+        }
+      }
+
+      onUserSpeaking?.();
+    };
+
+    const onUserStop = () => {
+      setIsUserSpeaking(false);
+      onUserSilent?.();
+    };
+
+    if (typeof window === 'undefined') return;
+
+    // Listen for VAD or mic button events
+    window.addEventListener('avatar:listening', (e: Event) => {
+      const evt = e as CustomEvent;
+      if (evt.detail?.active) {
+        onUserStart();
+      } else {
+        onUserStop();
+      }
+    });
+
+    // Also listen for explicit user:speaking events (if custom VAD fires them)
+    window.addEventListener('cogni:user:speaking', onUserStart);
+    window.addEventListener('cogni:user:silent', onUserStop);
+
+    return () => {
+      window.removeEventListener('avatar:listening', onUserStart);
+      window.removeEventListener('cogni:user:speaking', onUserStart);
+      window.removeEventListener('cogni:user:silent', onUserStop);
+    };
+  }, [isAvatarSpeaking, onUserSpeaking, onUserSilent]);
+
+  // ── Session start overlay ────────────────────────────────────────────────
+  if (!sessionStarted) {
+    return (
+      <div className="fixed inset-0 z-[999] flex items-center justify-center
+        bg-black/80 backdrop-blur-sm">
+        <div className="flex flex-col items-center gap-6 text-white">
+          {/* Animated avatar icon */}
+          <div className="text-6xl animate-bounce">🤖</div>
+
+          {/* Call to action */}
+          <div className="text-center">
+            <h1 className="text-3xl font-bold mb-2">مرحباً بك في Cogni</h1>
+            <p className="text-gray-300 text-sm max-w-xs">
+              اضغط الزر أدناه لبدء الجلسة التعليمية مع أفاتارك الشخصي
+            </p>
+          </div>
+
+          {/* Start button */}
+          <button
+            onClick={initializeAudio}
+            className="px-8 py-3 bg-gradient-to-r from-violet-600 to-cyan-600
+              text-white font-bold rounded-full text-lg
+              hover:from-violet-500 hover:to-cyan-500
+              active:scale-95 transition-all duration-200
+              shadow-lg shadow-violet-500/50"
+          >
+            ▶️ ابدأ الجلسة
+          </button>
+
+          {/* Permissions info */}
+          <div className="text-xs text-gray-400 text-center max-w-xs">
+            <p>📍 سيطلب منك الوصول إلى الميكروفون</p>
+            <p className="mt-1">الصوت والصورة مشفرة ومحمية</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Conversation state indicators (if needed for debugging) ────────────────
+  return (
+    <div className="fixed bottom-4 left-4 text-xs text-gray-400 z-0 pointer-events-none">
+      {/* Hidden but ready to dispatch events */}
+      <div className="hidden">
+        {isUserSpeaking && 'user:speaking'}
+        {isAvatarSpeaking && 'avatar:speaking'}
+      </div>
+    </div>
+  );
+}

@@ -1,85 +1,100 @@
-name: nexus
-
 services:
-  # 🧠 1. الذاكرة الدائمة (PostgreSQL)
   db:
     image: postgres:16-alpine
     container_name: nexus_db
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-nexus}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nexus_secret}
-      POSTGRES_DB: ${POSTGRES_DB:-nexus_db}
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus} -d ${POSTGRES_DB:-nexus_db}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    volumes:
-      - pgdata:/var/lib/postgresql/data
+      POSTGRES_DB: nexus
+      POSTGRES_USER: nexus
+      POSTGRES_PASSWORD: nexus
     ports:
       - "5432:5432"
+    volumes:
+      - ./backend/data/postgres:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexus -d nexus -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
-  # ⚙️ 2. العقل المدبر (FastAPI + Whisper STT + PDF)
   backend:
-    image: nexus_backend_image:latest
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    build: ./backend
     container_name: nexus_backend
-    env_file:
-      - ./backend/.env
     environment:
-      # ربط الباك إند بقاعدة البيانات داخل شبكة دوكر
-      DATABASE_URL: postgresql://${POSTGRES_USER:-nexus}:${POSTGRES_PASSWORD:-nexus_secret}@db:5432/${POSTGRES_DB:-nexus_db}
-      USE_DB: "${USE_DB:-true}"
-      # إعدادات Whisper (حماية من انهيار كرت الشاشة)
-      WHISPER_DEVICE: "cpu"
-      WHISPER_COMPUTE: "int8"
-      STT_MIN_MS: "400"
-      STT_MAX_MB: "8"
-      STT_MIME_OK: "audio/webm,audio/ogg,audio/wav"
-      # إعدادات الأمان
-      CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
+      HOST: 0.0.0.0
+      PORT: 8000
+      DATABASE_URL: postgresql+psycopg2://nexus:nexus@db:5432/nexus
+      PYTHONIOENCODING: "utf-8"
+      PYTHONUTF8: "1"
+      LANG: "C.UTF-8"
+      LC_ALL: "C.UTF-8"
+      # Azure Speech SDK (libMicrosoft.CognitiveServices.Speech.core.so) needs CA certs
+      # to initialise its HTTP singleton — prevents "Error 27" at startup.
+      SSL_CERT_FILE: "/etc/ssl/certs/ca-certificates.crt"
+      SSL_CERT_DIR: "/etc/ssl/certs"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/data:/app/data
+      - whisper_model_cache:/root/.cache/huggingface
     depends_on:
       db:
         condition: service_healthy
-    volumes:
-      - ./backend:/app  # Hot-reload للتطوير
-    ports:
-      - "8000:8000"
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/api/health\")' || exit 1"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-      start_period: 30s
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; u='http://127.0.0.1:8000/api/health'; req=urllib.request.Request(u, method='GET'); urllib.request.urlopen(req, timeout=3); sys.exit(0)"
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
-  # 🖥️ 3. الواجهة التفاعلية (Next.js + VRM Verona)
   frontend:
-    image: nexus_frontend_image:latest
     build:
       context: ./frontend
-      dockerfile: Dockerfile
+      target: dev-base
     container_name: nexus_frontend
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: ["npm", "run", "dev", "--", "-H", "0.0.0.0", "-p", "3000"]
     environment:
-      # إعدادات ضرورية لويندوز (WSL) لضمان تحديث الكود تلقائياً
-      CHOKIDAR_USEPOLLING: "1"
-      WATCHPACK_POLLING: "true"
-      NEXT_TELEMETRY_DISABLED: "1"
-      # روابط الاتصال
-      NEXT_PUBLIC_BACKEND_URL: http://localhost:8000
-      NEXT_PUBLIC_AVATAR_VRM_URL: "/models/verona.vrm"
+      # NEXT_PUBLIC_* vars are browser-visible — use the HOST-mapped port (localhost:8000),
+      # NOT the internal Docker service name (backend:8000) which browsers cannot resolve.
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_AGENT_WS: ws://localhost:8000/ws/agent
+      # Server-side only (no NEXT_PUBLIC prefix) — resolved inside Docker network.
+      # These MUST use the Docker service name "backend", NOT 127.0.0.1 (which would
+      # resolve to the frontend container itself and cause a 503 on every proxy call).
+      BACKEND_URL: http://backend:8000
+      TTS_BACKEND_URL: http://backend:8000/api/v1/tts-with-timing
+      CHAT_BACKEND_URL: http://backend:8000/api/v1/chat
+    ports:
+      - "3000:3000"
     depends_on:
       backend:
         condition: service_healthy
-    volumes:
-      - ./frontend:/usr/src/app
-      - /usr/src/app/node_modules # عزل مكتبات دوكر عن جهازك
-    ports:
-      - "3000:3000"
-    command: ["npm", "run", "dev", "--", "-p", "3000"]
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').request('http://127.0.0.1:3000/api/health',{method:'HEAD'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1)).end()"
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
 
 volumes:
-  pgdata:
+  whisper_model_cache:
+    driver: local

@@ -8,7 +8,7 @@
  * Next.js build errors, or any application-level error.logs.
  */
 if (process.env.NODE_ENV === 'development' && typeof window !== 'undefined') {
-  const NOISY = /(The AudioContext encountered an error from the audio device|decodeAudioData failed|AudioContext was not allowed to start)/i;
+  const NOISY = /(The AudioContext encountered an error from the audio device|decodeAudioData failed|AudioContext was not allowed to start|No microphone hardware found|لم أسمع شيئاً)/i;
   const origError = console.error.bind(console);
   console.error = (...args: unknown[]): void => {
     const first = (args[0] ?? '') + '';

@@ -91,7 +91,7 @@ async function buildWavBlob(chunks: Blob[], sampleRate: number): Promise<Blob | 
 export function useVAD({
   onSpeechEnd,
   onSpeechStart,
-  silenceThreshold = 0.015,
+  silenceThreshold = 0.008,
   silenceGapMs = 900,
   lang = 'ar-SA',
 }: UseVADOptions = {}): UseVADReturn {
@@ -145,6 +145,7 @@ export function useVAD({
 
     try { audioCtxRef.current?.close(); } catch { /* ignore */ }
     audioCtxRef.current = null;
+    try { (window as unknown as Record<string, unknown>).__AUDIO_CTX__ = null; } catch { /* SSR */ }
     analyserRef.current = null;
     speechStartedRef.current = false;
     // Reset EBML-header and speech-gate flags so the NEXT startListening call
@@ -153,6 +154,7 @@ export function useVAD({
     firstChunkSavedRef.current = false;
     hadSpeechThisSegmentRef.current = false;
     chunksRef.current = [];
+    window.dispatchEvent(new CustomEvent('voice:mic:stopped'));
   }, []);
 
   const startListening = useCallback(async () => {
@@ -201,6 +203,32 @@ export function useVAD({
       console.log('[useVAD] Microphone access granted');
       streamRef.current = stream;
       activeRef.current = true;
+
+      // ── External track-end guard ────────────────────────────────────────────
+      // If the user (or OS/browser) kills the mic outside the app's stop button,
+      // the audio track fires "ended".  Without this listener the hook stays in
+      // "listening" state forever and future startListening() calls are skipped.
+      // We normalise the whole session to idle — no console.error, just debug.
+      for (const track of stream.getAudioTracks()) {
+        track.addEventListener('ended', () => {
+          if (!activeRef.current) return; // already stopped cleanly — ignore
+          console.debug('[useVAD] Audio track ended externally — transitioning to idle (no error)');
+          activeRef.current = false;
+          setIsRecording(false);
+          cancelAnimationFrame(rafRef.current);
+          if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
+          streamRef.current   = null;
+          recorderRef.current = null;
+          try { audioCtxRef.current?.close(); } catch { /* ignore */ }
+          audioCtxRef.current  = null;
+          analyserRef.current  = null;
+          chunksRef.current    = [];
+          firstChunkSavedRef.current      = false;
+          hadSpeechThisSegmentRef.current = false;
+          speechStartedRef.current        = false;
+          window.dispatchEvent(new CustomEvent('voice:mic:stopped'));
+        }, { once: true });
+      }
 
       // Set up recorder
       const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
@@ -252,7 +280,10 @@ export function useVAD({
 
       // Set up analyser for VAD
       const ctx = new AudioContext();
+      ctx.resume().catch(() => {/* browsers may start AudioContext suspended; useAgentAgent unlocks on first gesture */});
       audioCtxRef.current = ctx;
+      // Expose for Page Lifecycle suspend/resume from useAgentAgent.ts
+      try { (window as unknown as Record<string, unknown>).__AUDIO_CTX__ = ctx; } catch { /* SSR */ }
       const source = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 512;
@@ -315,7 +346,8 @@ export function useVAD({
 
       if (e?.name === 'NotFoundError' || e?.message?.includes('device not found')) {
         // Handled via micNotFound state — do NOT re-throw (would spam useAgentAgent catch)
-        console.error('[useVAD] No microphone hardware found — will not retry');
+        // Use warn (not error) — no mic hardware is an expected env condition, not a code bug.
+        console.warn('[useVAD] No microphone hardware found — will not retry');
         setMicNotFound(true);
         micNotFoundRef.current = true;
         return;

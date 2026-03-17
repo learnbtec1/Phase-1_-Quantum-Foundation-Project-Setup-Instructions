@@ -1,0 +1,57 @@
+{
+  "unit_id": "unit1",
+  "title": "Unit 1: The Business Environment",
+  "qualification": "BTEC Level 3 Business",
+  "description": "Explores how businesses operate within external environments and the factors that shape their performance.",
+  "criteria": [
+    {
+      "code": "P1",
+      "level": "pass",
+      "description": "Describe the type of business, purpose and ownership of two contrasting businesses",
+      "scaffold_question": "صف نوع ملكية الشركتين اللتين اخترتهما — هل هما شراكة، شركة محدودة، أم منشأة فردية؟ وما هدف كل منهما؟",
+      "keywords": ["ownership", "purpose", "sole trader", "partnership", "limited company", "PLC"]
+    },
+    {
+      "code": "P2",
+      "level": "pass",
+      "description": "Describe the different stakeholders who influence the purpose of two contrasting businesses",
+      "scaffold_question": "صف أصحاب المصلحة الرئيسيين — من هم ومن هم المتأثرون بقرارات الشركة؟",
+      "keywords": ["stakeholders", "internal", "external", "shareholders", "customers", "suppliers"]
+    },
+    {
+      "code": "P3",
+      "level": "pass",
+      "description": "Describe the role of the government in regulating businesses and how appropriate legal constraints affect the operations of a business",
+      "scaffold_question": "صف كيف تؤثر قوانين العمل أو حماية المستهلك على عمليات الشركة التي اخترتها؟",
+      "keywords": ["government regulation", "legislation", "legal constraints", "consumer protection", "employment law"]
+    },
+    {
+      "code": "M1",
+      "level": "merit",
+      "description": "Explain the points of view of different stakeholders seeking to influence the aims and objectives of two contrasting organisations",
+      "scaffold_question": "قارن وجهات نظر المساهمين والموظفين والمجتمع — أين تتقاطع مصالحهم وأين تتعارض؟",
+      "keywords": ["stakeholder conflict", "aims", "objectives", "compare", "analyse", "influence"]
+    },
+    {
+      "code": "M2",
+      "level": "merit",
+      "description": "Compare the challenges to selected business activities within a selected organisation, in the two economic environments",
+      "scaffold_question": "حلّل التحديات التي تواجه الشركة في بيئة اقتصادية متنامية مقارنةً ببيئة متراجعة — ما الاختلافات؟",
+      "keywords": ["economic environment", "growth", "recession", "challenges", "compare", "business activities"]
+    },
+    {
+      "code": "D1",
+      "level": "distinction",
+      "description": "Evaluate the influence different stakeholders exert on one of the organisations",
+      "scaffold_question": "قيّم أي أصحاب المصلحة يمتلكون السلطة الأكبر في التأثير على اتجاه الشركة — أذكر أدلة داعمة.",
+      "keywords": ["evaluate", "stakeholder power", "influence", "evidence", "critical analysis"]
+    },
+    {
+      "code": "D2",
+      "level": "distinction",
+      "description": "Fully justify recommendations for appropriate responses by organisations to changes in the economic environment",
+      "scaffold_question": "طوّر استراتيجية شاملة للشركة للتكيف مع تغير اقتصادي محدد — برّر كل خطوة باستخدام النظريات الاقتصادية.",
+      "keywords": ["justify", "recommendations", "strategic response", "economic change", "evaluation", "academic theory"]
+    }
+  ]
+}

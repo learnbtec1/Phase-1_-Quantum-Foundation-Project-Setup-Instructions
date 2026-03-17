@@ -56,7 +56,7 @@
     {
       "label": "Open UI: /avatar-agent",
       "type": "shell",
-      "command": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Start-Process 'http://localhost:3011/avatar-agent'\"",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Start-Process 'http://localhost:3000/avatar-agent'\"",
       "options": { "cwd": "${workspaceFolder}" },
       "problemMatcher": []
     },

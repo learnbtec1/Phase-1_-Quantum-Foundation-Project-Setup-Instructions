@@ -138,5 +138,6 @@
     },
     "git.ignoreLimitWarning": true,
     "workbench.browser.openLocalhostLinks": true,
-    "workbench.browser.enableChatTools": true
+    "workbench.browser.enableChatTools": true,
+    "python.terminal.useEnvFile": true
 }

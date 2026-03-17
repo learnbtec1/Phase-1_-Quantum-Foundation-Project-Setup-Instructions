@@ -1,5 +1,5 @@
 /**
- * GestureEngine — maps Verona action-line text to physical avatar movements.
+ * GestureEngine — maps Cogni action-line text to physical avatar movements.
  *
  * Wraps `dispatchGestureFromActionText` with:
  *   - Emotion-gesture correlation (e.g., celebrate → wave intensity 1.2)
@@ -31,7 +31,7 @@ const EMOTION_GESTURE_HINTS: Record<string, Partial<GestureDescriptor>> = {
 };
 
 // ─── Action-text → gesture type ───────────────────────────────────────────────
-// Patterns extracted from Dr. Hamza's gesture vocabulary in the V200 prompt.
+// Patterns extracted from Cogni's gesture vocabulary in the V200 prompt.
 
 const ACTION_GESTURE_MAP: Array<{ pattern: RegExp; gesture: Partial<GestureDescriptor> }> = [
   { pattern: /يميل|lean|lean forward/i,      gesture: { type: 'openHand', intensity: 0.8 } },

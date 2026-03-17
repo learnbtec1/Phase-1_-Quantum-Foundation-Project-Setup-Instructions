@@ -2,7 +2,7 @@
 """
 Agent WebSocket endpoint: ws://localhost:8000/ws/agent
 
-Handles real-time voice/text conversation with the Dr. Hamza avatar agent.
+Handles real-time voice/text conversation with the Cogni avatar agent.
 
 Message protocol (client → server):
   { "type": "ping" }
@@ -160,6 +160,19 @@ async def agent_ws(websocket: WebSocket):
     # Per-connection conversation history (last 6 turns = 3 exchanges)
     history: List[dict] = []
 
+    # Per-connection BTEC state — updated by "btec_progress" WS messages
+    # Structure: {unit_id, unit_title, achieved, current_level, next_criterion, summary}
+    btec_state: dict = {}
+
+    # Per-connection Triple-Persona level — updated by "set_persona" WS messages
+    # Values: "pass" (funny Jordan) | "merit" (serious academic) | "distinction" (challenger)
+    persona_level: str = "pass"
+
+    # Shadow analytics tracker — one per WebSocket connection (fire-and-forget)
+    from app.services.shadow_analytics import SessionTracker as _SA
+    _analytics = _SA()
+    await _analytics.session_start(persona_level=persona_level)
+
     async def send(payload: dict) -> None:
         payload.setdefault("v", 1.1)  # stamp all outgoing frames with WS protocol v1.1
         try:
@@ -177,11 +190,11 @@ async def agent_ws(websocket: WebSocket):
             user_text:    Transcribed / typed student message.
             grade_result: Optional BTEC grade snapshot forwarded by the frontend
                           (Gap 4-A). When present, a "Debrief Context" block is
-                          injected into Dr. Hamza's system prompt so he can say
+                          injected into Cogni's system prompt so he can say
                           things like "أرى إنك حصلت على Merit…" naturally.
         """
         try:
-            from app.api.v1.endpoints.tutor import _get_dr_hamza_response
+            from app.api.v1.endpoints.tutor import _get_cogni_response as _get_dr_hamza_response
         except ImportError:
             await send({"type": "error", "error": {"message": "LLM service unavailable", "severity": "error"}})
             return
@@ -191,7 +204,7 @@ async def agent_ws(websocket: WebSocket):
         # The old "thinking" type was silently dropped by the frontend.
         await send({"type": "llm_thinking", "id": req_id} if req_id else {"type": "llm_thinking"})
 
-        # Thread grade context into the LLM context dict so _get_dr_hamza_response
+        # Thread grade context into the LLM context dict so _get_cogni_response
         # can splice a Debrief Context block into the system prompt.
         context: dict = {"history": history[-6:]}
         if grade_result and isinstance(grade_result, dict) and grade_result.get("final_grade"):
@@ -207,6 +220,18 @@ async def agent_ws(websocket: WebSocket):
                 context["grade_result"]["final_grade"],
                 context["grade_result"]["subject"],
             )
+
+        # Thread BTEC scaffold context — uses the per-connection btec_state
+        # populated by "btec_progress" WebSocket messages.
+        if btec_state.get("unit_id"):
+            context["btec_context"] = btec_state.copy()
+            logger.info(
+                "[AgentWS] BTEC Scaffold injected — unit=%s level=%s",
+                btec_state.get("unit_id"),
+                btec_state.get("current_level"),
+            )
+        # Inject Triple-Persona level into LLM context
+        context["persona_level"] = persona_level
         try:
             reply_text = await _get_dr_hamza_response(user_text, context)
 
@@ -244,18 +269,27 @@ async def agent_ws(websocket: WebSocket):
                     "emotion": "neutral",
                 })
             else:
-                logger.exception("[AgentWS] LLM runtime error: %s", e)
-                await send({"type": "error", "id": req_id, "error": {"message": "حدث خطأ مؤقت، حاول مرة ثانية.", "severity": "error", "code": "llm_runtime_error"}})
+                logger.error("🔥 FATAL [AgentWS] LLM runtime error: %s", e, exc_info=True)
+                await send({"type": "error", "id": req_id, "error": {"message": "حدث خطأ مؤقت، حاول مرة ثانية.", "detail": str(e), "severity": "error", "code": "llm_runtime_error"}})
             return
         except Exception as e:
-            logger.exception("[AgentWS] LLM error: %s", e)
-            await send({"type": "error", "id": req_id, "error": {"message": "حدث خطأ مؤقت، حاول مرة ثانية.", "severity": "error", "code": "llm_unhandled_error"}})
+            logger.error("🔥 FATAL [AgentWS] unhandled error: %s", e, exc_info=True)
+            await send({"type": "error", "id": req_id, "error": {"message": "حدث خطأ مؤقت، حاول مرة ثانية.", "detail": str(e), "severity": "error", "code": "llm_unhandled_error"}})
             return
 
         # Save to history
         history.append({"user": user_text, "assistant": parsed['dialogue']})
         if len(history) > 6:
             history[:] = history[-6:]
+
+        # Shadow analytics: log completed LLM turn (fire-and-forget)
+        asyncio.ensure_future(
+            _analytics.log_turn(
+                transcript=user_text,
+                dialogue=parsed['dialogue'],
+                emotion=parsed.get('emotion', 'neutral'),
+            )
+        )
 
         # ── Azure Neural TTS (ar-JO-TaimNeural — male, Jordanian Arabic) ────────
         # Returns MP3 bytes + Temporal Cues (Visemes & Words).
@@ -270,7 +304,8 @@ async def agent_ws(websocket: WebSocket):
             try:
                 # 1. Update the unpack assignment to receive all three outputs
                 mp3_bytes, viseme_cues, word_cues = await azure_tts.synthesize(
-                    parsed['dialogue'], emotion=parsed.get('emotion', 'neutral')
+                    parsed['dialogue'], emotion=parsed.get('emotion', 'neutral'),
+                    persona_level=persona_level
                 )
                 
                 if mp3_bytes:
@@ -283,6 +318,11 @@ async def agent_ws(websocket: WebSocket):
                 logger.warning("[AgentWS] Azure TTS error (will send tts_unavailable): %s", e)
 
         # 2. Add the new cue arrays to the WebSocket payload sent to the frontend
+        # ── edge-tts fallback DISABLED — Microsoft broke stream encryption
+        #    (Error 27).  When Azure TTS fails, the tts_unavailable frame below
+        #    handles the graceful-degradation path instead.
+        # (edge-tts removed — do not re-enable without verifying the upstream fix)
+
         if audio_b64:
             await send({
                 "type":         "speech",
@@ -292,6 +332,7 @@ async def agent_ws(websocket: WebSocket):
                 "dialogue":     parsed['dialogue'],
                 "action":       parsed['action'],
                 "emotion":      parsed['emotion'],
+                "persona_level": persona_level,
                 "audio_base64": audio_b64,
                 "audio_format": "mp3",  # Azure SDK returns MP3 → playMp3Audio()
                 "viseme_cues":  viseme_cues,  # Lip-sync timeline
@@ -306,6 +347,7 @@ async def agent_ws(websocket: WebSocket):
                 "dialogue":   parsed['dialogue'],
                 "action":     parsed['action'],
                 "emotion":    parsed['emotion'],
+                "persona_level": persona_level,
             })
 
     # ── One-shot welcome greeting on connect ─────────────────────────────────
@@ -324,14 +366,15 @@ async def agent_ws(websocket: WebSocket):
         _connect_greeted = True
         await process_text(
             '[SYSTEM_EVENT: قدّم نفسك باللهجة الأردنية — ابدأ بـ "السلام عليكم"، '
-            'وعرّف نفسك كدكتور حمزة معلم BTEC، واسأل الطالب بأسلوبك الأردني الدافئ '
-            'شو يودّ يتعلم اليوم. لا تزيد عن جملتين.]',
+            'وعرّف نفسك كـ"كوجني الذكي" مساعد التعلم من منصة إيدوفيرس، '
+            'واسأل الطالب بأسلوبك الأردني الدافئ شو يودّ يتعلم اليوم. '
+            'لا تزيد عن جملتين.]',
             req_id='greet_0',
         )
 
     asyncio.create_task(_send_welcome())
 
-    # ── Message loop ──────────────────────────────────────────────────────────
+    # ── Message loop ─────────────────────────────────────────────────────────
     try:
         while True:
             raw = await websocket.receive_text()
@@ -406,11 +449,21 @@ async def agent_ws(websocket: WebSocket):
                 # ── Sprint 3: STT debug + immediate transcript echo ───────────
                 # Print to the backend terminal so the developer can confirm
                 # Whisper actually heard the words before the LLM call starts.
-                print(f"--- [STT RESULT]: {transcript} ---", flush=True)
-                logger.info("[AgentWS] STT transcript: %r", transcript)
+                # encode/decode guards against cp1252 charmap errors on Windows.
+                _t_safe = transcript.encode('utf-8', errors='replace').decode('utf-8')
+                print(f"--- [STT RESULT]: {_t_safe} ---", flush=True)
+                logger.info("[AgentWS] STT transcript: %s", ascii(transcript[:120]))
                 # Echo the raw transcript to the frontend BEFORE the LLM replies so
                 # the UI can fill the text box / chat input immediately.
                 await send({"type": "transcript", "text": transcript, "id": req_id})
+
+                # STT dialect normalization: fix Whisper BTEC mis-transcriptions.
+                # Runs after echo so the user sees the raw Whisper output,
+                # but the LLM receives academically-correct terms.
+                from app.services.jordanian_dialect import normalize_stt_transcript as _norm_stt
+                transcript = _norm_stt(transcript)
+                if transcript:
+                    logger.debug("[AgentWS] Normalised transcript: %s", ascii(transcript[:80]))
 
                 # Gap 4-A: voice messages may also carry grade context
                 grade_result = msg.get("grade_result") or None
@@ -452,7 +505,92 @@ async def agent_ws(websocket: WebSocket):
 
             elif msg_type == "clear":
                 history.clear()
+                btec_state.clear()
                 await send({"type": "cleared"})
+
+            elif msg_type == "btec_progress":
+                # Frontend sends this frame when the student's BTEC progress changes
+                # (e.g. after receiving a grading result, or on session start).
+                # Payload: {type: "btec_progress", unit_id, unit_title?, achieved: [...], current_level?, next_criterion?, summary?}
+                # We resolve the teaching level server-side if not provided by client.
+                unit_id = str(msg.get("unit_id", "")).strip().lower()
+                if not unit_id:
+                    await send({"type": "error", "error": {"message": "btec_progress: unit_id required", "severity": "warn"}})
+                    continue
+
+                achieved = [str(c).strip().upper() for c in msg.get("achieved", []) if c]
+
+                # If the client has already resolved level + next_criterion, use them.
+                # Otherwise, resolve from the knowledge base.
+                current_level   = msg.get("current_level")
+                next_criterion  = msg.get("next_criterion")
+                summary         = msg.get("summary", {})
+
+                if not current_level or next_criterion is None:
+                    try:
+                        from app.services.btec_knowledge import (
+                            load_unit, infer_teaching_level, get_next_criterion as _get_next,
+                            get_achieved_summary,
+                        )
+                        unit = load_unit(unit_id)
+                        if unit:
+                            current_level  = infer_teaching_level(achieved, unit)
+                            next_criterion = _get_next(achieved, unit)
+                            summary        = get_achieved_summary(achieved, unit)
+                        else:
+                            current_level  = current_level or "pass"
+                            next_criterion = next_criterion
+                    except Exception as exc:
+                        logger.warning("[AgentWS] btec_progress knowledge lookup failed: %s", exc)
+                        current_level = current_level or "pass"
+
+                btec_state.clear()
+                btec_state.update({
+                    "unit_id":        unit_id,
+                    "unit_title":     str(msg.get("unit_title", unit_id)),
+                    "achieved":       achieved,
+                    "current_level":  current_level or "pass",
+                    "next_criterion": next_criterion,
+                    "summary":        summary,
+                })
+                logger.info(
+                    "[AgentWS] BTEC progress updated — unit=%s level=%s achieved=%s next=%s",
+                    unit_id, current_level, achieved,
+                    next_criterion.get("code") if next_criterion else "—",
+                )
+                await send({
+                    "type":           "btec_progress_ack",
+                    "unit_id":        unit_id,
+                    "current_level":  current_level,
+                    "next_criterion": next_criterion,
+                    "achieved":       achieved,
+                    "summary":        summary,
+                })
+                asyncio.ensure_future(_analytics.update_btec_state(
+                    unit_id=unit_id,
+                    btec_level=current_level or "pass",
+                    next_criterion=(
+                        next_criterion.get("code")
+                        if isinstance(next_criterion, dict)
+                        else (next_criterion or "")
+                    ),
+                ))
+
+            elif msg_type == "set_persona":
+                # Frontend (or teacher panel) sends {"type":"set_persona","level":"pass"|"merit"|"distinction"}
+                # to switch Cogni's tone engine in real-time.
+                lvl = str(msg.get("level", "pass")).lower()
+                if lvl in ("pass", "merit", "distinction"):
+                    _old_level    = persona_level
+                    persona_level = lvl
+                    await send({"type": "persona_set", "level": persona_level})
+                    logger.info("[AgentWS] Triple-Persona level set to: %s", persona_level)
+                    asyncio.ensure_future(_analytics.log_persona_switch(_old_level, persona_level))
+                else:
+                    await send({"type": "error", "error": {
+                        "message": f"set_persona: invalid level '{lvl}' — must be pass|merit|distinction",
+                        "severity": "warn",
+                    }})
 
             else:
                 logger.debug("[AgentWS] Unknown message type: %s", msg_type)
@@ -470,3 +608,7 @@ async def agent_ws(websocket: WebSocket):
         if not heartbeat_task.done():
             heartbeat_task.cancel()
             logger.info("[AgentWS] Heartbeat ghost task successfully cancelled.")
+        try:
+            await _analytics.session_end()
+        except Exception:
+            pass

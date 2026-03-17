@@ -19,11 +19,13 @@ export default function PermissionBanner(): React.ReactElement | null {
         if (!mounted) return;
         const st: PermState = (q?.state as PermState) ?? 'unknown';
         setState(st);
-        setVisible(st !== 'granted');
+        // Only show the banner when the user has explicitly DENIED access.
+        // Do NOT show for 'prompt' (= not asked yet) — that is the normal initial state.
+        setVisible(st === 'denied');
         q?.addEventListener?.('change', () => {
           if (!mounted) return;
           setState(q.state as PermState);
-          setVisible(q.state !== 'granted');
+          setVisible(q.state === 'denied');
         });
       } catch {
         // Permissions API not supported — show banner only when 'mic:needs-user-gesture' fires.

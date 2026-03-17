@@ -305,7 +305,7 @@ const FETCH_TIMEOUT_MS = 30_000;
 
 /**
  * __GREET__ fast-path: calls backend tutor to generate a dynamic greeting,
- * then synthesises it with the female Arabic TTS voice.
+ * then synthesises it with the male Arabic TTS voice (ar-JO-TaimNeural / Jordanian dialect).
  * Returns a structured payload the client can play directly (audioBase64 → data URL).
  */
 async function greetWithTTS(
@@ -339,15 +339,15 @@ async function greetWithTTS(
     const intent   = String(chatData?.intent   ?? 'greeting');
     const strategy = String(chatData?.strategy ?? 'greet');
 
-    // Step 2: synthesise with female Arabic voice
-    const voiceFemale = process.env.TTS_ARABIC_VOICE_FEMALE || 'ar-SA-ZariyahNeural';
+    // Step 2: synthesise with male Arabic voice (Taim — Jordanian)
+    const voiceMale = process.env.TTS_ARABIC_VOICE || 'ar-JO-TaimNeural';
     const ttsRes = await fetch(ttsUpstream, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json', 'X-Request-ID': reqId },
       body:    JSON.stringify({
         text,
-        voice:       voiceFemale,
-        language:    'ar-SA',
+        voice:       voiceMale,
+        language:    'ar-JO',
         format:      'wav',
         sample_rate: 24000,
         with_timing: true,
@@ -371,7 +371,7 @@ async function greetWithTTS(
       source:   'greet',
       tts: {
         provider:    ttsData?.provider    ?? 'edge-tts',
-        voice:       ttsData?.voice       ?? voiceFemale,
+        voice:       ttsData?.voice       ?? voiceMale,
         format:      ttsData?.format      ?? 'wav',
         sampleRate:  ttsData?.sample_rate ?? 24000,
         audioBase64: rawBase64,

@@ -3,8 +3,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { createSTT } from '@/ai/io/stt';
-import { parseVeronaResponse } from '@/ai/avatar/brain';
-import { reactToUserInput, applyVeronaResponse } from '@/ai/avatar/actions';
+import { parseCogniResponse } from '@/ai/avatar/brain';
+import { reactToUserInput, applyCogniResponse } from '@/ai/avatar/actions';
 
 const QUICK_PROMPTS = [
   { label: '👋 قل مرحباً', text: 'مرحباً د. حمزة، كيف حالك؟' },
@@ -93,9 +93,9 @@ export default function EvaluateInterface() {
           if (first) s.delete(first);
         }
         s.add(assistantMessage.id);
-        const { dialogue, emotion, action } = parseVeronaResponse(reply);
+        const { dialogue, emotion, action } = parseCogniResponse(reply);
         // أطلق المشاعر والإيماءات المستخرجة من رد الذكاء
-        applyVeronaResponse(action, emotion);
+        applyCogniResponse(action, emotion);
         if (dialogue?.trim()) {
           window.dispatchEvent(new CustomEvent('avatar:speak', { detail: { text: dialogue.trim() } }));
         }
@@ -209,7 +209,7 @@ export default function EvaluateInterface() {
                       <span className="block text-xs font-medium opacity-80 mb-1">{msg.role === 'user' ? 'أنت' : 'د. حمزة'}</span>
                       <p className="text-sm leading-relaxed">
                         {msg.role === 'assistant'
-                          ? (parseVeronaResponse(msg.content).dialogue?.trim() || msg.content)
+                          ? (parseCogniResponse(msg.content).dialogue?.trim() || msg.content)
                           : msg.content}
                       </p>
                     </div>

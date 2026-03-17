@@ -139,9 +139,9 @@ export function dispatchGestureFromActionText(action: string): void {
 // ─── Emotion Dispatcher ─────────────────────────────────────────────────────
 
 /**
- * خريطة تحويل وسوم Verona إلى حالات عاطفة الأفاتار
+ * خريطة تحويل وسوم Cogni إلى حالات عاطفة الأفاتار
  */
-const VERONA_TO_AVATAR_EMOTION: Record<string, string> = {
+const COGNI_TO_AVATAR_EMOTION: Record<string, string> = {
   neutral:     'neutral',
   friendly:    'friendly',
   thinking:    'thinking',
@@ -151,12 +151,12 @@ const VERONA_TO_AVATAR_EMOTION: Record<string, string> = {
 };
 
 /**
- * إرسال حدث عاطفة الأفاتار من وسم Verona
+ * إرسال حدث عاطفة الأفاتار من وسم Cogni
  * مثال: dispatchEmotion('friendly') → avatar:emotion { emotion: 'friendly' }
  */
-export function dispatchEmotion(veronaEmotionTag: string): void {
+export function dispatchEmotion(emotionTag: string): void {
   if (typeof window === 'undefined') return;
-  const avatarEmotion = VERONA_TO_AVATAR_EMOTION[veronaEmotionTag.toLowerCase()] ?? 'neutral';
+  const avatarEmotion = COGNI_TO_AVATAR_EMOTION[emotionTag.toLowerCase()] ?? 'neutral';
   window.dispatchEvent(
     new CustomEvent('avatar:emotion', {
       detail: { emotion: avatarEmotion },
@@ -164,9 +164,9 @@ export function dispatchEmotion(veronaEmotionTag: string): void {
   );
 }
 
-// ─── Convenience: dispatch both gesture + emotion from parsed Verona response ──
+// ─── Convenience: dispatch both gesture + emotion from parsed Cogni response ──
 
-export function applyVeronaResponse(action: string, emotion: string): void {
+export function applyCogniResponse(action: string, emotion: string): void {
   dispatchEmotion(emotion);
   if (action) dispatchGestureFromActionText(action);
 }

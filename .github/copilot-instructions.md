@@ -10,8 +10,8 @@
 ### ملخص القواعد الحرجة
 | القاعدة | القيمة |
 |---------|--------|
-| Frontend port | **3011** (ليس 3000) |
-| TTS Voice | `ar-SA-ZariyahNeural` (ثابت) |
+| Frontend port | **3000** (ثابت في package.json و docker-compose.yml) |
+| TTS Voice | `ar-JO-OmarNeural` (ذكر أردني — الافتراضي) |
 | `v.update(delta)` | قبل bone rotation دائماً |
 | `combineSkeletons()` | **محظور** في evaluate/ |
 | `hooks/` path | root, ليس `src/hooks/` |

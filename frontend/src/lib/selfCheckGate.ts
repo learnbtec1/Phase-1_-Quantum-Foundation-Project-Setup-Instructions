@@ -1,7 +1,7 @@
 /**
  * selfCheckGate.ts — IGNIS v15.5
  * ─────────────────────────────────────────────────────────────────────────────
- * Validates and auto-fixes every Verona reply BEFORE it leaves the API route.
+ * Validates and auto-fixes every Cogni reply BEFORE it leaves the API route.
  * Run as a post-processing step on the raw AI response string.
  *
  * Checks (in order):
@@ -22,7 +22,7 @@ const EMOTION_TAG_RE = /\[EMOTION:\s*(neutral|friendly|thinking|encouraging|stri
 const ACTION_LINE_RE = /^\s*\*.+?\*\s*$/m;
 const PROGRESS_RE    = /lo\b|p\d|m\d|d\d|unit|\bnext\b|\bstep\b|\btask\b|\bنقطة\b|\bخطوة\b|\bتقدم\b/i;
 
-/** Validate & auto-repair a Verona 3-part reply. Returns the (possibly fixed) reply. */
+/** Validate & auto-repair a Cogni 3-part reply. Returns the (possibly fixed) reply. */
 export function runSelfCheck(text: string, lang: 'ar' | 'en' = 'ar'): string {
   if (!text?.trim()) return _fallback(lang);
 

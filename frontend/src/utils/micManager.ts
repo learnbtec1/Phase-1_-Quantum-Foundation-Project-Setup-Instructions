@@ -23,6 +23,9 @@ type StartOpts = {
 function setFlag(on: boolean): void {
   try { (window as unknown as Record<string, unknown>).__MIC_ACTIVE__ = on; } catch { /* SSR */ }
 }
+function setStreamOnWindow(s: MediaStream | null): void {
+  try { (window as unknown as Record<string, unknown>).__MIC_STREAM__ = s; } catch { /* SSR */ }
+}
 
 export async function ensureMicOpen(opts: StartOpts = {}): Promise<MediaStream> {
   // Already have a live stream — reuse it.
@@ -61,8 +64,9 @@ export async function ensureMicOpen(opts: StartOpts = {}): Promise<MediaStream> 
       micStream = s;
       lastError = null;
       setFlag(true);
+      setStreamOnWindow(s);
       s.getAudioTracks().forEach(t =>
-        t.addEventListener('ended', () => { micStream = null; setFlag(false); }),
+        t.addEventListener('ended', () => { micStream = null; setFlag(false); setStreamOnWindow(null); }),
       );
       return s;
     })
@@ -70,6 +74,7 @@ export async function ensureMicOpen(opts: StartOpts = {}): Promise<MediaStream> 
       lastError  = err;
       micStream  = null;
       setFlag(false);
+      setStreamOnWindow(null);
       throw err;
     })
     .finally(() => { startPromise = null; });
@@ -84,6 +89,7 @@ export function closeMic(): void {
   try { micStream?.getTracks().forEach(t => t.stop()); } catch { /* ignore */ }
   micStream = null;
   setFlag(false);
+  setStreamOnWindow(null);
 }
 
 /** Pick the best available audio-input device. Falls back to the first device. */

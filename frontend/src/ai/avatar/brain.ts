@@ -127,7 +127,7 @@ export function inferResponsePlan(reply: string): ResponsePlan {
 }
 
 /**
- * Parses a backend reply that may contain Verona-style action/emotion tokens:
+ * Parses a backend reply that may contain Cogni-style action/emotion tokens:
  *   "أهلاً! *تلوح بيدها* رائع [EMOTION: friendly]"
  *
  * Returns:
@@ -135,7 +135,7 @@ export function inferResponsePlan(reply: string): ResponsePlan {
  *   emotion  — first [EMOTION: X] value found, or 'neutral'
  *   action   — concatenated *stage direction* text (for gesture dispatch)
  */
-export function parseVeronaResponse(raw: string): { dialogue: string; emotion: string; action: string } {
+export function parseCogniResponse(raw: string): { dialogue: string; emotion: string; action: string } {
   const src = raw ?? '';
   // Extract first [EMOTION: X] tag
   const emotionMatch = src.match(/\[EMOTION:\s*([a-zA-Z]+)\]/i);

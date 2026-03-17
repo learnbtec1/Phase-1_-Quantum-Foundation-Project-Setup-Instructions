@@ -57,8 +57,8 @@ class Settings(BaseSettings):
     # TTS / Avatar Voice Configuration
     # ----------------------------
     # Jordanian Arabic voices (ar-JO dialect)
-    TTS_ARABIC_VOICE:        str = Field("ar-SA-ZariyahNeural", env="TTS_ARABIC_VOICE")
-    TTS_ARABIC_VOICE_FEMALE: str = Field("ar-SA-ZariyahNeural", env="TTS_ARABIC_VOICE_FEMALE")
+    TTS_ARABIC_VOICE:        str = Field("ar-JO-OmarNeural",   env="TTS_ARABIC_VOICE")
+    TTS_ARABIC_VOICE_FEMALE: str = Field("ar-JO-MaysoonNeural",   env="TTS_ARABIC_VOICE_FEMALE")
 
     # ----------------------------
     # Helper for OpenAI API Key Validation

@@ -6,7 +6,7 @@ Synthesize speech with word-level timing for lip-sync and viseme events.
 Priority chain:
   1. Azure Speech SDK (cloud, WAV 24k 16-bit mono) — NATIVE viseme + word-boundary timing
   2. Kokoro TTS (local, PCM) — best for non-Arabic
-  3. edge-tts streaming (ar-SA-ZariyahNeural) — REAL word-boundary timing + viseme events
+  3. edge-tts streaming (ar-JO-TaimNeural / ar-JO-SanaNeural) — REAL word-boundary timing + viseme events
   4. gTTS Arabic — last resort (estimated timings only)
 
 Hardening (v2):
@@ -55,8 +55,8 @@ logger = logging.getLogger(__name__)
 _CB_LOCK            = Lock()
 _cb_failures:   int = 0
 _cb_open_until: float = 0.0
-_CB_THRESHOLD   = 3      # consecutive failures before opening
-_CB_COOLDOWN    = 60.0   # seconds to stay open
+_CB_THRESHOLD   = 5      # consecutive failures before opening (raised from 3)
+_CB_COOLDOWN    = 20.0   # seconds to stay open (lowered from 60 so recovery is faster)
 
 
 def _azure_cb_ok() -> bool:
@@ -222,18 +222,105 @@ router = APIRouter()
 # Azure Speech SDK — Priority 1: native WAV 24k + native viseme/word timings
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_azure_ssml(text: str, voice: str) -> str:
-    """Build minimal SSML for Azure TTS. Using SSML (vs plain text) is required
-    for synthesis_word_boundary events to fire on Arabic neural voices."""
-    import html as _html
-    # Derive xml:lang from the voice name prefix (e.g. ar-SA-HamedNeural → ar-SA)
-    lang = "-".join(voice.split("-")[:2]) if "-" in voice else "ar-SA"
-    escaped = _html.escape(text)
+# ── Jordanian SSML helpers (shared with WebSocket path) ─────────────────────
+_RE_EN_TOKEN  = re.compile(r'([A-Za-z][A-Za-z0-9]*(?:[/-][A-Za-z0-9]+)*)')
+_RE_ACRONYM   = re.compile(r'^[A-Z][A-Z0-9]{1,}$')
+_RE_SENT_BOUN = re.compile(r'([.،؟!؟\n]+)\s*')
+
+# Emotion → (styledegree, rate_pct, pitch)
+_AZURE_EMOTION_PROSODY: Dict[str, tuple] = {
+    'thinking':    ('0.9', '82%',  '+1%'),
+    'sad':         ('1.0', '84%',  '-2%'),
+    'concerned':   ('1.0', '88%',  '+0%'),
+    'neutral':     ('1.0', '90%',  '+2%'),
+    'attentive':   ('1.1', '93%',  '+2%'),
+    'curious':     ('1.1', '93%',  '+2%'),
+    'friendly':    ('1.2', '92%',  '+2%'),
+    'strict':      ('1.3', '89%',  '+0%'),
+    'proud':       ('1.3', '97%',  '+2%'),
+    'happy':       ('1.4', '98%',  '+3%'),
+    'encouraging': ('1.5', '100%', '+3%'),
+    'excited':     ('1.8', '102%', '+4%'),
+    'surprised':   ('1.6', '101%', '+4%'),
+    'celebrate':   ('2.0', '103%', '+5%'),
+    'celebration': ('2.0', '103%', '+5%'),
+}
+
+
+def _xml_escape_tts(s: str) -> str:
+    return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;').replace("'", '&apos;')
+
+
+def _render_tts_segment(kind: str, content: str) -> str:
+    safe = _xml_escape_tts(content)
+    if kind == 'ar':
+        return safe
+    if _RE_ACRONYM.match(content):
+        return f'<lang xml:lang="en-GB"><say-as interpret-as="spell-out">{safe}</say-as></lang>'
+    return f'<lang xml:lang="en-GB">{safe}</lang>'
+
+
+def _build_azure_ssml(text: str, voice: str, emotion: str = 'neutral') -> str:
+    """
+    Build production-quality Jordanian SSML for Azure Neural TTS.
+    - mstts:express-as style="friendly" (natural JO persona, never falls back to MSA style)
+    - Emotion-aware rate/styledegree/pitch
+    - English acronyms (PESTLE, SWOT…) spelled letter-by-letter in en-GB
+    - Other English words rendered in en-GB phonetics
+    - Sentence-boundary breath pauses (200-320 ms)
+    """
+    # Derive xml:lang from the voice name (e.g. ar-JO-TaimNeural → ar-JO)
+    lang = "-".join(voice.split("-")[:2]) if "-" in voice else "ar-JO"
+    styledegree, rate_pct, pitch = _AZURE_EMOTION_PROSODY.get(
+        (emotion or 'neutral').lower(),
+        ('1.0', '95%', '+2%'),
+    )
+
+    tokens = _RE_SENT_BOUN.split(text)
+    parts: list = []
+    i = 0
+    while i < len(tokens):
+        chunk = tokens[i].strip()
+        i += 1
+        punct = tokens[i].strip() if i < len(tokens) else ''
+        if punct:
+            i += 1
+        if not chunk and not punct:
+            continue
+        # Build inner markup for this clause
+        segs = []
+        last = 0
+        for m in _RE_EN_TOKEN.finditer(chunk):
+            if m.start() > last:
+                segs.append(_render_tts_segment('ar', chunk[last:m.start()]))
+            segs.append(_render_tts_segment('en', m.group()))
+            last = m.end()
+        if last < len(chunk):
+            segs.append(_render_tts_segment('ar', chunk[last:]))
+        inner = ''.join(segs)
+        is_q = bool(punct) and ('؟' in punct or '?' in punct)
+        if inner:
+            if is_q:
+                parts.append(f'<prosody pitch="+8%">{inner}{_xml_escape_tts(punct)}</prosody>')
+            else:
+                parts.append(inner + (_xml_escape_tts(punct) if punct else ''))
+        if punct and i < len(tokens):
+            pause_ms = 320 if ('.' in punct or '\n' in punct) else 200
+            parts.append(f'<break time="{pause_ms}ms"/>')
+
+    body = '\n'.join(parts)
     return (
         f'<speak version="1.0" '
         f'xmlns="http://www.w3.org/2001/10/synthesis" '
+        f'xmlns:mstts="https://www.w3.org/2001/mstts" '
         f'xml:lang="{lang}">'
-        f'<voice name="{voice}">{escaped}</voice>'
+        f'<voice name="{voice}" xml:lang="{lang}">'
+        f'<mstts:express-as style="friendly" styledegree="{styledegree}" xml:lang="{lang}">'
+        f'<prosody rate="{rate_pct}" pitch="{pitch}">'
+        f'{body}'
+        f'</prosody>'
+        f'</mstts:express-as>'
+        f'</voice>'
         f'</speak>'
     )
 
@@ -243,6 +330,7 @@ def _synthesize_azure_sync(
     key: str,
     region: str,
     voice: str,
+    emotion: str = 'neutral',
 ) -> Tuple[bytes, List[Dict[str, Any]], List[Dict[str, Any]], bool]:
     """Synchronous Azure TTS call.
 
@@ -287,7 +375,7 @@ def _synthesize_azure_sync(
     synthesizer.synthesis_word_boundary.connect(_on_word)
 
     # SSML input is required for synthesis_word_boundary to fire on Arabic voices
-    ssml = _build_azure_ssml(text, voice)
+    ssml = _build_azure_ssml(text, voice, emotion=emotion)
     result = synthesizer.speak_ssml_async(ssml).get()
 
     synthesizer.viseme_received.disconnect_all()
@@ -332,11 +420,12 @@ async def _synthesize_azure(
     key: str,
     region: str,
     voice: str,
+    emotion: str = 'neutral',
 ) -> Tuple[bytes, List[Dict[str, Any]], List[Dict[str, Any]], bool]:
     """Async wrapper — runs the blocking SDK call in a thread pool executor."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
-        None, _synthesize_azure_sync, text, key, region, voice
+        None, _synthesize_azure_sync, text, key, region, voice, emotion
     )
 
 
@@ -383,8 +472,8 @@ def _word_first_viseme(word: str) -> int:
 # تعريفات اللهجة الأردنية — Jordanian Arabic Dialect Voice Profile
 # ════════════════════════════════════════════════════════════════════════════
 #
-# الصوت الأنثوي : ar-SA-ZariyahNeural  → الصوت الافتراضي (المعلّمة)
-# الصوت الذكوري : ar-JO-TaimNeural     → (عند الطلب فقط ar_voice='male')
+# الصوت الذكوري   : ar-JO-OmarNeural   → الصوت الافتراضي الحصري (Dr. Hamza)
+# الصوت الأنثوي : ar-JO-MaysoonNeural   → احتياطي نادر جداً (تجنب استخدامه)
 #
 # خصائص اللهجة الأردنية في edge-tts:
 #   • rate  : إزاحة النسبة المئوية عن الإيقاع الطبيعي للصوت  (e.g. '+5%', '-10%')
@@ -400,8 +489,8 @@ def _word_first_viseme(word: str) -> int:
 # ════════════════════════════════════════════════════════════════════════════
 
 # الأصوات الأردنية — مصدرها الإعدادات (قابلة للتغيير عبر .env)
-EDGE_TTS_ARABIC_MALE   = settings.TTS_ARABIC_VOICE          # ar-JO-TaimNeural
-EDGE_TTS_ARABIC_FEMALE = settings.TTS_ARABIC_VOICE_FEMALE   # ar-JO-SanaNeural
+EDGE_TTS_ARABIC_MALE   = settings.TTS_ARABIC_VOICE          # ar-JO-OmarNeural
+EDGE_TTS_ARABIC_FEMALE = settings.TTS_ARABIC_VOICE_FEMALE   # ar-JO-MaysoonNeural
 
 # ── بروفايل اللهجة الأردنية: المشاعر الستة الأساسية + مشاعر موسّعة ──────────
 # rate/pitch مُعايَرة خصيصاً لصوت ar-JO-TaimNeural لأفضل طبيعية في العربية الأردنية
@@ -445,7 +534,7 @@ async def _synthesize_edge_tts(
     """
     import edge_tts  # already in requirements.txt
 
-    _voice = voice or EDGE_TTS_ARABIC_FEMALE
+    _voice = voice or EDGE_TTS_ARABIC_MALE
     # boundary='WordBoundary' is REQUIRED to receive per-word timing events.
     # The default 'SentenceBoundary' only emits sentence-level events and
     # produces 0 word timings — which breaks lip-sync viseme scheduling.
@@ -539,7 +628,7 @@ class TTSResponse(BaseModel):
     format:       str = "wav"            # "wav" | "mp3" | "pcm"
     timing_mode:  str = "approx"         # "native" (Azure events) | "real" (edge-tts) | "approx" (estimated/duration)
     provider:     Optional[str] = None   # "azure" | "edge-tts" | "kokoro" | "gtts"
-    voice:        Optional[str] = None   # e.g. "ar-SA-ZariyahNeural"
+    voice:        Optional[str] = None   # e.g. "ar-JO-TaimNeural" (male) or "ar-JO-SanaNeural" (female)
 
 
 # ── Multi-chunk Azure synthesis ────────────────────────────────────────────────
@@ -549,6 +638,7 @@ async def _synthesize_azure_chunked(
     key: str,
     region: str,
     voice: str,
+    emotion: str = 'neutral',
 ) -> Tuple[bytes, List[Dict[str, Any]], List[Dict[str, Any]], bool]:
     """Synthesize text that may exceed _MAX_CHUNK chars.
 
@@ -557,7 +647,7 @@ async def _synthesize_azure_chunked(
     """
     chunks = _chunk_text(text)
     if len(chunks) == 1:
-        return await _synthesize_azure(text, key, region, voice)
+        return await _synthesize_azure(text, key, region, voice, emotion=emotion)
 
     wav_list: List[bytes]           = []
     all_words: List[Dict[str, Any]] = []
@@ -566,7 +656,7 @@ async def _synthesize_azure_chunked(
     offset_ms  = 0.0
 
     for chunk in chunks:
-        wav, words, vis, approx = await _synthesize_azure(chunk, key, region, voice)
+        wav, words, vis, approx = await _synthesize_azure(chunk, key, region, voice, emotion=emotion)
         wav_list.append(wav)
         for w in words:
             all_words.append({**w, "start_time": w["start_time"] + offset_ms,
@@ -578,6 +668,14 @@ async def _synthesize_azure_chunked(
         offset_ms += _wav_duration_ms(wav)
 
     return _merge_wav_chunks(wav_list), all_words, all_vis, any_approx
+
+
+# ── Circuit-breaker reset endpoint ───────────────────────────────────────────
+@router.post("/tts-reset-circuit")
+async def tts_reset_circuit():
+    """Reset the Azure TTS circuit breaker (useful after a transient failure)."""
+    _azure_cb_record_success()
+    return {"ok": True, "message": "Azure TTS circuit breaker reset"}
 
 
 # ── Main endpoint ──────────────────────────────────────────────────────────────
@@ -619,10 +717,10 @@ async def tts_with_timing(
 
     # Resolve Jordanian Arabic voice (for edge-tts fallback)
     _ar_voice_req = (payload.ar_voice or '').strip().lower()
-    if _ar_voice_req == 'male':
-        ar_voice_name = EDGE_TTS_ARABIC_MALE
-    elif _ar_voice_req in ('female', ''):   # default = female when unspecified
+    if _ar_voice_req == 'female':
         ar_voice_name = EDGE_TTS_ARABIC_FEMALE
+    elif _ar_voice_req == 'male' or not _ar_voice_req:  # default = Cogni / Taim (male)
+        ar_voice_name = EDGE_TTS_ARABIC_MALE
     else:
         ar_voice_name = payload.ar_voice  # accept full voice name as-is
 
@@ -655,6 +753,7 @@ async def tts_with_timing(
                     key=_azure_key,
                     region=_azure_region,
                     voice=_azure_voice,
+                    emotion=(payload.emotion or 'neutral'),
                 )
             _azure_cb_record_success()
             b64 = base64.b64encode(wav_bytes).decode("ascii")

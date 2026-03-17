@@ -15,7 +15,45 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
+import sys
 from typing import Optional
+
+# Force UTF-8 on stdout/stderr at import time (Windows cp1252 fallback guard).
+# logger.debug() with Arabic text raises UnicodeEncodeError when the logging
+# StreamHandler writes to a cp1252 console, which then gets caught by the generic
+# except-block and returned to the browser as a confusing charmap error message.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
+def _patch_logging_handlers() -> None:
+    """Reconfigure ALL StreamHandlers on ALL loggers to UTF-8.
+
+    Called once at import and again from the FastAPI lifespan after uvicorn
+    completes its own logging setup.
+
+    WHY iterating root is NOT enough:
+      uvicorn does NOT add its handlers to logging.root — it adds them to the
+      named loggers 'uvicorn', 'uvicorn.access', and 'uvicorn.error'.
+      Those handlers run with the Windows cp1252 default and raise
+      UnicodeEncodeError when any log message contains Arabic text.
+    """
+    # Walk root + every named logger registered in the manager dict.
+    _loggers_to_patch: list[logging.Logger] = [logging.root]
+    for _lg in logging.root.manager.loggerDict.values():
+        if isinstance(_lg, logging.Logger):
+            _loggers_to_patch.append(_lg)
+
+    for _log in _loggers_to_patch:
+        for _lh in _log.handlers:
+            if hasattr(_lh, 'stream') and hasattr(_lh.stream, 'reconfigure'):
+                try:
+                    _lh.stream.reconfigure(encoding='utf-8', errors='replace')
+                except Exception:
+                    pass
+
+_patch_logging_handlers()  # patch whatever exists now
 
 try:
     from app.services.settings import STT_MIN_MS, STT_MAX_MB, STT_MIME_OK
@@ -25,6 +63,16 @@ except Exception:
     STT_MIME_OK = ["audio/webm", "audio/ogg", "audio/wav", "audio/mp4"]
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_log(text: object, maxlen: int = 80) -> str:
+    """Return an ASCII-safe representation of text for logging.
+
+    Prevents 'charmap' UnicodeEncodeError when a logging StreamHandler
+    writes to a cp1252 / latin-1 Windows console.  Uses Python's built-in
+    ``ascii()`` which escapes every non-ASCII character as \\uXXXX.
+    """
+    return ascii(str(text)[:maxlen])
 
 
 class STTError(Exception):
@@ -222,7 +270,6 @@ async def transcribe_audio(
     """
     label = f"[STT req={req_id}]" if req_id else "[STT]"
     logger.info("%s [STT_START] size=%d mime=%s", label, len(audio_bytes), mime_type)
-    print(f"{label} [STT_START] size={len(audio_bytes)} bytes mime={mime_type!r}", flush=True)
 
     # Validate before touching the model
     validate_audio(audio_bytes, mime_type)
@@ -234,9 +281,8 @@ async def transcribe_audio(
         import numpy as np
 
         pcm_bytes, detected_sr = _extract_pcm(audio_bytes)
-        if len(pcm_bytes) < 640:  # < 20 ms of audio at 16 kHz → skip
+        if len(pcm_bytes) < 3200:  # < 100 ms of audio at 16 kHz → skip (avoids noise/click false positives)
             logger.info("%s [STT_ERROR] audio_too_short bytes=%d", label, len(pcm_bytes))
-            print(f"{label} [STT_ERROR] audio_too_short pcm={len(pcm_bytes)} bytes", flush=True)
             raise STTError("audio_too_short", "لم أسمع شيئاً — حاول مرة أخرى")
 
         # int16 requires an even-length buffer (2 bytes per sample).
@@ -253,7 +299,6 @@ async def transcribe_audio(
         duration_ms = int(len(audio_array) / max(detected_sr, 1) * 1000)
         if duration_ms < STT_MIN_MS:
             logger.info("%s [STT_ERROR] duration_too_short ms=%d", label, duration_ms)
-            print(f"{label} [STT_ERROR] duration_too_short {duration_ms}ms < min {STT_MIN_MS}ms", flush=True)
             raise STTError("audio_too_short", f"مدة الصوت {duration_ms} ms أقل من الحد الأدنى ({STT_MIN_MS} ms)")
 
         def _run_transcription() -> str:
@@ -269,13 +314,21 @@ async def transcribe_audio(
                     # Suppress hallucinations on noise/silence:
                     no_speech_threshold=0.6,
                     condition_on_previous_text=False,
-                    # Arabic-tuned initial prompt:
-                    initial_prompt="هذا حديث عربي يتعلق بـ BTEC.",
+                    # VAD filter removes non-speech frames before Whisper processing
+                    # — dramatically reduces hallucinations on silence/background noise.
+                    vad_filter=True,
+                    # Greedy decoding: faster + more deterministic for academic Arabic.
+                    temperature=0.0,
+                    # Academic Arabic BTEC context: improves vocabulary accuracy
+                    # and prevents confusion between similar-sounding terms.
+                    initial_prompt="هذا حوار أكاديمي باللغة العربية الفصحى حول BTEC ومعايير Pass وMerit وDistinction وتحليل PESTLE وSWOT واستراتيجية الأعمال.",
                 )
                 result = " ".join(s.text.strip() for s in segments if s.text.strip())
+                # Use ascii=True-style repr to avoid UnicodeEncodeError when logging
+                # Arabic text through a cp1252 Windows console handler.
                 logger.debug(
-                    "[STT] faster-whisper: lang=%s prob=%.2f text=%r",
-                    info.language, info.language_probability, result[:80],
+                    "[STT] faster-whisper: lang=%s prob=%.2f text=%s",
+                    info.language, info.language_probability, _safe_log(result),
                 )
                 return result
 
@@ -291,21 +344,24 @@ async def transcribe_audio(
         text = (raw_text or "").strip()
 
         if _is_hallucination(text):
-            logger.info("%s [STT_ERROR] hallucination_filtered text=%r", label, text)
-            print(f"{label} [STT_ERROR] hallucination_filtered text={text!r}", flush=True)
+            logger.info("%s [STT_ERROR] hallucination_filtered text=%s", label, _safe_log(text))
             raise STTError("no_speech_detected", "لم أسمع شيئاً — حاول مرة أخرى")
 
         duration_s = duration_ms / 1000.0
         logger.info(
-            "%s [STT_SUCCESS] model=%s duration=%.1fs text=%r",
-            label, _loaded_model_size, duration_s, text[:80],
+            "%s [STT_SUCCESS] model=%s duration=%.1fs text=%s",
+            label, _loaded_model_size, duration_s, _safe_log(text),
         )
-        print(f"{label} [STT_SUCCESS] model={_loaded_model_size} duration={duration_s:.1f}s text={text[:120]!r}", flush=True)
         return text
 
     except STTError:
         raise  # re-raise without wrapping
     except Exception as exc:
-        logger.exception("%s [STT_ERROR] unexpected: %s", label, exc)
-        print(f"{label} [STT_ERROR] unexpected: {exc}", flush=True)
-        raise STTError("transcription_error", f"STT خطأ غير متوقع: {exc}")
+        # Use _safe_log so a UnicodeEncodeError in the logger itself never
+        # obscures the real exception message (the charmap bug we fixed).
+        try:
+            logger.exception("%s [STT_ERROR] unexpected: %s", label, _safe_log(exc))
+        except Exception:
+            pass  # logging must never kill the pipeline
+        _exc_safe = str(exc).encode('utf-8', errors='replace').decode('utf-8')
+        raise STTError("transcription_error", f"STT خطأ غير متوقع: {_exc_safe}")

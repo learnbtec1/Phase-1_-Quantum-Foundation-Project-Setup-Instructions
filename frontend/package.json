@@ -4,12 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev -p 3011 --webpack",
-    "dev:port": "set PORT=3011&& next dev -p 3011",
-    "dev:3000": "next dev -p 3000 --webpack",
-    "dev:turbo": "next dev -p 3011",
-    "build": "next build --webpack",
-    "start": "next start",
+    "dev": "next dev -H 0.0.0.0 -p 3000",
+    "build": "next build",
+    "start": "next start -H 0.0.0.0 -p 3000",
     "lint": "next lint",
     "type-check": "tsc --noEmit",
     "test:ui": "playwright test -c playwright.ui.config.ts --headed --project=chromium --reporter=list"

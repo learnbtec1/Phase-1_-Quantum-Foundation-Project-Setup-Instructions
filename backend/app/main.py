@@ -8,6 +8,12 @@ import sys
 import os
 import time as _time
 
+# Force UTF-8 on stdout/stderr — prevents charmap/cp1252 errors on Windows when logging Arabic text
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 # Ensure the backend directory is in the Python path
 _backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _backend_dir not in sys.path:
@@ -26,6 +32,7 @@ from app.api.v1.endpoints.tts_timing import router as tts_timing_router
 from app.api.v1.endpoints.agent_ws import router as agent_ws_router
 from app.api.v1.endpoints.nexus_ip import router as nexus_ip_router
 from app.api.v1.endpoints.reports import router as reports_router
+from app.api.v1.endpoints.btec_ingest import router as btec_router
 from app.api.memory import router as memory_router
 
 from app.core.config import settings
@@ -79,6 +86,14 @@ async def lifespan(app_instance):
     """Pre‑warm TTS and STT models on startup and initialize Azure TTS service."""
     import asyncio
     loop = asyncio.get_running_loop()
+
+    # 0) Re-patch logging handlers that uvicorn registered AFTER our module-top
+    #    patch ran.  This prevents cp1252 UnicodeEncodeError in Windows consoles.
+    try:
+        from app.services.whisper_stt import _patch_logging_handlers
+        _patch_logging_handlers()
+    except Exception:
+        pass
 
     # 1) Kokoro TTS (local)
     try:
@@ -139,8 +154,6 @@ app = FastAPI(
 ALLOW_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "http://localhost:3011",
-    "http://127.0.0.1:3011",
 ]
 # Allow extra origins via env var (space-separated) for deployment flexibility
 _extra_origins = os.getenv("EXTRA_ORIGINS", "").split()
@@ -166,6 +179,7 @@ app.include_router(agent_ws_router)  # mounts at /ws/agent (no prefix — path d
 app.include_router(nexus_ip_router)  # NEXUS IP: /api/v1/nexus/*
 app.include_router(reports_router)   # Academic PDF reports: /api/v1/reports/*
 app.include_router(memory_router)    # Conversation memory: /api/v1/memory/*
+app.include_router(btec_router, prefix="/api/v1")  # BTEC Knowledge Ingestion: /api/v1/btec/*
 
 
 @app.get("/api/health")

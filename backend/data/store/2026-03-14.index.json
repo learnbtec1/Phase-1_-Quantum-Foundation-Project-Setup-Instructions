@@ -7792,5 +7792,41 @@
     "wav_path": "data/audio/2026-03-14/0af4bd0e-54f9-4d59-8806-541715e6a9f3.wav",
     "word_count": 11,
     "viseme_count": 22
+  },
+  "7d790c0c-1f11-4dbc-a8ee-93f2e1282044": {
+    "ts": "2026-03-14T18:32:28.381Z",
+    "provider": "azure",
+    "timing_mode": "approx",
+    "duration_ms": 1900,
+    "wav_path": "data/audio/2026-03-14/7d790c0c-1f11-4dbc-a8ee-93f2e1282044.wav",
+    "word_count": 2,
+    "viseme_count": 15
+  },
+  "b9413b54-ae58-440c-9f6b-8d022151a126": {
+    "ts": "2026-03-14T18:32:43.877Z",
+    "provider": "azure",
+    "timing_mode": "approx",
+    "duration_ms": 1900,
+    "wav_path": "data/audio/2026-03-14/b9413b54-ae58-440c-9f6b-8d022151a126.wav",
+    "word_count": 2,
+    "viseme_count": 15
+  },
+  "314695ae-a99d-43f1-a210-bef3decb4d61": {
+    "ts": "2026-03-14T19:39:51.981Z",
+    "provider": "azure",
+    "timing_mode": "approx",
+    "duration_ms": 2710,
+    "wav_path": "data/audio/2026-03-14/314695ae-a99d-43f1-a210-bef3decb4d61.wav",
+    "word_count": 3,
+    "viseme_count": 27
+  },
+  "f05d29c7-df6f-43e0-a38c-c27f3410eea4": {
+    "ts": "2026-03-14T19:44:50.556Z",
+    "provider": "azure",
+    "timing_mode": "approx",
+    "duration_ms": 2315,
+    "wav_path": "data/audio/2026-03-14/f05d29c7-df6f-43e0-a38c-c27f3410eea4.wav",
+    "word_count": 3,
+    "viseme_count": 18
   }
 }

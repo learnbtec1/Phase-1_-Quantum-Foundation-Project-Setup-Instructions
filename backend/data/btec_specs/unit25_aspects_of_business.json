@@ -1,0 +1,71 @@
+{
+  "unit_id": "unit25",
+  "title": "Unit 25: Aspects of Business",
+  "qualification": "BTEC Level 3 Business",
+  "description": "This unit introduces learners to the nature of businesses and their internal and external environments.",
+  "criteria": [
+    {
+      "code": "P1",
+      "level": "pass",
+      "description": "Explain the features of different types of business organisations",
+      "scaffold_question": "هل يمكنك شرح الفروق الأساسية بين المنظمة الربحية والغير ربحية؟ وما خصائص كل منهما؟",
+      "keywords": ["business organisation", "profit", "non-profit", "private", "public", "features"]
+    },
+    {
+      "code": "P2",
+      "level": "pass",
+      "description": "Describe the different stakeholders who influence the purpose of two contrasting businesses",
+      "scaffold_question": "صف أصحاب المصلحة في الشركة التي تدرسها — من هم؟ وكيف يؤثر كل منهم على أهداف الشركة؟",
+      "keywords": ["stakeholders", "influence", "purpose", "employees", "customers", "owners"]
+    },
+    {
+      "code": "P3",
+      "level": "pass",
+      "description": "Describe how two businesses are organised",
+      "scaffold_question": "صف الهيكل التنظيمي للشركة التي اخترتها — هل هو هرمي، مسطح، أم مصفوفة؟ ورسم تخطيطي إن أمكن.",
+      "keywords": ["organisational structure", "hierarchy", "flat", "matrix", "departments", "chain of command"]
+    },
+    {
+      "code": "P4",
+      "level": "pass",
+      "description": "Outline the functional areas and how they interrelate in two contrasting businesses",
+      "scaffold_question": "ما الأقسام الوظيفية الرئيسية في الشركة؟ كقسم التسويق والمالية والموارد البشرية — وكيف يعمل كل منها؟",
+      "keywords": ["functional areas", "marketing", "finance", "HR", "operations", "interrelate"]
+    },
+    {
+      "code": "M1",
+      "level": "merit",
+      "description": "Explain how the style of organisation helps two businesses to fulfil their purposes",
+      "scaffold_question": "قارن: كيف يساعد الهيكل التنظيمي المسطح مقابل الهرمي على تحقيق أهداف الشركة؟ أذكر أمثلة محددة.",
+      "keywords": ["explain", "compare", "organisational style", "fulfil purpose", "hierarchy vs flat", "effectiveness"]
+    },
+    {
+      "code": "M2",
+      "level": "merit",
+      "description": "Explain the points of view of different stakeholders seeking to influence the aims and objectives of two contrasting organisations",
+      "scaffold_question": "حلّل: كيف تختلف مصالح المساهمين عن مصالح الموظفين والمجتمع؟ وما التوترات المحتملة بينهم؟",
+      "keywords": ["analyse", "stakeholder conflict", "aims", "objectives", "points of view", "tensions"]
+    },
+    {
+      "code": "M3",
+      "level": "merit",
+      "description": "Describe the influence of two contrasting economic environments on business activities within a selected organisation",
+      "scaffold_question": "حلّل تأثير التضخم أو الركود الاقتصادي على قرارات الشركة التي تدرسها — ادعم إجابتك ببيانات.",
+      "keywords": ["economic environment", "inflation", "recession", "growth", "business activities", "influence"]
+    },
+    {
+      "code": "D1",
+      "level": "distinction",
+      "description": "Evaluate the influence different stakeholders exert on one of the organisations",
+      "scaffold_question": "قيّم: أي أصحاب المصلحة لهم التأثير الأكبر على قرارات الشركة؟ دعّم موقفك بأدلة ونماذج أكاديمية.",
+      "keywords": ["evaluate", "stakeholder power", "influence", "evidence", "justify", "recommend"]
+    },
+    {
+      "code": "D2",
+      "level": "distinction",
+      "description": "Fully justify recommendations for appropriate responses by organisations to changes in the economic environment",
+      "scaffold_question": "طوّر: ما التوصيات الاستراتيجية التي تقدّمها للشركة للتكيّف مع تغيرات الاقتصاد؟ برّر كل توصية بمنطق أكاديمي.",
+      "keywords": ["justify", "recommendations", "strategic response", "economic change", "sustainability", "evaluation"]
+    }
+  ]
+}

@@ -23,7 +23,8 @@ import { VRM, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
 import type { VRMAnimation } from '@pixiv/three-vrm-animation';
 import styles from './AvatarCanvas.module.css';
-import { perlinNoise, Easing, lerp } from './utils';
+import { createNoise3D } from 'simplex-noise';
+import { Easing, lerp } from './utils';
 import { VRM_FALLBACKS } from '@/config/avatar';
 import { RoomShell, ROOM_BOUNDS } from './scene/RoomShell';
 import { LightingRig }       from './scene/LightingRig';
@@ -40,7 +41,8 @@ import RoyalMaterialsOverride from '@/components/RoyalMaterialsOverride';
 import { ParquetFloor }      from './scene/ParquetFloor';
 import { resolveIfEnabled }  from './physics/WorldColliders';
 import { OfficeDebugHUD }    from './debug/OfficeDebugHUD';
-import { selectFemaleArabicVoice } from '@/utils/selectFemaleArabicVoice';
+
+import { motionLogger, type BlendshapeSnapshot, type BoneSnapshot, type QuatTuple } from '@/utils/MotionLogger';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const AVATAR_BASE_Y = -1.0;   // matches ROOM_BOUNDS.floorY — avatar feet on GLB floor
@@ -48,6 +50,20 @@ const BREATHE_AMP   = 0.06;
 const BLINK_MIN     = 2.2;   // seconds
 const BLINK_MAX     = 4.5;
 const WAVE_DURATION = 3.5;   // seconds — greeting wave on load
+
+// ── Organic noise engine — true simplex noise (replaces fake sine-hash perlinNoise) ──────
+// createNoise3D() produces band-limited, non-repeating organic values in [-1, 1].
+// Using a single persistent instance keeps the noise field coherent across frames.
+const _noise3D = createNoise3D();
+
+// ── Auto-patrol waypoints (slow walk around the office) ──────────────────────
+// Four points inside ROOM_BOUNDS (X: -3..3, Z: -5..3) away from desk & walls.
+const PATROL_WAYPOINTS: [number, number][] = [
+  [-1.5, -2.5],   // front-left  (in front of desk)
+  [ 1.5, -2.5],   // front-right
+  [ 1.5,  0.2],   // back-right
+  [-1.5,  0.2],   // back-left
+];
 
 // ── VRMA animation file map ───────────────────────────────────────────────────
 const VRMA_IDLE  = ['Idle1', 'Idle2', 'Idle3', 'Idle4'].map(n => `/models/animations/${n}.vrma`);
@@ -77,8 +93,18 @@ const VRMA_PATHS: Record<string, string> = {
   sitPoint:    '/models/animations/Sitting%20and%20pointing.vrma',
   sitDisappr:  '/models/animations/Sitting%20Disapproval.vrma',
   sitTalk2:    '/models/animations/Sitting%20%20and%20talking.vrma',
+  walk:        '/models/animations/Walking.vrma',
+  stopWalk:    '/models/animations/stop%20walking.vrma',
   pace:        '/models/animations/Pacing%20And%20Talking%20On%20A%20Phone.vrma',
   untitled:    '/models/animations/Untitled.vrma',
+  // ── MotionPack (pixiv VRoid Project) ─────────────────────────────────────
+  showBody:    '/models/animations/VRMA_MotionPack/vrma/VRMA_01.vrma',  // Show full body
+  greet:       '/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma',  // Greeting
+  peace:       '/models/animations/VRMA_MotionPack/vrma/VRMA_03.vrma',  // Peace sign
+  shoot:       '/models/animations/VRMA_MotionPack/vrma/VRMA_04.vrma',  // Shoot
+  spin:        '/models/animations/VRMA_MotionPack/vrma/VRMA_05.vrma',  // Spin
+  pose:        '/models/animations/VRMA_MotionPack/vrma/VRMA_06.vrma',  // Model pose
+  squat:       '/models/animations/VRMA_MotionPack/vrma/VRMA_07.vrma',  // Squat
 };
 
 // ── Azure Viseme ID → VRM morph-target weight map ───────────────────────────
@@ -128,12 +154,20 @@ const VRM1_TO_VRM0: Readonly<Record<string, string>> = {
   lookUp:    'LookUp',
 };
 
+// ── Shortest-path angle lerp — prevents 360° spin at ±π boundary ─────────────
+const lerpAngle = (a: number, b: number, t: number): number => {
+  let d = b - a;
+  while (d >  Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+};
+
 // ── SimpleAvatarPlaceholder — rendered when all VRM candidates fail ────────
 function SimpleAvatarPlaceholder(): React.JSX.Element {
   return (
     <div className="flex flex-col items-center justify-center w-full h-full bg-[radial-gradient(ellipse_at_center,#1a1a2e_0%,#0a0a14_100%)] text-gray-400">
       <div className="text-6xl mb-4">🤖</div>
-      <div className="text-lg opacity-80">Verona Avatar</div>
+      <div className="text-lg opacity-80">Cogni (EDUVERSE)</div>
       <div className="text-sm opacity-50 mt-2">3D model unavailable</div>
     </div>
   );
@@ -149,6 +183,12 @@ function VRMScene({
   onLoad: () => void;
   onError: (err: string) => void;
 }) {
+  // 🔥 TRACER BULLET — confirms this file/version is the one being executed
+  if (typeof window !== 'undefined' && !(window as typeof window & { __TRACER_LOGGED__?: boolean }).__TRACER_LOGGED__) {
+    (window as typeof window & { __TRACER_LOGGED__?: boolean }).__TRACER_LOGGED__ = true;
+    console.log('🔥 [SYSTEM] NEW SOVEREIGN CANVAS LOADED — F3 CLAMPING ACTIVE (±0.3 neck, ±0.45 head)');
+  }
+
   const [vrm, setVrm]     = useState<VRM | null>(null);
   const vrmRef            = useRef<VRM | null>(null);
   const groupRef          = useRef<THREE.Group>(null);
@@ -178,10 +218,14 @@ function VRMScene({
   const blinkPhaseRef     = useRef(0);
   // Double-blink for surprise/excited
   const blinkCountRef     = useRef(0);
-  const walkUntilRef      = useRef(0);
+  // Asymmetric blink: left/right eye close at slightly different phases (biologically realistic)
+  // Value in [0, 0.25] rad — randomised on each new blink trigger.
+  const blinkAsymRef      = useRef(0.08);
+  const walkUntilRef      = useRef(Date.now() + 200);  // start walking from first frame
   const nodUntilRef       = useRef(0);
   const nodStartRef       = useRef(0);    // timestamp when current nod began
   const nodDurationRef    = useRef(1500); // ms — duration of current nod
+  const autoNodNextRef    = useRef(Date.now() + 4000); // autonomous micro-nod scheduler (3–7 s)
   const laughUntilRef     = useRef(0);
   const voiceRateRef      = useRef(1.0);
   // Head-pose lerp targets (set by avatar:headpose events)
@@ -210,20 +254,43 @@ function VRMScene({
   const eyeWorldTargetRef = useRef(new THREE.Vector3(0, 0.1, 3)); // smoothed eye target
   const neckGazeYawRef    = useRef(0);   // current neck contribution (rad)
   const neckGazePitchRef  = useRef(0);
+  const vrmFirstFrameRef  = useRef(true); // skip lerp on first frame after VRM load
 
   // ── §2 Procedural weight-shift / hip-sway ────────────────────────────────
   // Pelvis lateral shift: gentle S-curve driven by low-freq Perlin noise.
   const hipShiftRef       = useRef(0);   // current rendered X offset (metres)
   // Subtle idle head-roll (±2°) driven by opposite Perlin channel to sway
-  const headRollRef       = useRef(0);
+  const headRollRef        = useRef(0);
+  const headRollEmotionRef = useRef(0); // emotion-driven roll tilt (friendly=-0.08, cleared by non-roll emotions)
+  // ── Smooth head-pose refs — tracked INDEPENDENTLY of the VRMA bone register.
+  // The previous pattern `lerp(headBone.rotation.y, target, 0.15)` read the bone
+  // VALUE which the VRMA mixer resets to its keyframe every frame, causing the head
+  // to never exceed ~15 % of the intended rotation (the rigid-loop trap).
+  // Fix: lerp these refs, then direct-assign to the bone — same pattern as neckBone.
+  const headYawSmoothRef   = useRef(0);
+  const headPitchSmoothRef = useRef(0);
+  const headRollSmoothRef  = useRef(0);
   // Micro-expression refs
   const microExprUntilRef = useRef(0);
   const microExprTypeRef  = useRef<'eyebrowRaise'|'squint'|'halfSmile'|'none'>('none');
+  // Auto-scheduled micro-expression / idle nod / gaze-break schedulers
+  const autoMicroExprNextRef = useRef(Date.now() + 8000 + Math.random() * 12000); // fire every 8-20 s
+  const idleNodNextRef       = useRef(Date.now() + 25000 + Math.random() * 20000); // fire every 25-45 s
+  const gazeBreakNextRef     = useRef(Date.now() + 10000 + Math.random() * 15000); // look-away every 10-25 s
+  const gazeBreakUntilRef    = useRef(0);
+  const gazeBreakOffsetRef   = useRef(new THREE.Vector3());
   // Gesture variety: track last gesture type to prevent repetition
   const lastGestureTypeRef = useRef<string>('');
   const lastGestureTimeRef = useRef(0);
   // Sitting state
   const isSittingRef      = useRef(false);
+
+  // ── Behavioral phase state machine ───────────────────────────────────────
+  // Drives all physical-layer modulations: Idle / Listening / Thinking / Speaking.
+  // Derived every frame from the combination of external flags; stored so JSX/events
+  // can read it too (e.g. for future analytics / debug overlays).
+  const avatarPhaseRef    = useRef<'idle' | 'listening' | 'thinking' | 'speaking'>('idle');
+  const isListeningExtRef = useRef(false); // driven by avatar:listening window event
 
   // ── Transcribing / thinking state ───────────────────────────────────────
   // Set true while Whisper is transcribing; drives a subtle "thinking" pose
@@ -271,7 +338,11 @@ function VRMScene({
   const vrmaReadyRef  = useRef(false);
   const idleIdxRef    = useRef(0);
   const idleNextRef   = useRef(0);
-  const wasWalkingRef = useRef(false);
+  const wasWalkingRef     = useRef(false);
+  const stopWalkUntilRef  = useRef(0);    // time to switch idle after stop-walk anim
+  // ── Auto-patrol refs ─────────────────────────────────────────────────────
+  const patrolIdxRef       = useRef(0);                         // current waypoint index
+  const patrolWaitUntilRef = useRef(Date.now() + 1000);         // pause timer between waypoints
 
   const playVRMA = useCallback((name: string, loop = true, fadeTime = 0.4) => {
     const mixer   = mixerRef.current;
@@ -318,6 +389,7 @@ function VRMScene({
         return;
       }
       const urlToTry = candidates[idx];
+      console.log(`[AvatarCanvas] 🔍 Trying VRM URL (${idx + 1}/${candidates.length}): ${urlToTry}`);
       const loader = new GLTFLoader();
       loader.register((parser: unknown) => new VRMLoaderPlugin(parser as never));
       loader.load(
@@ -359,10 +431,11 @@ function VRMScene({
             meshCount++;
           }
         });
-        console.log(`%c[AvatarCanvas] ✅ VRM loaded — ${meshCount} meshes`, 'color:lime;font-weight:bold');
+        console.log(`%c[AvatarCanvas] ✅ VRM loaded from ${urlToTry} — ${meshCount} meshes`, 'color:lime;font-weight:bold');
+        if (meshCount === 0) console.error('[AvatarCanvas] 🔥 VRM has 0 meshes — avatar will be INVISIBLE! Check the .vrm file at:', urlToTry);
 
-        // Greeting wave on load
-        waveUntilRef.current = Date.now() + WAVE_DURATION * 1000;
+        // Greeting wave disabled — patrol starts immediately (wave would block §8 walk for 3.5 s)
+        // waveUntilRef.current = Date.now() + WAVE_DURATION * 1000;
 
         // Position/scale/rotation are controlled by the <group> wrapper in JSX
         // and updated every frame by useFrame — do NOT set them on vrm.scene here.
@@ -392,22 +465,28 @@ function VRMScene({
                   const action = mixer.clipAction(clip);
                   vrmaActions.current.set(key, action);
                   console.log(`[VRMA] ✅ ${key}`);
+                } else {
+                  console.warn(`[VRMA] ⚠️ ${key} — loaded but no vrmAnimations tracks`);
                 }
                 resolve();
-              }, undefined, () => resolve());
+              }, undefined, (err) => {
+                console.warn(`[VRMA] ❌ ${key} (${url}) — ${(err as Error)?.message ?? err}`);
+                resolve();
+              });
             })
           )
         ).then(() => {
-          vrmaReadyRef.current = true;
+          vrmaReadyRef.current  = true;
+          vrmFirstFrameRef.current = true;  // reset neck warm-up on (re)load
           idleNextRef.current  = Date.now() + 15000;
-          playVRMA('idle0', true, 0.8);
-          console.log('[VRMA] 🎬 Animation system ready');
+          playVRMA('idle0', true, 0.8);  // start idle; patrol will switch to pace immediately
+          console.log('[VRMA] 🎬 Animation system ready — idle0 started, patrol active');
         }).catch(() => {});
       },
       undefined,
       (err) => {
         if (!cancelled) {
-          console.warn(`[AvatarCanvas] ❌ ${urlToTry} failed: ${(err as Error)?.message ?? err} — trying next`);
+          console.error(`[AvatarCanvas] 🔥 VRM LOAD FAILED — URL: "${urlToTry}" | Error: ${(err as Error)?.message ?? err} | Trying next...`);
           attemptLoad(idx + 1);  // try next fallback URL
         }
       },
@@ -495,7 +574,7 @@ function VRMScene({
       if (micro) {
         setTimeout(() => {
           microExprTypeRef.current  = micro;
-          microExprUntilRef.current = Date.now() + 600;
+          microExprUntilRef.current = Date.now() + 1000;
           console.log(`[BRAIN] Micro-expression: ${micro} for ${em}`);
         }, 80 + Math.random() * 100);
       }
@@ -510,6 +589,7 @@ function VRMScene({
           celebration: { name: 'cheer',    loop: false, dur: 5000 },
           excited:     { name: 'clap',     loop: false, dur: 4000 },
           sleepy:      { name: 'sleepy',   loop: true,  dur: 0    },
+          friendly:    { name: 'beckon',   loop: false, dur: 3500 },
         };
         const anim = emotionAnim[em];
         if (anim) {
@@ -517,6 +597,18 @@ function VRMScene({
           if (!anim.loop)
             setTimeout(() => { if (!isSittingRef.current) playVRMA(`idle${idleIdxRef.current}`, true, 0.5); }, anim.dur);
         }
+      }
+      // Emotion-specific head-pose overrides
+      if (em === 'friendly') {
+        headPitchRef.current      = 0.05;
+        headRollEmotionRef.current = -0.08; // subtle head-tilt left — friendly engagement cue
+        headUntilRef.current      = Date.now() + 3000;
+      }
+      if (em === 'thinking') {
+        headPitchRef.current      = -0.08;
+        headYawRef.current        = 0.06;
+        headRollEmotionRef.current = 0;    // clear any lingering friendly tilt
+        headUntilRef.current      = Date.now() + 5000;
       }
     };
     // avatar:transcribing — fired by useAvatarAgent when Whisper is processing.
@@ -634,6 +726,24 @@ function VRMScene({
       headPitchRef.current = d?.pitch ?? 0;
       headUntilRef.current = Date.now() + (d?.duration ?? 2000);
     };
+    // avatar:listening — fired by AvatarAgentClient when VAD mic is active/inactive.
+    // Drives the Listening phase: attentive posture, reduced sway, slight forward lean.
+    const onListening = (e: Event) => {
+      const active = (e as CustomEvent<{ active?: boolean }>).detail?.active ?? false;
+      isListeningExtRef.current = active;
+      if (active) {
+        if (emotionRef.current === 'neutral') emotionRef.current = 'attentive';
+        headPitchRef.current = 0.04;        // slight forward attentive lean
+        headUntilRef.current = Date.now() + 60_000;
+        console.log('[BRAIN] avatar:listening → attentive phase ACTIVE');
+      } else {
+        if (emotionRef.current === 'attentive') emotionRef.current = 'neutral';
+        headPitchRef.current = 0;
+        headUntilRef.current = Date.now() + 800; // brief hold then idle takes over
+        console.log('[BRAIN] avatar:listening → attentive phase CLEARED');
+      }
+    };
+
     const onSit = (e: Event) => {
       const sitting = (e as CustomEvent<{ sitting?: boolean }>).detail?.sitting ?? true;
       isSittingRef.current = sitting;
@@ -669,7 +779,19 @@ function VRMScene({
         const u = new SpeechSynthesisUtterance(text);
         u.lang  = /[\u0600-\u06FF]/.test(text) ? 'ar-SA' : 'en-US';
         u.rate  = Math.min(1.0, voiceRateRef.current);
-        const v = selectFemaleArabicVoice();
+        // Prefer an Arabic voice; bias toward male/Jordanian for Dr. Hamza persona.
+        const allVoices = window.speechSynthesis?.getVoices() ?? [];
+        const v =
+          allVoices.find(x => x.lang === 'ar-JO') ??
+          allVoices.find(x => x.lang.startsWith('ar') && /naayf|taim|hamza|male/i.test(x.name)) ??
+          allVoices.find(x => x.lang.startsWith('ar')) ??
+          null;
+        // Guard: if no Arabic voice is available but other voices are loaded,
+        // skip speaking to prevent the browser using the wrong language.
+        if (!v && allVoices.length > 0) {
+          setTimeout(() => window.dispatchEvent(new CustomEvent('avatar:speak:end')), 500);
+          return;
+        }
         if (v) u.voice = v;
         u.onend = () => window.dispatchEvent(new CustomEvent('avatar:speak:end'));
         window.speechSynthesis?.speak(u);
@@ -688,6 +810,7 @@ function VRMScene({
     };
 
     window.addEventListener('avatar:transcribing',  onTranscribing);
+    window.addEventListener('avatar:listening',     onListening);
     window.addEventListener('avatar:gesture',       onGesture);
     window.addEventListener('avatar:emotion',       onEmotion);
     window.addEventListener('avatar:speak:start',   onSpeakStart);
@@ -711,6 +834,7 @@ function VRMScene({
 
     return () => {
       window.removeEventListener('avatar:transcribing', onTranscribing);
+      window.removeEventListener('avatar:listening',    onListening);
       window.removeEventListener('avatar:gesture',      onGesture);
       window.removeEventListener('avatar:emotion',      onEmotion);
       window.removeEventListener('avatar:speak:start',  onSpeakStart);
@@ -738,6 +862,7 @@ function VRMScene({
   const currentAvatarXRef = useRef(-0.5);
   const targetAvatarZRef  = useRef(-2.0);   // in front of desk
   const currentAvatarZRef = useRef(-2.0);
+  const avatarFacingRef   = useRef(Math.PI); // current facing angle; Math.PI = toward camera
 
   // ── Render loop ──────────────────────────────────────────────────────────
   const { pointer, camera, gl } = useThree();
@@ -759,13 +884,13 @@ function VRMScene({
       // Clamp click target inside room bounds
       targetAvatarXRef.current = Math.max(ROOM_BOUNDS.minX + 0.3, Math.min(ROOM_BOUNDS.maxX - 0.3, hit.x));
       targetAvatarZRef.current = Math.max(ROOM_BOUNDS.minZ + 0.3, Math.min(ROOM_BOUNDS.maxZ - 0.3, hit.z));
-      // Walk duration based on 2D distance
-      const dist = Math.hypot(
-        hit.x - currentAvatarXRef.current,
-        hit.z - currentAvatarZRef.current,
-      );
-      const walkSec = Math.max(0.5, dist * 1.6);
-      walkUntilRef.current = Date.now() + walkSec * 1000;
+      // MOUSE-TRACK MODE: walk trigger disabled — avatar stays in place and tracks mouse
+      // const dist = Math.hypot(
+      //   hit.x - currentAvatarXRef.current,
+      //   hit.z - currentAvatarZRef.current,
+      // );
+      // const walkSec = Math.max(0.5, dist * 1.6);
+      // walkUntilRef.current = Date.now() + walkSec * 1000;
     };
     const suppressContextMenu = (e: Event) => e.preventDefault();
     gl.domElement.addEventListener('mousedown', handleClick);
@@ -785,17 +910,54 @@ function VRMScene({
     const t   = state.clock.elapsedTime;
     const now = Date.now();
 
+    // 🔥 TRACER BULLET — fires once to confirm useFrame is running
+    if (t < 0.1) console.log('🔥 [SYSTEM] USE-FRAME IS ALIVE — t=', t.toFixed(4), 'vrm=', !!v);
+
+    // ── Behavioral phase — drives all physical layer modulations ─────────────
+    // Derived each frame so it is always coherent with current system state.
+    // Priority: speaking > thinking > listening > idle
+    const phase: 'idle' | 'listening' | 'thinking' | 'speaking' =
+      isTalkingRef.current       ? 'speaking'  :
+      isTranscribingRef.current  ? 'thinking'  :
+      isListeningExtRef.current  ? 'listening' : 'idle';
+    avatarPhaseRef.current = phase;
+
+    // ── Auto micro-nod: fires every 3-7 s during active conversation ──────────
+    // Triggers when avatar is speaking (isTalkingRef) OR user is speaking (isTranscribing).
+    // Uses the existing nod system (nodUntilRef / nodStartRef) — no new bones needed.
+    if ((isTalkingRef.current || isTranscribingRef.current)
+        && now > autoNodNextRef.current
+        && now >= nodUntilRef.current) {
+      nodStartRef.current    = now;
+      nodDurationRef.current = 500 + Math.random() * 400;  // 500-900 ms micro-nod
+      nodUntilRef.current    = now + nodDurationRef.current;
+      autoNodNextRef.current = now + 3000 + Math.random() * 4000; // reschedule 3-7 s
+    }
+    // Reset scheduler when silent (prevents instant nod on next turn start)
+    if (!isTalkingRef.current && !isTranscribingRef.current && now > autoNodNextRef.current + 8000) {
+      autoNodNextRef.current = now + 4000;
+    }
+    // Rare idle head movement — subtle alive-feeling micro-nod when completely still
+    if (!isTalkingRef.current && !isTranscribingRef.current && !isSittingRef.current
+        && now >= walkUntilRef.current
+        && now > idleNodNextRef.current && now >= nodUntilRef.current) {
+      nodStartRef.current    = now;
+      nodDurationRef.current = 300 + Math.random() * 200; // 300-500 ms subtle bob
+      nodUntilRef.current    = now + nodDurationRef.current;
+      idleNodNextRef.current = now + 22000 + Math.random() * 23000; // next 22-45 s
+    }
+
     // 1. Breathing + walk bounce + laugh shake + idle body sway
-    const idleBodyTarget = perlinNoise(t * 0.1, 0, 0) * 0.02 - 0.01;
-    idleBodyOffsetRef.current = lerp(idleBodyOffsetRef.current, idleBodyTarget, 0.05);
+    const idleBodyTarget = _noise3D(t * 0.1, 0, 0) * 0.020;
+    idleBodyOffsetRef.current = lerp(idleBodyOffsetRef.current, idleBodyTarget, 0.08);
 
     const breatheVal    = Math.sin(t * 0.9) * BREATHE_AMP;
     const isWalkingNow  = now < walkUntilRef.current;
     const isLaughingNow = now < laughUntilRef.current;
     const walkBounce = isWalkingNow  ? Math.abs(Math.sin(t * 5.5)) * 0.055 : 0;
     const laughShake = isLaughingNow ? Math.sin(t * 14) * 0.02 : 0;
-    // Click-to-move: lerp current (X, Z) toward target
-    const lerpSpeed = isWalkingNow ? delta * 2.5 : delta * 6;
+    // Click-to-move: lerp current (X, Z) toward target (slow walk speed = delta*1.0)
+    const lerpSpeed = isWalkingNow ? delta * 1.0 : delta * 6;
     currentAvatarXRef.current = lerp(currentAvatarXRef.current, targetAvatarXRef.current, lerpSpeed);
     currentAvatarZRef.current = lerp(currentAvatarZRef.current, targetAvatarZRef.current, lerpSpeed);
     const avatarX = currentAvatarXRef.current + (isLaughingNow ? Math.sin(t * 13) * 0.015 : 0);
@@ -823,43 +985,103 @@ function VRMScene({
     // Box3 collision — floor snap + wall clamp + desk separation (disabled when sitting)
     if (!isSittingNow) resolveIfEnabled(group.position);
 
+    // ── Avatar facing rotation — body turns to face direction of travel ─────
+    // Math.PI base = face-camera default (VRM 0.0 native -Z flipped by JSX rotation).
+    // targetFacing = Math.PI + atan2(dx, dz) → correct world-space facing.
+    // lerpAngle handles ±π wrap so there is no 360° spin on direction changes.
+    {
+      const dx = targetAvatarXRef.current - currentAvatarXRef.current;
+      const dz = targetAvatarZRef.current - currentAvatarZRef.current;
+      const moveDist = Math.hypot(dx, dz);
+      // When speaking: face camera directly.
+      // When idle/listening: body gently follows the mouse cursor left/right.
+      // When walking (patrol): face travel direction.
+      const mouseBodyTarget = Math.PI + pointer.x * 0.35; // ±20° yaw at screen edge
+      const targetFacing = (isWalkingNow && moveDist > 0.05 && phase !== 'speaking')
+        ? Math.PI + Math.atan2(dx, dz)  // walk → face travel direction
+        : phase === 'speaking' ? Math.PI  // speaking → direct camera
+        : mouseBodyTarget;               // idle/listening → follow mouse
+      const facingLerpSpeed = phase === 'speaking'
+        ? delta * 9.0   // snap to camera quickly while speaking
+        : isWalkingNow ? delta * 6.0 : delta * 3.0;
+      avatarFacingRef.current = lerpAngle(
+        avatarFacingRef.current,
+        isSittingNow ? Math.PI : targetFacing,
+        facingLerpSpeed,
+      );
+      group.rotation.y = avatarFacingRef.current;
+    }
+
+    // ── Auto-patrol: avatar walks slowly between office waypoints ─────────────
+    if (false /* MOUSE-TRACK MODE: patrol disabled */ && !isSittingNow) {
+      const wp = PATROL_WAYPOINTS[patrolIdxRef.current];
+      const distToWp = Math.hypot(
+        wp[0] - currentAvatarXRef.current,
+        wp[1] - currentAvatarZRef.current,
+      );
+      if (distToWp > 0.2) {
+        // Still traveling — refresh target & keep VRMA pace alive every frame
+        targetAvatarXRef.current = wp[0];
+        targetAvatarZRef.current = wp[1];
+        walkUntilRef.current     = now + 500;
+      } else {
+        // Arrived — let existing walk expire, then pause → next waypoint
+        if (now >= walkUntilRef.current && now > patrolWaitUntilRef.current) {
+          patrolWaitUntilRef.current = now + 2000 + Math.random() * 2000;
+          patrolIdxRef.current = (patrolIdxRef.current + 1) % PATROL_WAYPOINTS.length;
+        }
+      }
+    }
+
     if (!v) return;
 
-    // ── VRMA mixer update ────────────────────────────────────────────────────
+    // ── VRMA mixer update — pace ↔ idle switching ─────────────────────────
     if (mixerRef.current) {
-      // Smoothly mute VRMA weight during walking (manual walk cycle takes over)
-      if (vrmaReadyRef.current && activeVrmaRef.current) {
-        const vrmaAction = vrmaActions.current.get(activeVrmaRef.current);
-        if (vrmaAction) {
-          const targetW = isWalkingNow ? 0 : 1;
-          vrmaAction.setEffectiveWeight(lerp(vrmaAction.getEffectiveWeight(), targetW, delta * 5));
-        }
+      // Switch to Walking.vrma when patrol is active
+      if (vrmaReadyRef.current && isWalkingNow && activeVrmaRef.current !== 'walk') {
+        playVRMA('walk', true, 0.3);
       }
       mixerRef.current.update(delta);
     }
-    // Detect walk-end → restore idle VRMA
+    // Walk ended → play stop-walk once, then return to idle after it finishes
     if (wasWalkingRef.current && !isWalkingNow && vrmaReadyRef.current && !isSittingRef.current) {
+      playVRMA('stopWalk', false, 0.25);
+      stopWalkUntilRef.current = now + 1200;  // ~1.2 s for stop-walk clip
+    }
+    // After stop-walk finishes → blend to idle
+    if (!isWalkingNow && stopWalkUntilRef.current > 0 && now >= stopWalkUntilRef.current
+        && activeVrmaRef.current === 'stopWalk' && !isSittingRef.current) {
+      stopWalkUntilRef.current = 0;
       playVRMA(`idle${idleIdxRef.current}`, true, 0.5);
     }
     wasWalkingRef.current = isWalkingNow;
-    // Idle cycling every 12-20 seconds
-    if (vrmaReadyRef.current && !isSittingNow && !isWalkingNow && activeVrmaRef.current.startsWith('idle')) {
-      if (now > idleNextRef.current) {
-        const ni = (idleIdxRef.current + 1) % 4;
-        idleIdxRef.current  = ni;
-        idleNextRef.current = now + 12000 + Math.random() * 8000;
-        playVRMA(`idle${ni}`, true, 0.7);
-      }
+
+    // Idle cycling — rotate through idle0–idle3 every 12–20 s when standing still
+    if (!isWalkingNow && !isSittingRef.current && vrmaReadyRef.current
+        && now >= idleNextRef.current && activeVrmaRef.current !== 'stopWalk') {
+      idleIdxRef.current  = (idleIdxRef.current + 1) % 4;
+      idleNextRef.current = now + 12000 + Math.random() * 8000;
+      playVRMA(`idle${idleIdxRef.current}`, true, 0.8);
     }
 
-    // 2. Blink — smooth phase, double-blink support
+    // 2. Blink — smooth phase, asymmetric left/right, noise-driven irregular intervals
     const em = v.expressionManager;
     if (em) {
       if (blinkPhaseRef.current > 0) {
         blinkPhaseRef.current += delta * 12;
-        const bv = blinkPhaseRef.current < Math.PI ? Math.sin(blinkPhaseRef.current) : 0;
-        try { em.setValue('blink' as never, Math.min(1, bv)); } catch {
-          try { em.setValue('blinkLeft' as never, Math.min(1, bv)); em.setValue('blinkRight' as never, Math.min(1, bv)); } catch {}
+        // Right eye: primary phase | Left eye: slightly lagged by blinkAsymRef (asymmetric)
+        const phaseR = blinkPhaseRef.current;
+        const phaseL = Math.max(0, blinkPhaseRef.current - blinkAsymRef.current);
+        const bvR = phaseR < Math.PI ? Math.sin(phaseR) : 0;
+        const bvL = phaseL < Math.PI ? Math.sin(phaseL) : 0;
+        // Try unified 'blink' key first; fall back to separate blinkLeft/blinkRight
+        try {
+          em.setValue('blink' as never, Math.min(1, (bvR + bvL) * 0.5));
+        } catch {
+          try {
+            em.setValue('blinkRight' as never, Math.min(1, bvR));
+            em.setValue('blinkLeft'  as never, Math.min(1, bvL));
+          } catch {}
         }
         if (blinkPhaseRef.current > Math.PI * 2) {
           blinkPhaseRef.current = 0;
@@ -872,7 +1094,12 @@ function VRMScene({
             nextBlinkRef.current = now + 120;
           } else {
             blinkCountRef.current = 1;
-            nextBlinkRef.current = now + (BLINK_MIN + Math.random() * (BLINK_MAX - BLINK_MIN)) * 1000;
+            // Noise-driven organic interval: simplex noise gives non-uniform, biologically
+            // realistic variation (1.8 – 5.2 s) instead of pure uniform random.
+            const noiseVal = (_noise3D(t * 0.0009, 77, 0) + 1) * 0.5; // [0, 1]
+            nextBlinkRef.current = now + (1.8 + noiseVal * 3.4) * 1000;
+            // Randomise left/right asymmetry for next blink (0 – 150 ms phase lag)
+            blinkAsymRef.current = Math.random() * 0.18;
           }
         }
       } else if (now >= nextBlinkRef.current) {
@@ -974,7 +1201,7 @@ function VRMScene({
 
       // Micro-expressions overlay
       if (now < microExprUntilRef.current) {
-        const mProgress = 1 - (microExprUntilRef.current - now) / 600;
+        const mProgress = 1 - (microExprUntilRef.current - now) / 1000;
         const mIntensity = Math.sin(mProgress * Math.PI) * 0.5;
         const mType = microExprTypeRef.current;
         if (mType === 'eyebrowRaise') {
@@ -988,6 +1215,14 @@ function VRMScene({
       } else if (microExprTypeRef.current !== 'none') {
         microExprTypeRef.current = 'none';
         setEM(em, 'lookUp', 0);
+      }
+
+      // Auto-scheduled micro-expressions — fire every 8-20 s for ambient liveness
+      if (now > autoMicroExprNextRef.current && microExprTypeRef.current === 'none' && now >= microExprUntilRef.current) {
+        const types = ['eyebrowRaise', 'halfSmile', 'halfSmile', 'squint'] as const;
+        microExprTypeRef.current  = types[Math.floor(Math.random() * types.length)];
+        microExprUntilRef.current = now + 1000 + Math.random() * 400; // 1.0-1.4 s
+        autoMicroExprNextRef.current = now + 8000 + Math.random() * 12000; // reschedule 8-20 s
       }
 
       // ── Transcribing overlay — additive "attentive listening" blendshapes ──
@@ -1022,39 +1257,59 @@ function VRMScene({
         // values can never accumulate across frames and push the skeleton off-screen.
         const vrmaLive = vrmaReadyRef.current && !isWalkingNow;
 
+        // Phase-aware breathing amplitude:
+        //   speaking   → +15% (embodied, fuller breath)
+        //   listening  → -25% (attentive stillness)
+        //   thinking   → -10% (reflective calm)
+        //   idle       → nominal
+        const phaseBreathScale =
+          phase === 'speaking'  ? 1.15 :
+          phase === 'listening' ? 0.75 :
+          phase === 'thinking'  ? 0.90 : 1.0;
+
         if (spineBone) {
-          const breathX = spineBreathRef.current * 0.35 + nodArc * 0.10;
-          const rollZ   = headRollRef.current * 0.04;
+          const breathX  = spineBreathRef.current * 0.35 * phaseBreathScale + nodArc * 0.10;
+          // Simplex organic micro-movement — non-repeating, asynchronous drift
+          const organicX = _noise3D(t * 0.23, 30, 0) * 0.010 + _noise3D(t * 0.11, 31, 0) * 0.006;
+          const organicZ = _noise3D(t * 0.31, 32, 0) * 0.014 + _noise3D(t * 0.17, 33, 0) * 0.008;
+          const swayZ    = headRollRef.current * 0.04 + organicZ;
+          // 20% of current gaze yaw absorbed by spine (natural shoulder/torso turn)
+          const spineGazeYaw = neckGazeYawRef.current * 0.20;
+
+          // Additive Quaternion blending (Kalidokit pattern):
+          // The VRMA mixer already wrote its keyframe pose into spineBone.quaternion
+          // this frame. We build a delta quaternion from our procedural offsets and
+          // MULTIPLY it in — this is the correct additive-layer approach.
+          // When VRMA is not live (walk / no animation), we slerp to an absolute target.
+          const spineEuler = new THREE.Euler(breathX + organicX, spineGazeYaw, swayZ, 'XYZ');
+          const spineDeltaQ = new THREE.Quaternion().setFromEuler(spineEuler);
           if (vrmaLive) {
-            spineBone.rotation.x += breathX;
-            spineBone.rotation.z += rollZ;
+            spineBone.quaternion.multiply(spineDeltaQ);
           } else {
-            spineBone.rotation.x  = breathX;
-            spineBone.rotation.z  = rollZ;
+            spineBone.quaternion.slerp(spineDeltaQ, 0.18);
           }
         }
         if (spine2Bone) {
-          if (vrmaLive) spine2Bone.rotation.x += spineBreathRef.current * 0.20;
-          else          spine2Bone.rotation.x  = spineBreathRef.current * 0.20;
+          const chest2Euler = new THREE.Euler(spineBreathRef.current * 0.20 * phaseBreathScale, 0, 0, 'XYZ');
+          const chest2DeltaQ = new THREE.Quaternion().setFromEuler(chest2Euler);
+          if (vrmaLive) spine2Bone.quaternion.multiply(chest2DeltaQ);
+          else          spine2Bone.quaternion.slerp(chest2DeltaQ, 0.15);
         }
-        if (neckBone) {
-          if (vrmaLive) neckBone.rotation.x += nodArc * 0.16;
-          else          neckBone.rotation.x  = nodArc * 0.16;
-        }
+        // neckBone nod is now handled in §1-B (merged with gaze to avoid overwrite)
       }
 
       em.update();
     }
 
-    // §2 Weight-shift / hip-sway
-    // Same additive/absolute split as §1-A: += when VRMA is live (mixer resets
-    // the bone each frame), = (absolute) otherwise to prevent position drift.
+    // §2 Hip sway — weight-shift creates organic body rock; phase-aware amplitude.
+    // listening/thinking: grounded stillness (35% sway) — focused body language.
+    // speaking/idle:      full organic sway.
     if (v.humanoid && !isSittingRef.current) {
-      const hipTarget   = (perlinNoise(t * 0.25, 5, 0) - 0.5) * 0.028; // ±1.4 cm
-      hipShiftRef.current = lerp(hipShiftRef.current, hipTarget, delta * 1.2);
+      const hipScale  = (phase === 'listening' || phase === 'thinking') ? 0.35 : 1.0;
+      const hipTarget = _noise3D(t * 0.25, 5, 0) * 0.024 * hipScale;
+      hipShiftRef.current = lerp(hipShiftRef.current, hipTarget, delta * 2.0);
       const headRollTarget  = -hipShiftRef.current * 3.5;
-      headRollRef.current   = lerp(headRollRef.current, headRollTarget, delta * 1.5);
-
+      headRollRef.current   = lerp(headRollRef.current, headRollTarget, delta * 2.5);
       const hipBone = v.humanoid.getRawBoneNode('hips' as never);
       if (hipBone) {
         const vrmaLiveHip = vrmaReadyRef.current && !isWalkingNow;
@@ -1071,22 +1326,50 @@ function VRMScene({
     //
     // FSM: fixate → wait → schedule saccade → saccade (20-80ms snap) → fixate
     {
-      // 1. Compute "desire" gaze — always toward the camera (the viewer).
-      // Add slow Perlin face-region variance (±5 cm) to simulate natural eye contact:
-      // the avatar drifts between the viewer's left eye → nose → right eye, just like
-      // a real person does during direct conversation.  NO pointer tracking.
-      const faceVarianceX = (perlinNoise(t * 0.14, 20, 0) - 0.5) * 0.10;
-      const faceVarianceY = (perlinNoise(t * 0.11, 21, 0) - 0.5) * 0.06;
+      // 1. Compute "desire" gaze — toward the camera (viewer) blended with
+      // the NDC mouse/pointer position so Cogni tracks the cursor naturally.
+      // R3F pointer.{x,y} is already in [-1..1] NDC coords, updated every frame.
+      // Scale to subtle world offsets from the camera position:
+      //   ±0.9 m lateral  (X) — wide enough to feel responsive
+      //   ±0.45 m vertical (Y) — narrower to keep face in view
+      // Also add slow Perlin face-region variance (±5 cm) to simulate natural
+      // eye contact: drifting between left eye → nose → right eye.
+      const faceVarianceX = _noise3D(t * 0.14, 20, 0) * 0.050;
+      const faceVarianceY = _noise3D(t * 0.11, 21, 0) * 0.030;
+      // Phase-aware pointer scale:
+      // speaking → near-zero (direct camera eye contact while talking)
+      // listening → subtle  (light cursor following, feels attentive)
+      // idle/thinking → moderate (natural gaze wander, not locked)
+      const gazePointerScale = phase === 'speaking' ? 0.05
+                             : phase === 'listening' ? 0.30  // more attentive cursor follow
+                             : 0.50;  // MOUSE-TRACK: stronger eye/head follow when idle
+      const pointerOffsetX = pointer.x * gazePointerScale;
+      const pointerOffsetY = pointer.y * (gazePointerScale * 0.5);
+      // Random look-away breaks: briefly glance off to the side every 10-25 s
+      if (phase !== 'speaking' && now > gazeBreakNextRef.current) {
+        gazeBreakUntilRef.current = now + 800 + Math.random() * 1200; // 0.8-2 s look-away
+        gazeBreakOffsetRef.current.set(
+          (Math.random() * 2 - 1) * 1.6,  // ±1.6 m horizontal
+          (Math.random() * 2 - 1) * 0.7,  // ±0.7 m vertical
+          0,
+        );
+        gazeBreakNextRef.current = now + 10000 + Math.random() * 15000; // reschedule 10-25 s
+      }
+      const lookAwayBlend = now < gazeBreakUntilRef.current ? 1 : 0;
       const desireWorld = camera.position.clone().add(
-        new THREE.Vector3(faceVarianceX, faceVarianceY, 0),
+        new THREE.Vector3(
+          pointerOffsetX + faceVarianceX + gazeBreakOffsetRef.current.x * lookAwayBlend,
+          pointerOffsetY + faceVarianceY + gazeBreakOffsetRef.current.y * lookAwayBlend,
+          0,
+        ),
       );
 
       // 2. State-machine tick
       if (gazeStateRef.current === 'fixate') {
         // Microsaccade drift — tiny random walk around fixation point
         const driftAmp = 0.003;
-        gazeDriftRef.current.x = lerp(gazeDriftRef.current.x, (perlinNoise(t * 3.1, 10, 0) - 0.5) * driftAmp, delta * 4);
-        gazeDriftRef.current.y = lerp(gazeDriftRef.current.y, (perlinNoise(t * 2.8, 11, 0) - 0.5) * driftAmp, delta * 4);
+        gazeDriftRef.current.x = lerp(gazeDriftRef.current.x, _noise3D(t * 3.1, 10, 0) * driftAmp * 0.5, delta * 4);
+        gazeDriftRef.current.y = lerp(gazeDriftRef.current.y, _noise3D(t * 2.8, 11, 0) * driftAmp * 0.5, delta * 4);
 
         if (now > gazeFixateUntilRef.current) {
           // Schedule next saccade: jump toward the current desire direction
@@ -1111,78 +1394,127 @@ function VRMScene({
       const eyeDesire = gazeCurrRef.current.clone().add(gazeDriftRef.current);
       eyeWorldTargetRef.current.lerp(eyeDesire, delta * 18); // fast-ish for eye-only movement
 
-      // 4. Drive VRM lookAt with eye target
+      // §1-B eye lookAt — VRM built-in eye tracking (limited ±30° by VRM spec)
       const lookAt = (v as { lookAt?: { autoUpdate?: boolean; lookAt?: (p: THREE.Vector3) => void } }).lookAt;
       if (lookAt?.lookAt) {
         lookAt.autoUpdate = false;
         lookAt.lookAt(eyeWorldTargetRef.current);
       }
 
-      // 5. Neck absorbs 30% of gaze angle (bone additive)
+      // 5. Neck driven by direct pointer-to-angle mapping — NOT atan2 from world-point.
+      // Root cause of the previous "invisible" tracking:
+      //   camera z ≈ 3.5, avatar z ≈ -2.0  →  5.5 m gap between them
+      //   pointer offset = pointer.x × 0.50 = max ±0.5 m world offset
+      //   atan2(0.5, 5.5) = 0.09 rad → neck × 0.30 = 0.027 rad → head ≈ 3°  — imperceptible.
+      // Fix: pointer.x × gazePointerScale × 0.40 → neck ±0.20 rad
+      //      → head × (7/3) ≈ ±0.47 rad ≈ ±27°  — clearly visible.
       if (v.humanoid) {
-        const avatarPos = group ? group.position : new THREE.Vector3();
-        const toTarget  = eyeWorldTargetRef.current.clone().sub(avatarPos);
-        const neckYaw   = -Math.atan2(toTarget.x, toTarget.z) * 0.30;
-        const neckPitch = -Math.atan2(toTarget.y, Math.sqrt(toTarget.x ** 2 + toTarget.z ** 2)) * 0.30;
-        neckGazeYawRef.current   = lerp(neckGazeYawRef.current,   neckYaw,   delta * 6);
-        neckGazePitchRef.current = lerp(neckGazePitchRef.current, neckPitch, delta * 6);
-        const neckBone = v.humanoid.getRawBoneNode('neck' as never);
-        if (neckBone) {
-          // Use absolute assignment when VRMA is not driving the bone this frame;
-          // otherwise gaze yaw/pitch accumulates unboundedly → 360° spin.
-          const vrmaLiveGaze = vrmaReadyRef.current && !isWalkingNow;
-          const safeYaw   = isNaN(neckGazeYawRef.current)   ? 0 : Math.max(-0.35, Math.min(0.35, neckGazeYawRef.current));
-          const safePitch = isNaN(neckGazePitchRef.current)  ? 0 : Math.max(-0.25, Math.min(0.25, neckGazePitchRef.current));
-          if (vrmaLiveGaze) {
-            neckBone.rotation.y += safeYaw;
-            neckBone.rotation.x += safePitch;
-          } else {
-            neckBone.rotation.y  = safeYaw;   // absolute — no accumulation when VRMA idle
-            neckBone.rotation.x  = safePitch;
-          }
+        let neckYaw   = -pointer.x * gazePointerScale * 0.40;
+        let neckPitch =  pointer.y * gazePointerScale * 0.22;
+        // During random gaze-break: blend toward actual world-direction of the off-screen target
+        if (lookAwayBlend > 0) {
+          const avatarPos = group ? group.position : new THREE.Vector3();
+          const toBreak   = desireWorld.clone().sub(avatarPos);
+          const bYaw      = -Math.atan2(toBreak.x, toBreak.z) * 0.40;
+          const bPitch    = -Math.atan2(toBreak.y, Math.hypot(toBreak.x, toBreak.z)) * 0.40;
+          neckYaw   = lerp(neckYaw,   bYaw,   lookAwayBlend);
+          neckPitch = lerp(neckPitch, bPitch, lookAwayBlend);
+        }
+        if (vrmFirstFrameRef.current) {
+          vrmFirstFrameRef.current = false;
+          neckGazeYawRef.current   = neckYaw;
+          neckGazePitchRef.current = neckPitch;
+        } else {
+          neckGazeYawRef.current   = lerp(neckGazeYawRef.current,   neckYaw,   delta * 6);
+          neckGazePitchRef.current = lerp(neckGazePitchRef.current, neckPitch, delta * 6);
         }
       }
     }
 
-    // 6. VRM internals update
+    // 6. VRM internals update — VRMA mixer bakes animation keyframes into raw bones.
+    //    All procedural bone overrides that must WIN over VRMA go AFTER this call.
     v.update(delta);
 
-    // 7. Head-pose lerp — driven by avatar:headpose events from AgentDirector
-    // Idle default: head aimed at camera (yaw≈0 + tiny noise, pitch computed from
-    // camera elevation above avatar so the avatar genuinely looks the viewer in the eye).
+    // §6-A Neck override — MUST run after v.update(delta) so it is the final write
+    // before render. VRMA animations (beckon, point, …) tilt the neck ~45-90° forward
+    // (avatar looks at hand / pointer). Without this override the head appears severely
+    // distorted even though §7 headBone is correct in neck-local space.
+    // Smoothness is provided by the neckGazeYawRef / neckGazePitchRef lerps above
+    // (delta * 6), so .copy() is safe and fully cancels VRMA neck rotation each frame.
+    if (v.humanoid) {
+      const neckBone = v.humanoid.getRawBoneNode('neck' as never);
+      if (neckBone) {
+        const safeYaw   = isNaN(neckGazeYawRef.current)  ? 0 : Math.max(-0.30, Math.min(0.30, neckGazeYawRef.current));
+        const safePitch = isNaN(neckGazePitchRef.current) ? 0 : Math.max(-0.30, Math.min(0.30, neckGazePitchRef.current));
+        const nodB = (now < nodUntilRef.current)
+          ? Math.sin(Math.min(1, (now - nodStartRef.current) / nodDurationRef.current) * Math.PI)
+          : 0;
+        const neckSwayZ = _noise3D(t * 0.41, 40, 0) * 0.009 + _noise3D(t * 0.19, 41, 0) * 0.005;
+        const neckTargetQ = new THREE.Quaternion().setFromEuler(
+          new THREE.Euler(safePitch + nodB * 0.16, safeYaw, neckSwayZ, 'YXZ'),
+        );
+        neckBone.quaternion.copy(neckTargetQ); // .copy() not .slerp() — fully overrides VRMA
+      }
+    }
+
+    // §7 Head-pose lerp — phase-aware pitch bias added to idle baseline so the avatar
+    // reads as: listening → slight forward lean, thinking → slight upward gaze.
     if (v.humanoid) {
       const headBone = v.humanoid.getRawBoneNode('head' as never);
       if (headBone) {
         const active = headUntilRef.current > now;
-
-        // Compute camera-relative pitch so head is leveled toward viewer's face
         let camPitchBaseline = 0;
         if (!active) {
           const avatarWorldY = group ? group.position.y : 0;
           const dY  = camera.position.y - avatarWorldY;
           const dZ  = Math.abs(camera.position.z);
-          camPitchBaseline = Math.atan2(dY, dZ) * 0.35; // partial tilt (35% of full angle)
+          camPitchBaseline = Math.atan2(dY, dZ) * 0.35;
         }
-
-        // Micro-wander: very small (±1°) so the head stays on-camera
-        const idleHeadYawTarget   = (perlinNoise(t * 0.25, 1, 0) - 0.5) * 0.018; // ±0.9°
-        const idleHeadPitchTarget = camPitchBaseline + (perlinNoise(t * 0.20, 2, 0) - 0.5) * 0.012;
+        // Phase-aware pitch bias applied only during idle head state (not overriding active headpose).
+        // listening → +0.04 rad forward-attentive lean
+        // thinking  → -0.07 rad upward-reflective gaze
+        const phasePitchBias = !active
+          ? (phase === 'listening' ? 0.04 : phase === 'thinking' ? -0.07 : 0)
+          : 0;
+        const idleHeadYawTarget   = _noise3D(t * 0.25, 1, 0) * 0.045;   // ±0.045 rad (~2.5°) — organic non-repeating drift
+        const idleHeadPitchTarget = camPitchBaseline + phasePitchBias + _noise3D(t * 0.20, 2, 0) * 0.030;
         idleHeadOffsetRef.current = lerp(idleHeadOffsetRef.current, idleHeadYawTarget, 0.03);
-
-        const targetYaw   = active ? headYawRef.current   : idleHeadOffsetRef.current;
-        const targetPitch = active ? headPitchRef.current : idleHeadPitchTarget;
-        // Add head-roll from weight-shift
-        const targetRoll  = headRollRef.current * 0.60;
-
-        headBone.rotation.y = lerp(headBone.rotation.y, targetYaw,   0.07);
-        headBone.rotation.x = lerp(headBone.rotation.x, targetPitch, 0.07);
-        headBone.rotation.z = lerp(headBone.rotation.z, targetRoll,  0.05);
+        const clampedNeckYaw   = Math.max(-0.3, Math.min(0.3, neckGazeYawRef.current));
+        const clampedNeckPitch = Math.max(-0.3, Math.min(0.3, neckGazePitchRef.current));
+        const headGazeYaw   = Math.max(-0.45, Math.min(0.45, clampedNeckYaw   * (7 / 3)));
+        const headGazePitch = Math.max(-0.45, Math.min(0.45, clampedNeckPitch * (7 / 3)));
+        const targetYaw   = Math.max(-0.45, Math.min(0.45, active ? headYawRef.current   + headGazeYaw   : idleHeadOffsetRef.current + headGazeYaw));
+        const targetPitch = Math.max(-0.45, Math.min(0.45, active ? headPitchRef.current + headGazePitch : idleHeadPitchTarget       + headGazePitch));
+        // Simplex organic head-roll micro-movement (replaces uniform Math.sin periodicity)
+        const organicHeadZ = _noise3D(t * 0.53, 50, 0) * 0.006 + _noise3D(t * 0.29, 51, 0) * 0.004;
+        if (!active) headRollEmotionRef.current = lerp(headRollEmotionRef.current, 0, delta * 2.0);
+        const targetRoll  = headRollRef.current * 0.60 + organicHeadZ + headRollEmotionRef.current;
+        // NaN guard — only write if values are finite (prevents runaway rotation on model load edge cases)
+        if (Number.isFinite(targetYaw) && Number.isFinite(targetPitch)) {
+          headYawSmoothRef.current   = lerp(headYawSmoothRef.current,   targetYaw,   0.15);
+          headPitchSmoothRef.current = lerp(headPitchSmoothRef.current, targetPitch, 0.15);
+          headRollSmoothRef.current  = lerp(headRollSmoothRef.current,  targetRoll,  0.05);
+          // Quaternion.copy(setFromEuler) — YXZ order prevents Gimbal Lock on head bone.
+          // The smooth lerp refs above handle temporal interpolation;
+          // the quaternion write is the final, gimbal-safe application.
+          headBone.quaternion.copy(
+            new THREE.Quaternion().setFromEuler(
+              new THREE.Euler(
+                headPitchSmoothRef.current,
+                headYawSmoothRef.current,
+                headRollSmoothRef.current,
+                'YXZ',
+              ),
+            ),
+          );
+        }
       }
     }
 
-    // 8. Arm/leg pose — manual override; runs only during walk or as VRMA fallback
+    // 8. Arm/leg pose — ALWAYS runs as final bone override (prevents T-pose from VRMA gaps)
+    //    v.update(delta) already ran above; §8 overwrites raw bones as the last step before render.
     const humanoid = v.humanoid;
-    if (humanoid && (!vrmaReadyRef.current || isWalkingNow)) {
+    if (humanoid) {
       const isWaving   = now < waveUntilRef.current;
       const gs         = gestureRef.current;
       if (gs && now > gs.startMs + gs.durationMs) gestureRef.current = null;
@@ -1233,29 +1565,36 @@ function VRMScene({
         if (gSide === 'left'  || gSide === 'both') applyArm('left');
 
       } else if (isWalkingNow) {
-        // ── Real walk cycle: arms swing + legs swing + knee bend ──
-        const swing = Math.sin(t * 5.5);  // -1..1
-        const rua   = humanoid.getRawBoneNode('rightUpperArm' as never);
-        const lua   = humanoid.getRawBoneNode('leftUpperArm'  as never);
-        const rla   = humanoid.getRawBoneNode('rightLowerArm' as never);
-        const lla   = humanoid.getRawBoneNode('leftLowerArm'  as never);
-        // Arms swing forward/back with Z base offset so they hang, not T-pose
-        if (rua) rua.rotation.set(-swing * 0.45, 0, -1.1, 'XYZ');
-        if (lua) lua.rotation.set( swing * 0.45, 0,  1.1, 'XYZ');
-        // Elbow bends slightly when arm swings forward
-        if (rla) rla.rotation.set(Math.max(0, -swing * 0.35), 0, 0, 'XYZ');
-        if (lla) lla.rotation.set(Math.max(0,  swing * 0.35), 0, 0, 'XYZ');
-        // ── Leg swing (opposite phase to same-side arm) ──
+        // Procedural walk — guaranteed even if Walking.vrma doesn't drive this model's bones.
+        // §8 runs after v.update(), so these raw-bone writes are always the final word.
+        const walkCycle = Math.sin(t * 3.8);           // ~1.9 Hz stride
+        const armSwing  = walkCycle * 0.45;             // arm forward/back
+        const legSwing  = walkCycle * 0.55;             // upper leg swing
+        // group.rotation.y = Math.PI flips the effective +X direction in world space.
+        // Result: rul.rotation.x > 0 → leg FORWARD in world (not backward).
+        // So: right leg is BEHIND when walkCycle > 0 → rightKnee = Math.max(0, +walkCycle)
+        //     left  leg is BEHIND when walkCycle < 0 → leftKnee  = Math.max(0, -walkCycle)
+        const rightKnee = Math.max(0,  walkCycle) * 0.65; // ≈ 37° — bends on push-off (leg behind)
+        const leftKnee  = Math.max(0, -walkCycle) * 0.65;
+        const rua = humanoid.getRawBoneNode('rightUpperArm' as never);
+        const lua = humanoid.getRawBoneNode('leftUpperArm'  as never);
+        const rla = humanoid.getRawBoneNode('rightLowerArm' as never);
+        const lla = humanoid.getRawBoneNode('leftLowerArm'  as never);
         const rul = humanoid.getRawBoneNode('rightUpperLeg' as never);
         const lul = humanoid.getRawBoneNode('leftUpperLeg'  as never);
         const rll = humanoid.getRawBoneNode('rightLowerLeg' as never);
         const lll = humanoid.getRawBoneNode('leftLowerLeg'  as never);
-        // Right arm forward (swing<0) → right leg back (swing>0) and vice versa
-        if (rul) rul.rotation.set( swing * 0.45, 0, 0, 'XYZ');
-        if (lul) lul.rotation.set(-swing * 0.45, 0, 0, 'XYZ');
-        // Knee bends when leg is behind the body
-        if (rll) rll.rotation.set(swing > 0 ? swing * 0.38 : 0, 0, 0, 'XYZ');
-        if (lll) lll.rotation.set(swing < 0 ? -swing * 0.38 : 0, 0, 0, 'XYZ');
+        // Arms swing opposite to legs (natural gait)
+        if (rua) rua.rotation.set( armSwing, 0, -1.1, 'XYZ');
+        if (lua) lua.rotation.set(-armSwing, 0,  1.1, 'XYZ');
+        if (rla) rla.rotation.set(0.12, 0, 0, 'XYZ');
+        if (lla) lla.rotation.set(0.12, 0, 0, 'XYZ');
+        // Legs swing opposite (right forward = left back)
+        if (rul) rul.rotation.set(-legSwing, 0, 0, 'XYZ');
+        if (lul) lul.rotation.set( legSwing, 0, 0, 'XYZ');
+        // Knee bends during push-off (leg behind) — negative rotation.x folds calf backward (confirmed by sit pose: rll=-1.5)
+        if (rll) rll.rotation.set(-rightKnee, 0, 0, 'XYZ');
+        if (lll) lll.rotation.set(-leftKnee,  0, 0, 'XYZ');
 
       } else if (isLaughingNow) {
         const shoulBounce = Math.sin(t * 14) * 0.15;
@@ -1280,7 +1619,9 @@ function VRMScene({
 
       } else {
         // ── Natural idle OR sitting ──
-        const sway    = Math.sin(t * 0.4) * 0.06;
+        // Dual-harmonic arm sway — breaks pure-sine periodicity for organic feel
+        const sway    = Math.sin(t * 0.4) * 0.04 + Math.sin(t * 0.27 + 1.1) * 0.025
+                      + _noise3D(t * 0.13, 7, 0) * 0.009;
         const breathZ = spineBreathRef.current * 0.15;
         const rua  = humanoid.getRawBoneNode('rightUpperArm' as never);
         const lua  = humanoid.getRawBoneNode('leftUpperArm'  as never);
@@ -1318,7 +1659,58 @@ function VRMScene({
         }
       }
     }
+    // » §8 bone writes are the last thing before this frame renders — no v.update after this
+
+    // ── §9 MOCAP Interceptor ─────────────────────────────────────────────────
+    // Passively snapshots bone quaternions + blendshapes for the Cogni dataset.
+    // Zero cost when not recording (single boolean check, no heap allocations).
+    if (motionLogger.isRecording && v?.humanoid && v?.expressionManager) {
+      const h  = v.humanoid;
+      const em = v.expressionManager;
+
+      const bSnap: BlendshapeSnapshot = {};
+      const EXPR_KEYS = [
+        'aa','ih','ou','ee','oh',
+        'blink','blinkLeft','blinkRight',
+        'happy','sad','angry','surprised','relaxed',
+      ] as const;
+      for (const k of EXPR_KEYS) {
+        const val = em.getValue(k as never) as number | undefined;
+        if (val !== undefined && val !== 0) bSnap[k] = val;
+      }
+
+      const BONE_KEYS = [
+        'hips','spine','upperChest','chest','neck','head',
+        'leftUpperArm','leftLowerArm','leftHand',
+        'rightUpperArm','rightLowerArm','rightHand',
+      ] as const;
+      const rSnap: BoneSnapshot = {};
+      for (const k of BONE_KEYS) {
+        const bone = h.getRawBoneNode(k as never);
+        if (bone) {
+          const q = bone.quaternion;
+          (rSnap as Record<string, QuatTuple>)[k] = [q.x, q.y, q.z, q.w];
+        }
+      }
+      motionLogger.logFrame(delta, bSnap, rSnap);
+    }
   });
+
+  // ── Dev hotkey: Alt+R → toggle MotionLogger (record ▶ / export-and-stop ⏹) ──
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'development') return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.altKey && e.key === 'r') {
+        if (motionLogger.isRecording) {
+          motionLogger.exportData();
+        } else {
+          motionLogger.startRecording();
+        }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
 
   return (
     <>
@@ -1487,7 +1879,16 @@ export default function AvatarCanvas({
     },
   );
 
-  const handleLoad  = useCallback(() => setLoaded(true), []);
+  const handleLoad = useCallback(() => {
+    setLoaded(true);
+    // Signal useAgentAgent to start the idle/greeting timer only now that the
+    // avatar is visible — prevents greeting from firing while user is still
+    // zooming into the scene.
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('avatar:scene:ready'));
+      console.log('[AvatarCanvas] ✅ avatar:scene:ready dispatched');
+    }
+  }, []);
   const handleError = useCallback((err: string) => setLoadError(err), []);
   const handleOfficeReady = useCallback(() => setOkOffice(true), []);
 
@@ -1543,7 +1944,7 @@ export default function AvatarCanvas({
       <Canvas
         dpr={[1, 1.75]}
         shadows="soft"
-        camera={{ position: [0, 1.6, 3.5], fov: 55, near: 0.01, far: 500 }}
+        camera={{ position: [0, 1.5, 0.8], fov: 55, near: 0.01, far: 500 }}
         gl={{
           powerPreference: 'high-performance',
           antialias:       false,

@@ -12,7 +12,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.api.v1.endpoints.tutor import _get_dr_hamza_response
+from app.api.v1.endpoints.tutor import _get_cogni_response as _get_dr_hamza_response
 from app.services.forensic_engine import forensic_grade
 
 logger = logging.getLogger(__name__)
@@ -48,10 +48,10 @@ class EvaluationRequest(BaseModel):
     student_id: Optional[str] = Field(None, description="معرف الطالب (اختياري للذاكرة الطولية)")
 
 
-class VeronaEvaluationResponse(BaseModel):
+class EvaluationSpeakResponse(BaseModel):
     status      : str   # "success" | "error"
     raw_nexus   : dict  # نتيجة محرك NEXUS الخام
-    verona_reply: str   # الرد الثلاثي الأجزاء (فيرونا)
+    cogni_reply : str   # الرد الثلاثي الأجزاء (كوجني)
     dialogue    : str   # النص المنطوق فقط
     action      : str   # الحركة فقط (بدون نجوم)
     emotion     : str   # الوسم العاطفي
@@ -206,9 +206,9 @@ def _parse_reply(text: str) -> dict:
 
 # ── Verona Bridge: NEXUS → 3-part reply ────────────────────────────────────────
 
-def format_verona_response(nexus_data: dict) -> str:
+def format_cogni_evaluation(nexus_data: dict) -> str:
     """
-    محوّل البيانات من محرك الاستدلال NEXUS إلى شخصية فيرونا.
+    محوّل بيانات محرك NEXUS إلى رد كوجني الثلاثي الأجزاء.
     جدول الخمسة صفوف (بترتيب الأولوية):
       1. DISTINCTION أو longitudinal_improvement  → celebrate
       2. confidence < 0.7                         → thinking
@@ -229,31 +229,31 @@ def format_verona_response(nexus_data: dict) -> str:
     # ── Row 1: Distinction / improvement ─────────────────────────────────────
     if is_improved or final_grade == "DISTINCTION":
         emotion  = "[EMOTION: celebrate]"
-        action   = "*تصفق بخفة وتبتسم بفخر، مشيرةً إلى الشاشة باعتزاز*"
+        action   = "clap"
         dialogue = f"ما شاء الله، {reasoning}" if is_improved else f"تميّز حقيقي! {reasoning}"
 
     # ── Row 2: Low confidence → needs careful analysis ────────────────────────
     elif confidence < 0.7:
         emotion  = "[EMOTION: thinking]"
-        action   = "*تضع يدها على ذقنها وتتأمل الشاشة للحظة بتركيز*"
+        action   = "think"
         dialogue = f"في بعض النقاط أحتاج أتحقق منها معك أكثر. {reasoning}"
 
     # ── Row 3: Merit / Pass ───────────────────────────────────────────────────
     elif final_grade in ("MERIT", "PASS"):
         emotion  = "[EMOTION: friendly]"
-        action   = "*تومئ برأسها وتشير ببراعة إلى الفقرة الرئيسية في حلّك*"
+        action   = "nod"
         dialogue = reasoning
 
     # ── Row 4: Refer / Fail ───────────────────────────────────────────────────
     elif final_grade in ("REFER", "REFER (FAIL)", "FAIL"):
         emotion  = "[EMOTION: encouraging]"
-        action   = "*تفتح كفيها بلطف وتنظر بتشجيع، مستعدةً للمساعدة*"
+        action   = "beckon"
         dialogue = f"ما زلنا في بداية الطريق، والتحسّن ممكن. {reasoning}"
 
     # ── Row 5: Default / unknown ──────────────────────────────────────────────
     else:
         emotion  = "[EMOTION: neutral]"
-        action   = "*تعدل جلستها وترفع نظرها مع ابتسامة خفيفة*"
+        action   = "ack"
         dialogue = reasoning
 
     return f"{dialogue}\n{action}\n{emotion}"
@@ -348,11 +348,11 @@ async def chat_simple(body: SimpleChatRequest):
         )
 
 
-@router.post("/evaluate-and-speak", response_model=VeronaEvaluationResponse)
+@router.post("/evaluate-and-speak", response_model=EvaluationSpeakResponse)
 async def evaluate_and_speak(payload: EvaluationRequest):
     """
     يشغّل محرك NEXUS للتحقيق الجنائي في إجابة الطالب ثم يُحوّل النتيجة
-    إلى رد فيرونا الثلاثي الأجزاء (حوار | حركة | وسم عاطفة).
+    إلى رد كوجني الثلاثي الأجزاء (حوار | حركة | وسم عاطفة).
 
     POST /api/v1/evaluate-and-speak
     Body: { "assignment": "...", "submission": "...", "student_id": "..." }
@@ -369,25 +369,25 @@ async def evaluate_and_speak(payload: EvaluationRequest):
             forensic_grade(payload.assignment, payload.submission), timeout=30.0
         )
 
-        # 2. تحويل نتائج NEXUS إلى لغة فيرونا الثلاثية
-        verona_reply = format_verona_response(nexus_result)
+        # 2. تحويل نتائج NEXUS إلى رد كوجني الثلاثي
+        cogni_reply = format_cogni_evaluation(nexus_result)
 
         # 3. تحليل الرد للواجهة الأمامية
-        parsed = _parse_reply(verona_reply)
+        parsed = _parse_reply(cogni_reply)
 
-        return VeronaEvaluationResponse(
-            status       = "success",
-            raw_nexus    = nexus_result,
-            verona_reply = verona_reply,
-            dialogue     = parsed["dialogue"],
-            action       = parsed["action"],
-            emotion      = parsed["emotion"],
+        return EvaluationSpeakResponse(
+            status      = "success",
+            raw_nexus   = nexus_result,
+            cogni_reply = cogni_reply,
+            dialogue    = parsed["dialogue"],
+            action      = parsed["action"],
+            emotion     = parsed["emotion"],
         )
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("[Verona] evaluate-and-speak error: %s", e)
+        logger.exception("[Cogni] evaluate-and-speak error: %s", e)
         raise HTTPException(
             status_code=500,
             detail="فشل في تقييم الإجابة. يرجى التحقق من صحة النصوص والمحاولة لاحقاً."

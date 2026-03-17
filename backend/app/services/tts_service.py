@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Azure Neural TTS Service — Jordanian Arabic (ar-JO-TaimNeural / ar-JO-SanaNeural)
+Azure Neural TTS Service — Jordanian Arabic (ar-JO-OmarNeural / ar-JO-MaysoonNeural)
 ==================================================================================
 Synthesizes SSML using the Azure Speech SDK and returns raw MP3 bytes, 
 along with precise temporal viseme (lip-sync) and word boundary cues.
 
 تم تحسين الأداء عبر إعادة استخدام SpeechSynthesizer مع قفل (Lock) لضمان السلامة في البيئات متعددة الخيوط.
 تم إضافة نظام اصطياد الأحداث (Visemes & Word Boundaries) لربط عصب النطق مع الأفاتار 3D.
-Default voice:  ar-JO-TaimNeural   (male, Dr. Hamza persona)
-Fallback voice: ar-JO-SanaNeural   (female)
+Default voice:  ar-JO-OmarNeural   (male, Dr. Hamza - EXCLUSIVE)
+Rare fallback:  ar-JO-MaysoonNeural   (female - avoid unless explicitly requested)
 
 Install:
     pip install azure-cognitiveservices-speech>=1.37.0
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 #
 # Design decisions:
 #   1. We do NOT convert Jordanian colloquial words (هيك, كتير, يلا …) to MSA.
-#      ar-JO-TaimNeural is trained on Jordanian dialect; replacing dialect with
+#      ar-JO-OmarNeural is trained on Jordanian dialect; this is the verified male voice
 #      MSA made it sound Egyptian/formal.  Let the voice model do its job.
 #
 #   2. English tokens (PESTLE, SWOT, BTEC, …) are wrapped in
@@ -171,7 +171,7 @@ _EMOTION_PROSODY: dict[str, tuple[float, str, str]] = {
 }
 
 
-def _build_ssml(text: str, voice_name: str, rate: float = 0.95, emotion: str = 'neutral') -> str:
+def _build_ssml(text: str, voice_name: str, rate: float = 0.95, emotion: str = 'neutral', persona_level: str = 'pass') -> str:
     """
     Build production-quality SSML for ar-JO-TaimNeural:
 
@@ -181,6 +181,7 @@ def _build_ssml(text: str, voice_name: str, rate: float = 0.95, emotion: str = '
     • Sentence-boundary breath pauses (200–320 ms)
     • Questions → ``<prosody pitch="+8%">`` for natural Arabic intonation rise
     • Emotion-aware rate/styledegree/pitch via _EMOTION_PROSODY table
+    • Persona-level rate multiplier and pitch wrapper (Triple-Persona Engine)
     """
     # Override rate/styledegree/pitch from emotion table when emotion is known
     prosody_entry = _EMOTION_PROSODY.get((emotion or 'neutral').lower())
@@ -190,7 +191,23 @@ def _build_ssml(text: str, voice_name: str, rate: float = 0.95, emotion: str = '
         styledegree = '1.2'
         pitch_extra = '+2%'
 
-    rate_pct = f"{int(round(rate * 100))}%"
+    # F2 Fix: Azure SSML requires signed relative percentage e.g. "+15%" not "115%"
+    _r_offset = round((rate - 1.0) * 100)
+    rate_pct = f"+{_r_offset}%" if _r_offset >= 0 else f"{_r_offset}%"
+
+    # ── Triple-Persona Engine: apply level-based rate multiplier and pitch wrapper ──
+    # Pass: warm/funny → slightly faster, high pitch (+5%)
+    # Merit: serious academic → professional pace, neutral pitch
+    # Distinction: challenger → noticeably faster, deep pitch (-10%)
+    _PERSONA_RATE_MUL = {'pass': 1.10, 'merit': 1.08, 'distinction': 1.15}
+    _PERSONA_PITCH    = {'pass': '+5%', 'merit': '+0%', 'distinction': '-10%'}
+    persona_rate_mul = _PERSONA_RATE_MUL.get((persona_level or 'pass').lower(), 1.0)
+    persona_pitch    = _PERSONA_PITCH.get((persona_level or 'pass').lower(), '+0%')
+    # Persona rate is the ABSOLUTE speaking rate — not compounded with emotion rate.
+    # F2 Fix: signed relative percentage — "+8%" = 8% faster, "-5%" = 5% slower.
+    # Emotion table still controls style-degree and pitch for expressiveness.
+    _p_offset = round((persona_rate_mul - 1.0) * 100)
+    rate_pct = f"+{_p_offset}%" if _p_offset >= 0 else f"{_p_offset}%"
 
     tokens = _SENT_BOUNDARY.split(text)
     ssml_parts: list[str] = []
@@ -222,6 +239,10 @@ def _build_ssml(text: str, voice_name: str, rate: float = 0.95, emotion: str = '
 
     body = '\n'.join(ssml_parts)
 
+    # Wrap body in persona pitch prosody (skip wrapper when pitch is neutral)
+    if persona_pitch and persona_pitch != '+0%':
+        body = f'<prosody pitch="{persona_pitch}">{body}</prosody>'
+
     return (
         f'<speak version="1.0" '
         f'xmlns="http://www.w3.org/2001/10/synthesis" '
@@ -248,7 +269,7 @@ class AzureTTSService:
         speech_key: Optional[str] = None,
         speech_region: Optional[str] = None,
         default_voice: Optional[str] = None,
-        prosody_rate: float = 0.95,
+        prosody_rate: float = 1.05,
         request_timeout: float = 15.0,
     ) -> None:
         self._key = speech_key
@@ -307,6 +328,7 @@ class AzureTTSService:
         voice_name: Optional[str] = None,
         timeout: Optional[float] = None,
         emotion: str = 'neutral',
+        persona_level: str = 'pass',
     ) -> Tuple[bytes, List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Synthesize *text* to MP3 bytes with temporal cues.
@@ -336,7 +358,7 @@ class AzureTTSService:
         if not voice:
             raise RuntimeError("No voice name provided and no default configured.")
 
-        ssml = _build_ssml(text, voice, self._prosody_rate, emotion=emotion)
+        ssml = _build_ssml(text, voice, self._prosody_rate, emotion=emotion, persona_level=persona_level)
 
         # Ensure synthesizer is ready
         synthesizer = await self._ensure_synthesizer()

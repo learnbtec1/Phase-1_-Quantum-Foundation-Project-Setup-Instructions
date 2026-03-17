@@ -1,7 +1,7 @@
 {
   "afterFix": [
     { "command": "npm run sync:backend", "waitFor": "done" },
-    { "command": "npm run dev -- --no-turbo -p 3011", "waitFor": "ready" },
+    { "command": "npm run dev", "waitFor": "ready" },
     { "command": "npm run playwright:install", "ignoreError": true },
     { "command": "npm run test:e2e", "ignoreError": false }
   ],

@@ -1,5 +1,5 @@
 /**
- * CognitiveEngine — Layer 8 pedagogical intelligence for the NEXUS avatar.
+ * CognitiveEngine — Layer 8 pedagogical intelligence for the EDUVERSE avatar.
  *
  * Responsibilities:
  *   1. Classify student intent from raw text (COGNITIVE INTENT ENGINE)

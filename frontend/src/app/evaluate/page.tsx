@@ -4,7 +4,7 @@ import React, { useRef, useCallback, useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import type { AvatarCanvasRef } from './AvatarCanvas';
 import styles from './page.module.css';
-import { parseVeronaResponse, inferResponsePlan } from '@/ai/avatar/brain';
+import { parseCogniResponse, inferResponsePlan } from '@/ai/avatar/brain';
 import { directAvatarPerformance } from '@/ai/avatar/director';
 import { classifyReplyType, emotionToProsody, humanizeTelemetry, selfCheckTelemetry } from '@/ai/cognitive/CognitiveEngine';
 import { getLastGestureLog } from '@/ai/memory/store';
@@ -43,6 +43,9 @@ export default function EvaluatePage() {
   const avatarRef = useRef<AvatarCanvasRef | null>(null);
   // Guard: prevent double-boot from HMR / React StrictMode double-invoke
   const bootedRef = useRef(false);
+  // Guard: wait for user interaction before playing audio (browser autoplay policy)
+  const userInteractedRef = useRef(false);
+  const pendingBootRef = useRef<(() => Promise<void>) | null>(null);
 
   const handleAvatarReady = useCallback(async (ref: AvatarCanvasRef) => {
     avatarRef.current = ref;
@@ -51,6 +54,14 @@ export default function EvaluatePage() {
     bootedRef.current = true;
     // Guard 2: sessionStorage — blocks same-tab reload double-boot
     if (typeof window !== 'undefined' && sessionStorage.getItem('avatar_boot_done') === '1') return;
+    
+    // Defer boot greeting until user interacts (browser autoplay policy)
+    if (!userInteractedRef.current && typeof window !== 'undefined') {
+      console.log('[Boot] Deferred — waiting for user interaction before audio playback');
+      const bootGreetingFn = setupBootGreeting.bind(null);
+      pendingBootRef.current = bootGreetingFn;
+      return;
+    }
     // Disable VAD + interrupts while boot greeting plays
     if (typeof window !== 'undefined') {
       (window as unknown as Record<string, unknown>).__BOOT_GREETING_ACTIVE__ = true;
@@ -236,7 +247,7 @@ export default function EvaluatePage() {
           // Fix 1: prefer backend-parsed clean dialogue field; fall back to local parsing.
           // data.dialogue = Line 1 of the 3-line format, already stripped of *action* and [EMOTION].
           // Parsing data.reply ourselves is kept as a safety net only.
-          const { dialogue: parsedDialogue, emotion: veronaEmotion } = parseVeronaResponse(data.reply ?? '');
+          const { dialogue: parsedDialogue, emotion: veronaEmotion } = parseCogniResponse(data.reply ?? '');
           const rawClean = (typeof data.dialogue === 'string' && data.dialogue.trim())
             ? data.dialogue.trim()
             : (parsedDialogue || data.reply);

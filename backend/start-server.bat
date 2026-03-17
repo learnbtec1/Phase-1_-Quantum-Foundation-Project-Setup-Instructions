@@ -1,6 +1,11 @@
 @echo off
 setlocal enabledelayedexpansion
 
+:: Force UTF-8 for Arabic text in logs (prevents charmap/cp1252 crash on Windows)
+set PYTHONIOENCODING=utf-8
+set PYTHONUTF8=1
+chcp 65001 > nul
+
 cd /d "e:\Phase 1_ Quantum Foundation Project Setup Instructions\backend"
 
 echo.

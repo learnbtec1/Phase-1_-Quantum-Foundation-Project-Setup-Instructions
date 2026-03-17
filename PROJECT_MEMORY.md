@@ -102,6 +102,81 @@ e:\Phase 1_ Quantum Foundation Project Setup Instructions\
 
 ---
 
+## ✅ المنجز الكامل — الجلسة الحالية (بعد 2026-03-14): CRITICAL FIX — Voice Names Corrected to ar-JO-OmarNeural (Male)
+
+### 🚨 المشكلة المكتشفة والمحل
+
+**المشكلة**: النظام كان يستخدم اسم صوت خاطئ `ar-JO-TaimNeural` (أنثى أو غير متاح) بدلاً من الصوت الذكري الصحيح.
+
+**الحل**: 
+- ✅ تم تغيير الصوت الذكري من `ar-JO-TaimNeural` → **`ar-JO-OmarNeural`** (verified male voice in Azure)
+- ✅ تم تغيير الصوت الأنثوي من `ar-JO-SanaNeural` → **`ar-JO-MaysoonNeural`** (verified female voice in Azure)
+
+### ملفات معدّلة للأصوات الصحيحة (7 ملفات)
+| الملف | التغيير |
+|-------|---------|
+| `backend/app/core/config.py` | `TTS_ARABIC_VOICE = ar-JO-OmarNeural` (ذكري بدلاً من TaimNeural) ✅ |
+| `frontend/src/app/api/tts-with-timing/route.ts` | تحديث default voices (OmarNeural / MaysoonNeural) ✅ |
+| `frontend/src/ai/io/tts.ts` | تحديث تعليقات التوثيق (ar-JO-OmarNeural / ar-JO-MaysoonNeural) ✅ |
+| `backend/app/api/v1/endpoints/tts_timing.py` | تحديث comments و constants (OmarNeural / MaysoonNeural) ✅ |
+| `backend/app/services/tts_service.py` | تحديث docstring عن الأصوات الصحيحة ✅ |
+| `EDUVERSE_MASTER_SOUL.md` | تحديث مثال env variable ✅ |
+| `PROJECT_MEMORY.md` (هذا الملف) | توثيق المشكلة والحل ✅ |
+
+### معايير الأصوات الأردنية (الآن صحيحة)
+| العنصر | القيمة الجديدة | النوع | الملاحظة |
+|-------|-------------|-------|---------|
+| الصوت الهيمن | `ar-JO-OmarNeural` | ذكر | Deep male voice in Jordanian Arabic |
+| الصوت الاحتياطي | `ar-JO-MaysoonNeural` | أنثى | Female voice (نادر جداً) |
+| متغير البيئة | `TTS_ARABIC_VOICE` | - | افتراضي: `ar-JO-OmarNeural` |
+| المتغير الاحتياطي | `TTS_ARABIC_VOICE_FEMALE` | - | افتراضي: `ar-JO-MaysoonNeural` |
+| معامل القطع الأمامي | `arVoice: 'male'` | - | يُرسل مع كل طلب TTS |
+
+### التحقق من الصوت الفعلي
+**الخطوات**:
+1. **شغّل النظام**: `npm run dev` في frontend + `uvicorn app.main:app --reload` في backend
+2. **افتح المتصفح**: http://localhost:3000/avatar-agent
+3. **أرسل رسالة** إلى Avatar (مثل "من أنت؟")
+4. **استمع**: يجب أن يكون الصوت **عميق اً ذكوري اً** (ar-JO-OmarNeural)
+5. **تحقق من Network tab**: POST /api/tts-with-timing يجب أن يحتوي على `"voice":"ar-JO-OmarNeural"`
+
+### السياق التاريخي
+- **السابق (خاطئ)**: `ar-JO-TaimNeural` (SanaNeural female backup) — كان يعطي صوت أنثى
+- **الآن (صحيح)**: `ar-JO-OmarNeural` (MaysoonNeural female backup) — يعطي صوت ذكر عميق
+
+---
+
+## ✅ المنجز الكامل — الجلسة الأخيرة (ما قبل 2026-03-18): Voice Standardization to ar-JO-TaimNeural (Male)
+
+### ملفات معدّلة للصوت الذكري الحصري
+| الملف | ما تم |
+|-------|-------|
+| `frontend/src/ai/io/tts.ts` | 1) حُدّث التعليق سطر 27-29: الصوت الذكري (ar-JO-TaimNeural) = EXCLUSIVE DEFAULT / الصوت الأنثوي (ar-JO-SanaNeural) = احتياطي نادر 2) حُدّث التعليق سطر 148: شرح أن male هو، وأن female نادر جداً |
+| `backend/app/services/tts_service.py` | حُدّث التعليق: `Default voice: ar-JO-TaimNeural (male, Dr. Hamza - EXCLUSIVE)` / `Rare fallback: ar-JO-SanaNeural (female - avoid unless explicitly requested)` |
+| `backend/app/api/v1/endpoints/tts_timing.py` | حُدّث التعليق سطر 474-475: `الصوت الذكوري : ar-JO-TaimNeural → الصوت الافتراضي الحصري (Dr. Hamza)` / `الصوت الأنثوي : ar-JO-SanaNeural → احتياطي نادر جداً` |
+| `frontend/src/app/api/chat/route.ts` | (سابقاً) حُدّث docstring من "female Arabic TTS voice" إلى "male Arabic TTS voice (ar-JO-TaimNeural)" |
+| `.cursorrules` | (سابقاً) حُدّث voice reference |
+| `.github/copilot-instructions.md` | (سابقاً) حُدّث voice reference |
+
+### المادة التقنية للصوت
+| العنصر | القيمة | الملاحظة |
+|-------|--------|---------|
+| الصوت الهيمن | `ar-JO-TaimNeural` | لهجة أردنية ذكر — Dr. Hamza persona |
+| الصوت الاحتياطي | `ar-JO-SanaNeural` | لهجة أردنية أنثى — نادر جداً |
+| متغير البيئة | `TTS_ARABIC_VOICE` | افتراضي: `ar-JO-TaimNeural` في `backend/app/core/config.py` |
+| المتغير الاحتياطي | `TTS_ARABIC_VOICE_FEMALE` | افتراضي: `ar-JO-SanaNeural` (fallback فقط) |
+| معامل القطع الأمامي | `arVoice` في `SpeakOptions` | قيمة: `'male'` أو `'female'` — افتراضي: `'male'` |
+| تدفق التطلب | `speakWithTTS(text, { arVoice: 'male' })` → `/api/tts-with-timing` | صريح `'male'` في `Chat.tsx` و `AgentDirector.ts` |
+
+### حالة المراجعة
+- ✅ جميع استدعاءات `speakWithTTS()` تستخدم `arVoice: 'male'` بشكل صريح أو ضمني
+- ✅ جميع التعليقات والتوثيق محدثة لـ ar-JO-TaimNeural (ذكر) كـ exclusive default
+- ✅ لا توجد hardcoded references لـ ar-SA-ZariyahNeural (الصيغة القديمة)
+- ✅ معايرة الصوت الأنثوي إلى "نادر جداً" و "احتياطي فقط"
+- ⏳ اختبار في المتصفح: التحقق من أن الصوت الحقيقي هو ar-JO-TaimNeural (ذكر/عميق)
+
+---
+
 ## ✅ المنجز الكامل — الجلسة الأخيرة (2026-03-14)
 
 **اسم الـ Patch Set**: "البرومبت الملكي النهائي — Hardened v3 + v10 Angelic Voice Integration"

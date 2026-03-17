@@ -5,6 +5,7 @@ import styles from './Chat.module.css';
 import { inferResponsePlan } from '@/ai/avatar/brain';
 import { reactToUserInput, dispatchGestureFromActionText, dispatchEmotion } from '@/ai/avatar/actions';
 import { speakWithTTS } from '@/ai/io/tts';
+import { Mic, MicOff } from 'lucide-react';
 
 export interface Message {
   id: string;
@@ -19,11 +20,42 @@ export default function Chat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isListening, setIsListening] = useState(false);
 
   useEffect(() => {
     const el = messagesContainerRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
+
+  const toggleMic = () => {
+    const SpeechRecognition =
+      (window as unknown as Record<string, unknown>).SpeechRecognition as
+        (new () => SpeechRecognition) | undefined ??
+      (window as unknown as Record<string, unknown>).webkitSpeechRecognition as
+        (new () => SpeechRecognition) | undefined;
+    if (!SpeechRecognition) {
+      alert('عذراً، متصفحك لا يدعم التعرف على الصوت. يرجى استخدام Google Chrome.');
+      return;
+    }
+    if (isListening) {
+      setIsListening(false);
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    (recognition as unknown as Record<string, unknown>).lang = 'ar-JO';
+    (recognition as unknown as Record<string, unknown>).interimResults = true;
+    (recognition as unknown as Record<string, unknown>).continuous = false;
+    recognition.onstart = () => setIsListening(true);
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      const transcript = Array.from(event.results)
+        .map((r) => r[0].transcript)
+        .join('');
+      setInputText(transcript);
+    };
+    recognition.onerror = () => setIsListening(false);
+    recognition.onend = () => setIsListening(false);
+    recognition.start();
+  };
 
   // Ensure event payloads align with VRMAvatar.tsx
   const detectAndDispatchCommand = (text: string): boolean => {
@@ -202,7 +234,12 @@ export default function Chat() {
         >
           {messages.length > 0 && (
             <div className="space-y-1.5">
-              {messages.map((msg) => (
+              {messages
+                .filter((msg) =>
+                  msg.role !== 'system' &&
+                  !msg.content?.startsWith('SYSTEM_EVENT:')
+                )
+                .map((msg) => (
                 <div
                   key={msg.id}
                   className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
@@ -214,7 +251,7 @@ export default function Chat() {
                         : 'bg-slate-700/80 text-slate-100 border border-slate-600/80'
                     }`}
                   >
-                    <span className="opacity-90">{msg.role === 'user' ? 'أنت' : 'فورينا'}: </span>
+                    <span className="opacity-90">{msg.role === 'user' ? 'أنت' : 'كوجني'}: </span>
                     {msg.content}
                   </div>
                 </div>
@@ -230,6 +267,18 @@ export default function Chat() {
         <div
           className={`flex-shrink-0 flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 bg-slate-800/70 backdrop-blur-md shadow-xl glass ${styles.chatInputRow}`}
         >
+          <button
+            type="button"
+            onClick={toggleMic}
+            className={`shrink-0 p-2.5 rounded-lg transition-colors ${
+              isListening
+                ? 'bg-red-500/80 hover:bg-red-500 text-white animate-pulse'
+                : 'bg-slate-700 hover:bg-slate-600 text-gray-300 border border-slate-600'
+            }`}
+            title="التحدث بالصوت"
+          >
+            {isListening ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
+          </button>
           <input
             type="text"
             value={inputText}
@@ -242,7 +291,7 @@ export default function Chat() {
             }}
             onMouseEnter={onHover}
             onFocus={onHover}
-            placeholder="اكتب رسالتك إلى فورينا..."
+            placeholder={isListening ? 'جاري الاستماع...' : 'اكتب رسالتك إلى كوجني...'}
             className="flex-1 bg-slate-700/80 border border-slate-600 rounded-lg px-4 py-2.5 text-gray-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 text-sm min-w-0 transition"
             disabled={isLoading}
           />
