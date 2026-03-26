@@ -352,6 +352,42 @@ export class EmotionalMemoryManager {
     return this.getTrajectory().trend === 'volatile';
   }
 
+  /**
+   * Long-term traits for BehaviorRulesEngine + AgentDirector:
+   * technical interests → slightly faster delivery + pointing bias;
+   * warm/friendly trajectory → higher chance of playful gestures.
+   */
+  getPersonalityAdaptation(): {
+    voiceRateMultiplier: number;
+    preferPointingGestures: boolean;
+    playfulGestureChance: number;
+  } {
+    const { longTermMemory } = useBrainStore.getState();
+    const blob = longTermMemory.userInterests.join(' ').toLowerCase();
+    const techHints =
+      /btec|pestle|swot|technical|كود|برمج|حساب|math|science|algorithm|data|تحليل|إحصاء/i;
+    let voiceRateMultiplier = 1.0;
+    let preferPointingGestures = false;
+    if (techHints.test(blob)) {
+      voiceRateMultiplier = 1.05;
+      preferPointingGestures = true;
+    }
+
+    const traj = this.getTrajectory();
+    let playfulGestureChance = 0.12;
+    if (
+      (traj.dominantEmotion === 'happy' || traj.dominantEmotion === 'friendly') &&
+      traj.avgPleasure > 0.12
+    ) {
+      playfulGestureChance = 0.28;
+    }
+    if (traj.trend === 'rising_positive') {
+      playfulGestureChance = Math.min(0.35, playfulGestureChance + 0.08);
+    }
+
+    return { voiceRateMultiplier, preferPointingGestures, playfulGestureChance };
+  }
+
   // ── Private utilities ────────────────────────────────────────────────────────
 
   /** Normalised magnitude of a PAD vector [0, 1]. 1 = maximum emotional state. */

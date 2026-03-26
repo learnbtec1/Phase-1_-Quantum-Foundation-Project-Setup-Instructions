@@ -55,7 +55,7 @@ async def generate_tts(
         )
 
     try:
-        mp3_bytes = await service.synthesize(
+        mp3_bytes, _v, _w = await service.synthesize(
             text=body.text,
             voice_name=body.voice_name,
         )

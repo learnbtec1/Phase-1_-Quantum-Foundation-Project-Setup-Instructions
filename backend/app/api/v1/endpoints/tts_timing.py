@@ -3,11 +3,11 @@
 TTS-with-timing endpoint: POST /api/v1/tts-with-timing
 Synthesize speech with word-level timing for lip-sync and viseme events.
 
-Priority chain:
-  1. Azure Speech SDK (cloud, WAV 24k 16-bit mono) — NATIVE viseme + word-boundary timing
-  2. Kokoro TTS (local, PCM) — best for non-Arabic
-  3. edge-tts streaming (ar-JO-TaimNeural / ar-JO-SanaNeural) — REAL word-boundary timing + viseme events
-  4. gTTS Arabic — last resort (estimated timings only)
+Priority chain (default TTS_PRIMARY_PROVIDER=edge):
+  1. edge-tts (Microsoft Edge online, ar-JO-TaimNeural + fallbacks) — REAL word-boundary + viseme events, no Azure key
+  2. Azure Speech SDK — NATIVE viseme + word timings when credentials work (or when TTS_PRIMARY_PROVIDER=azure)
+  3. Kokoro TTS (local, PCM) — best for non-Arabic
+  4. gTTS — last resort for **non-Arabic** text only (Arabic skips gTTS for dialect consistency)
 
 Hardening (v2):
   - Circuit-breaker on Azure (3 failures → 60 s cooldown)
@@ -37,6 +37,13 @@ from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.services.kokoro_tts import is_available, synthesize_with_timing
+from app.services.tts_service import (
+    DEFAULT_EDGE_TTS_PROSODY as _DEFAULT_PROSODY,
+    EDGE_TTS_EMOTION_PROSODY as _EMOTION_PROSODY,
+    _locked_jordanian_male_voice,
+    is_azure_tts_auth_failure,
+    synthesize_edge_tts_mp3,
+)
 from app.services.conversation_store import get_store as _get_store
 
 # Module-level ConversationStore singleton (lazy — harmless if import fails)
@@ -343,6 +350,8 @@ def _synthesize_azure_sync(
     """
     import azure.cognitiveservices.speech as speechsdk
 
+    voice = _locked_jordanian_male_voice(voice)
+
     speech_config = speechsdk.SpeechConfig(subscription=key, region=region)
     speech_config.set_speech_synthesis_output_format(
         speechsdk.SpeechSynthesisOutputFormat.Riff24Khz16BitMonoPcm
@@ -383,7 +392,7 @@ def _synthesize_azure_sync(
 
     if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted:
         if result.reason == speechsdk.ResultReason.Canceled:
-            details = speechsdk.SpeechSynthesisCancellationDetails.from_result(result)
+            details = speechsdk.SpeechSynthesisCancellationDetails(result)
             raise RuntimeError(
                 f"Azure TTS canceled: {details.reason.name} / {details.error_details}"
             )
@@ -429,154 +438,109 @@ async def _synthesize_azure(
     )
 
 
-
-# ── Arabic character → Azure-compatible viseme ID ────────────────────────────
-# IDs follow Microsoft's viseme spec (0=silence, 1-21 = phoneme groups).
-# Each Arabic letter maps to the closest English phoneme group.
-_ARABIC_VISEME: Dict[str, int] = {
-    'ا': 2,  'أ': 2,  'إ': 2,  'آ': 2,   # aleph  → open (ɑ)
-    'ب': 21, 'پ': 21,                      # ba/pa  → p/b/m
-    'ت': 19, 'ط': 19,                      # ta/tta → d/t/n
-    'ث': 17,                                # tha    → ð/θ
-    'ج': 16,                                # jeem   → ʃ/dʒ
-    'ح': 12, 'ه': 12,                      # ha     → h
-    'خ': 20, 'غ': 20, 'ق': 20, 'ك': 20,  # kha/qa → k/g
-    'د': 19, 'ض': 19,                      # dal    → d
-    'ذ': 17, 'ظ': 17,                      # dhal   → ð
-    'ر': 13,                                # ra     → ɹ
-    'ز': 15, 'س': 15, 'ص': 15,            # za/sa  → s/z
-    'ش': 16,                                # shin   → ʃ
-    'ع': 2,                                 # ain    → open vowel
-    'ف': 18,                                # fa     → f/v
-    'ل': 14,                                # lam    → l
-    'م': 21,                                # mim    → p/b/m
-    'ن': 19,                                # nun    → d/t/n
-    'و': 7,                                 # waw    → w/u (rounded)
-    'ي': 6,  'ى': 6,                       # ya     → j/i
-    'ة': 19,                                # ta marbuta → t
-    'ء': 1,                                 # hamza  → slight opening
-}
-
-def _word_first_viseme(word: str) -> int:
-    """Return the viseme ID for the first meaningful character of a word."""
-    for ch in word:
-        if ch in _ARABIC_VISEME:
-            return _ARABIC_VISEME[ch]
-        # Latin / digits — rough mapping
-        if ch.isalpha():
-            return 1  # neutral opening
-    return 0  # silence / punctuation
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# تعريفات اللهجة الأردنية — Jordanian Arabic Dialect Voice Profile
-# ════════════════════════════════════════════════════════════════════════════
-#
-# الصوت الذكوري   : ar-JO-OmarNeural   → الصوت الافتراضي الحصري (Dr. Hamza)
-# الصوت الأنثوي : ar-JO-MaysoonNeural   → احتياطي نادر جداً (تجنب استخدامه)
-#
-# خصائص اللهجة الأردنية في edge-tts:
-#   • rate  : إزاحة النسبة المئوية عن الإيقاع الطبيعي للصوت  (e.g. '+5%', '-10%')
-#   • pitch : إزاحة طبقة الصوت بوحدة Hz  (e.g. '+4Hz', '-6Hz')
-#
-# جدول المشاعر الستة للمدرّس (tutor emotions) + مشاعر موسّعة:
-#   neutral     — رزين هادئ         → إيقاع طبيعي
-#   friendly    — ودود دافئ          → أسرع قليلاً + طبقة أعلى
-#   thinking    — متأمّل متمهّل       → أبطأ + طبقة أخفض
-#   encouraging — تشجيعي حماسي       → أسرع + طبقة أعلى
-#   strict      — حازم رسمي          → أبطأ + طبقة أخفض
-#   celebrate   — احتفالي فرحاني     → أسرع بكثير + طبقة أعلى بكثير
-# ════════════════════════════════════════════════════════════════════════════
-
-# الأصوات الأردنية — مصدرها الإعدادات (قابلة للتغيير عبر .env)
-EDGE_TTS_ARABIC_MALE   = settings.TTS_ARABIC_VOICE          # ar-JO-OmarNeural
-EDGE_TTS_ARABIC_FEMALE = settings.TTS_ARABIC_VOICE_FEMALE   # ar-JO-MaysoonNeural
-
-# ── بروفايل اللهجة الأردنية: المشاعر الستة الأساسية + مشاعر موسّعة ──────────
-# rate/pitch مُعايَرة خصيصاً لصوت ar-JO-TaimNeural لأفضل طبيعية في العربية الأردنية
-_EMOTION_PROSODY: Dict[str, Dict[str, str]] = {
-    # ── المشاعر الستة الأساسية للمدرّس (tutor core emotions) ──
-    'neutral':          {'rate': '+0%',  'pitch': '+0Hz'},   # هادئ — النغمة الطبيعية للهجة
-    'friendly':         {'rate': '+4%',  'pitch': '+5Hz'},   # ودود — دفء أردني مميّز
-    'thinking':         {'rate': '-14%', 'pitch': '-5Hz'},   # تفكير — متأمّل، مع توقف طبيعي
-    'encouraging':      {'rate': '+10%', 'pitch': '+7Hz'},   # تشجيع — حماسي وواضح
-    'strict':           {'rate': '-8%',  'pitch': '-8Hz'},   # حازم — سلطة أستاذية هادئة
-    'celebrate':        {'rate': '+18%', 'pitch': '+12Hz'},  # احتفال — فرح أردني تعبيري
-    # ── مشاعر موسّعة (للتوافق مع استجابات LLM الأخرى) ──────
-    'celebrating':      {'rate': '+18%', 'pitch': '+12Hz'},
-    'excited':          {'rate': '+12%', 'pitch': '+9Hz'},
-    'happy':            {'rate': '+6%',  'pitch': '+5Hz'},
-    'proud':            {'rate': '+5%',  'pitch': '+4Hz'},
-    'surprised':        {'rate': '+6%',  'pitch': '+8Hz'},
-    'curious':          {'rate': '+3%',  'pitch': '+3Hz'},
-    'attentive':        {'rate': '+1%',  'pitch': '+2Hz'},
-    'empathetic':       {'rate': '-10%', 'pitch': '-4Hz'},
-    'concerned':        {'rate': '-10%', 'pitch': '-5Hz'},
-    'sad':              {'rate': '-14%', 'pitch': '-9Hz'},
-    'anxious':          {'rate': '-6%',  'pitch': '-3Hz'},
-    'strictevaluation': {'rate': '-8%',  'pitch': '-8Hz'},
-}
-# الإيقاع الافتراضي عند مجيء مشاعر غير معروفة → طبيعي هادئ
-_DEFAULT_PROSODY: Dict[str, str] = {'rate': '+0%', 'pitch': '+0Hz'}
-
-
-async def _synthesize_edge_tts(
+# ── Edge → TTSResponse (shared by primary edge path and Azure fallback) ─────
+async def _edge_mp3_to_tts_response(
+    mp3_bytes: bytes,
+    word_timings: List[Dict[str, Any]],
+    viseme_events: List[Dict[str, Any]],
+    *,
+    t_start: float,
     text: str,
-    rate: str = '+0%',
-    pitch: str = '+0Hz',
-    voice: Optional[str] = None,
-) -> Tuple[bytes, List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Synthesize via edge-tts streaming with optional prosody.
-    Returns (mp3_bytes, word_timings, viseme_events).
-    word_timings:   [{word, start_time, end_time}]   (times in ms)
-    viseme_events:  [{offset_ms, viseme_id}]
-    """
-    import edge_tts  # already in requirements.txt
-
-    _voice = voice or EDGE_TTS_ARABIC_MALE
-    # boundary='WordBoundary' is REQUIRED to receive per-word timing events.
-    # The default 'SentenceBoundary' only emits sentence-level events and
-    # produces 0 word timings — which breaks lip-sync viseme scheduling.
-    communicate = edge_tts.Communicate(
-        text, _voice,
-        rate=rate, pitch=pitch,
-        boundary='WordBoundary',
+    background_tasks: BackgroundTasks,
+    voice_label: str,
+) -> TTSResponse:
+    wav_from_ffmpeg = await asyncio.get_event_loop().run_in_executor(
+        None, _mp3_to_wav_ffmpeg, mp3_bytes
     )
-    audio_chunks: List[bytes] = []
-    word_bounds: List[Dict[str, Any]] = []
+    if wav_from_ffmpeg:
+        b64 = base64.b64encode(wav_from_ffmpeg).decode("ascii")
+        ms = int((time.monotonic() - t_start) * 1000)
+        logger.info(
+            "TTS provider=%-8s format=%-3s timing=%-6s "
+            "latency_ms=%d wav_kb=%.1f words=%d visemes=%d",
+            "edge-tts", "wav", "real",
+            ms, len(wav_from_ffmpeg) / 1024, len(word_timings), len(viseme_events),
+        )
+        _resp = TTSResponse(
+            audio_base64=b64,
+            audio_wav_base64=b64,
+            audio_mp3_base64=None,
+            word_timings=word_timings,
+            viseme_events=viseme_events,
+            sample_rate=24000,
+            format="wav",
+            timing_mode="real",
+            provider="edge-tts",
+            voice=voice_label,
+        )
+        if _store is not None:
+            background_tasks.add_task(
+                _store.append_from_response,
+                text, _resp.provider, _resp.timing_mode, _resp.sample_rate,
+                _resp.audio_wav_base64, _resp.word_timings, _resp.viseme_events,
+                int((time.monotonic() - t_start) * 1000),
+            )
+        return _resp
+    b64 = base64.b64encode(mp3_bytes).decode("ascii")
+    ms = int((time.monotonic() - t_start) * 1000)
+    logger.info(
+        "TTS provider=%-8s format=%-3s timing=%-6s "
+        "latency_ms=%d wav_kb=%.1f words=%d visemes=%d",
+        "edge-tts", "mp3", "real",
+        ms, len(mp3_bytes) / 1024, len(word_timings), len(viseme_events),
+    )
+    _resp = TTSResponse(
+        audio_base64=b64,
+        audio_wav_base64=None,
+        audio_mp3_base64=b64,
+        word_timings=word_timings,
+        viseme_events=viseme_events,
+        sample_rate=24000,
+        format="mp3",
+        timing_mode="real",
+        provider="edge-tts",
+        voice=voice_label,
+    )
+    if _store is not None:
+        background_tasks.add_task(
+            _store.append_from_response,
+            text, _resp.provider, _resp.timing_mode, _resp.sample_rate,
+            _resp.audio_wav_base64, _resp.word_timings, _resp.viseme_events,
+            int((time.monotonic() - t_start) * 1000),
+        )
+    return _resp
 
-    async for chunk in communicate.stream():
-        ctype = chunk.get("type")
-        if ctype == "audio":
-            audio_chunks.append(chunk["data"])
-        elif ctype in ("WordBoundary", "SentenceBoundary"):
-            # offset/duration are in 100-nanosecond units → convert to ms
-            offset_ms  = chunk.get("offset",   0) / 10_000
-            dur_ms     = chunk.get("duration", 0) / 10_000
-            word_bounds.append({
-                "word":       chunk.get("text", ""),
-                "start_time": offset_ms,
-                "end_time":   offset_ms + dur_ms,
-            })
 
-    if not audio_chunks:
-        raise RuntimeError("edge-tts returned no audio")
-
-    mp3_bytes = b"".join(audio_chunks)
-
-    # Build viseme events: one opening event per word + one silence at word end
-    viseme_events: List[Dict[str, Any]] = []
-    for wb in word_bounds:
-        word    = wb["word"]
-        open_ms = max(0.0, wb["start_time"] - 30)   # 30ms lead-in
-        vid     = _word_first_viseme(word)
-        if vid != 0:
-            viseme_events.append({"offset_ms": open_ms,      "viseme_id": vid})
-        # Close mouth at word end
-        viseme_events.append(    {"offset_ms": wb["end_time"], "viseme_id": 0})
-
-    return mp3_bytes, word_bounds, viseme_events
+async def _try_synthesize_edge_tts_response(
+    text: str,
+    tts_rate: str,
+    tts_pitch: str,
+    ar_voice_name: str,
+    t_start: float,
+    background_tasks: BackgroundTasks,
+) -> Optional[TTSResponse]:
+    try:
+        mp3_bytes, word_timings, viseme_events = await asyncio.wait_for(
+            synthesize_edge_tts_mp3(
+                text,
+                rate=tts_rate,
+                pitch=tts_pitch,
+                voice=ar_voice_name,
+            ),
+            timeout=25.0,
+        )
+    except Exception as e:
+        logger.warning("[tutor] edge-tts failed: %s", e)
+        return None
+    return await _edge_mp3_to_tts_response(
+        mp3_bytes,
+        word_timings,
+        viseme_events,
+        t_start=t_start,
+        text=text,
+        background_tasks=background_tasks,
+        voice_label=ar_voice_name,
+    )
 
 
 # ── gTTS last-resort fallback ─────────────────────────────────────────────────
@@ -688,7 +652,7 @@ async def tts_with_timing(
     """
     Synthesize text to speech with word-level timing and viseme events for lip-sync.
 
-    Priority: Azure SDK (native WAV) → Kokoro (local PCM) → edge-tts (MP3/WAV) → gTTS (MP3 approx)
+    Priority: edge-tts (default) → Azure SDK → Kokoro → last-chance edge (auto) → gTTS (non-Arabic only)
 
     Hardening:
       - Rate-limited: 3 req/s per IP
@@ -715,23 +679,21 @@ async def tts_with_timing(
     tts_rate  = prosody['rate']
     tts_pitch = payload.pitch if payload.pitch else prosody['pitch']
 
-    # Resolve Jordanian Arabic voice (for edge-tts fallback)
-    _ar_voice_req = (payload.ar_voice or '').strip().lower()
-    if _ar_voice_req == 'female':
-        ar_voice_name = EDGE_TTS_ARABIC_FEMALE
-    elif _ar_voice_req == 'male' or not _ar_voice_req:  # default = Cogni / Taim (male)
-        ar_voice_name = EDGE_TTS_ARABIC_MALE
-    else:
-        ar_voice_name = payload.ar_voice  # accept full voice name as-is
+    # Cogni: always male Jordanian neural (ar-JO-TaimNeural); ignore female / alternate requests
+    _ar_voice_req = (payload.ar_voice or "").strip().lower()
+    if _ar_voice_req == "female":
+        logger.warning("tts-with-timing: ar_voice=female ignored — Cogni locked to male Jordanian TTS")
+    ar_voice_name = _locked_jordanian_male_voice(payload.ar_voice or settings.TTS_ARABIC_VOICE)
 
-    # Determine requested provider (payload > env var, default azure if key exists)
+    # Determine requested provider (payload > env TTS_PROVIDER, default auto → edge-first in code below)
     _provider = (payload.provider or os.getenv("TTS_PROVIDER", "auto")).lower().strip()
     _azure_key    = settings.AZURE_SPEECH_KEY
     _azure_region = settings.AZURE_SPEECH_REGION
-    _azure_voice  = (
+    _azure_voice = (
         payload.voice if payload.voice and payload.voice not in ("am_michael",)
         else os.getenv("TTS_VOICE", settings.TTS_ARABIC_VOICE)
     )
+    _azure_voice = _locked_jordanian_male_voice(_azure_voice)
     _azure_ok = bool(_azure_key and _azure_region)
 
     def _obs_log(provider: str, fmt: str, mode: str,
@@ -744,8 +706,21 @@ async def tts_with_timing(
             ms, wav_b / 1024, words_n, vis_n,
         )
 
-    # ── 1) Azure Speech SDK (native WAV 24k + native viseme/word timings) ────
-    if _azure_ok and _provider in ("azure", "auto") and _azure_cb_ok():
+    # ── 1) edge-tts primary for auto/edge (same neural voice names; no Azure subscription)
+    if _provider in ("auto", "edge"):
+        _edge_first = await _try_synthesize_edge_tts_response(
+            text,
+            tts_rate,
+            tts_pitch,
+            ar_voice_name,
+            t_start,
+            background_tasks,
+        )
+        if _edge_first is not None:
+            return _edge_first
+
+    # ── 2) Azure Speech SDK (native WAV 24k + native viseme/word timings) ────
+    if _azure_ok and _provider in ("azure", "auto", "edge") and _azure_cb_ok():
         try:
             wav_bytes, word_timings, viseme_events, timing_approx = \
                 await _synthesize_azure_chunked(
@@ -782,11 +757,67 @@ async def tts_with_timing(
             return _resp
         except Exception as e:
             _azure_cb_record_failure()
-            logger.warning("Azure TTS failed (%s), falling back to next engine", e)
+            err_s = str(e).lower()
+            _auth = is_azure_tts_auth_failure(e)
+            _hard = bool(getattr(settings, "TTS_DISABLE_NON_AZURE_FALLBACK", False))
+
+            if _auth:
+                logger.warning(
+                    "Azure TTS authentication/authorization error — falling back to edge-tts/gTTS (%s)",
+                    e,
+                )
+            elif "429" in err_s or "too many requests" in err_s or "rate limit" in err_s:
+                _fb429 = bool(getattr(settings, "TTS_AZURE_429_FALLBACK_EDGE", False))
+                if _fb429 and not _hard:
+                    logger.warning(
+                        "Azure TTS rate limited — TTS_AZURE_429_FALLBACK_EDGE=1, falling back to edge-tts"
+                    )
+                elif _hard:
+                    logger.warning(
+                        "Azure TTS rate limited — HTTP 503 (TTS_DISABLE_NON_AZURE_FALLBACK=true)"
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Azure Speech rate limited. Retry after a few seconds; avatar WebSocket uses the same Azure voice only.",
+                    ) from e
+                else:
+                    logger.warning(
+                        "Azure TTS rate limited — falling back to edge-tts (TTS_AZURE_429_FALLBACK_EDGE unset)"
+                    )
+            elif _hard:
+                logger.warning(
+                    "Azure TTS failed and TTS_DISABLE_NON_AZURE_FALLBACK is set — no edge/gTTS fallback (%s)",
+                    e,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Azure TTS failed; secondary engines disabled: {e!s}",
+                ) from e
+            else:
+                logger.warning("Azure TTS failed (%s), falling back to next engine", e)
     elif _azure_ok and not _azure_cb_ok():
+        _hard_cb = bool(getattr(settings, "TTS_DISABLE_NON_AZURE_FALLBACK", False))
+        if _hard_cb:
+            raise HTTPException(
+                status_code=503,
+                detail="Azure TTS circuit open; edge/gTTS fallback disabled.",
+            )
         logger.info("Azure TTS circuit OPEN — skipping, using fallback")
 
-    # ── 2) Kokoro (non-Arabic local model) ────────────────────────────────────
+    # ── 2b) Request was Azure-only: try edge if fallbacks are allowed (circuit open, soft errors, etc.)
+    if _provider == "azure" and not bool(getattr(settings, "TTS_DISABLE_NON_AZURE_FALLBACK", False)):
+        _edge_fb = await _try_synthesize_edge_tts_response(
+            text,
+            tts_rate,
+            tts_pitch,
+            ar_voice_name,
+            t_start,
+            background_tasks,
+        )
+        if _edge_fb is not None:
+            return _edge_fb
+
+    # ── 3) Kokoro (non-Arabic local model) ────────────────────────────────────
     if is_available() and _provider not in ("edge", "gtts"):
         result = await synthesize_with_timing(
             text=text,
@@ -816,68 +847,29 @@ async def tts_with_timing(
                     int((time.monotonic() - t_start) * 1000),
                 )
             return _resp
-        logger.info("Kokoro returned None (Arabic text) — using edge-tts")
+        logger.info("Kokoro returned None (Arabic text) — trying edge-tts again if allowed")
 
-    # ── 3) edge-tts streaming (real word-boundary timing + viseme events) ─────
-    try:
-        mp3_bytes, word_timings, viseme_events = await asyncio.wait_for(
-            _synthesize_edge_tts(text, rate=tts_rate, pitch=tts_pitch, voice=ar_voice_name),
-            timeout=25.0,  # edge-tts makes network calls; cap at 25 s
+    # ── 4) Last-chance edge for auto/edge (first edge failed, Azure/Kokoro did not return audio)
+    if _provider in ("auto", "edge") and not bool(getattr(settings, "TTS_DISABLE_NON_AZURE_FALLBACK", False)):
+        _edge_last = await _try_synthesize_edge_tts_response(
+            text,
+            tts_rate,
+            tts_pitch,
+            ar_voice_name,
+            t_start,
+            background_tasks,
         )
-        # Try to upgrade MP3 → WAV with ffmpeg so the schema is consistent
-        wav_from_ffmpeg = await asyncio.get_event_loop().run_in_executor(
-            None, _mp3_to_wav_ffmpeg, mp3_bytes
-        )
-        if wav_from_ffmpeg:
-            b64 = base64.b64encode(wav_from_ffmpeg).decode("ascii")
-            _obs_log("edge-tts", "wav", "real", len(wav_from_ffmpeg),
-                     len(word_timings), len(viseme_events))
-            _resp = TTSResponse(
-                audio_base64=b64,
-                audio_wav_base64=b64,
-                audio_mp3_base64=None,
-                word_timings=word_timings,
-                viseme_events=viseme_events,
-                sample_rate=24000,
-                format="wav",
-                timing_mode="real",
-                provider="edge-tts",
-            )
-            if _store is not None:
-                background_tasks.add_task(
-                    _store.append_from_response,
-                    text, _resp.provider, _resp.timing_mode, _resp.sample_rate,
-                    _resp.audio_wav_base64, _resp.word_timings, _resp.viseme_events,
-                    int((time.monotonic() - t_start) * 1000),
-                )
-            return _resp
-        # ffmpeg not available — return MP3
-        b64 = base64.b64encode(mp3_bytes).decode("ascii")
-        _obs_log("edge-tts", "mp3", "real", len(mp3_bytes),
-                 len(word_timings), len(viseme_events))
-        _resp = TTSResponse(
-            audio_base64=b64,
-            audio_wav_base64=None,
-            audio_mp3_base64=b64,
-            word_timings=word_timings,
-            viseme_events=viseme_events,
-            sample_rate=24000,
-            format="mp3",
-            timing_mode="real",
-            provider="edge-tts",
-        )
-        if _store is not None:
-            background_tasks.add_task(
-                _store.append_from_response,
-                text, _resp.provider, _resp.timing_mode, _resp.sample_rate,
-                _resp.audio_wav_base64, _resp.word_timings, _resp.viseme_events,
-                int((time.monotonic() - t_start) * 1000),
-            )
-        return _resp
-    except Exception as e:
-        logger.warning("edge-tts failed (%s), falling back to gTTS", e)
+        if _edge_last is not None:
+            return _edge_last
 
-    # ── 4) gTTS last resort (approx timings, no visemes) ─────────────────────
+    # Arabic must not use gTTS: wrong prosody/accent vs ar-JO neural chain; Cogni policy = Jordanian only.
+    if re.search(r"[\u0600-\u06FF]", text):
+        raise HTTPException(
+            status_code=503,
+            detail="Arabic TTS failed: edge-tts and Azure unavailable. Check network or set AZURE_SPEECH_*; ensure TTS_DISABLE_NON_AZURE_FALLBACK=false.",
+        )
+
+    # ── 5) gTTS last resort (approx timings, no visemes) — Latin/non-Arabic only ─
     try:
         loop = asyncio.get_event_loop()
         mp3_bytes = await asyncio.wait_for(

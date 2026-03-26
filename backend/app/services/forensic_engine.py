@@ -598,7 +598,58 @@ async def _call_ai_with_retry(prompt: str, max_retries: int = GRADER_MAX_RETRIES
     raise last_err or RuntimeError("Unknown error in _call_ai_with_retry")
 
 
-async def pre_analyze_student_work(assignment: str, student: str) -> dict:
+async def _grader_rag_context_block(
+    assignment: str,
+    student: str,
+    *,
+    criterion_code: str = "",
+    criterion_desc: str = "",
+) -> str:
+    """Retrieve local BTEC corpus chunks and format for grader system context."""
+    try:
+        from app.services.local_rag import retrieve_local_context, format_rag_context
+    except ImportError:
+        return ""
+
+    a = clean_and_compress_text(assignment)[:6000]
+    s = clean_and_compress_text(student)[:6000]
+    tail = f"{criterion_code}\n{(criterion_desc or '')[:2000]}".strip()
+    query = "\n".join(x for x in (a, s, tail) if x).strip()[:14000]
+    if not query:
+        return ""
+
+    try:
+        chunks = await retrieve_local_context(
+            query=query,
+            top_k=5,
+            min_score=0.35,
+            persona_level="distinction",
+            unit_id="",
+        )
+    except Exception as e:
+        logger.warning("[ForensicRAG] retrieve failed: %s", e)
+        return ""
+
+    if not chunks:
+        return ""
+
+    formatted = format_rag_context(chunks, persona_level="distinction", crystallize=True)
+    if not formatted.strip():
+        return ""
+
+    return (
+        "\n\n## BTEC Ground Truth (textbooks, rubrics, exemplars)\n"
+        "ABSOLUTE INSTRUCTION: Evaluate this submission strictly against the provided BTEC textbook context "
+        "and past exemplars. When corpus evidence aligns with the assignment requirements, treat it as authoritative.\n"
+        f"{formatted}\n"
+    )
+
+
+async def pre_analyze_student_work(
+    assignment: str,
+    student: str,
+    corpus_block: str = "",
+) -> dict:
     """
     PASS 1 — Read the ENTIRE student document ONCE.
     Build a content map: companies covered, topics, sections.
@@ -612,7 +663,8 @@ async def pre_analyze_student_work(assignment: str, student: str) -> dict:
     sampled_student = sample_document(student, max_chars=40000)
     logger.info(f"Pre-analysis: doc={len(student):,} chars → sampled={len(sampled_student):,} chars")
 
-    prompt = f"""أنت محلل نصوص أكاديمي. مهمتك **قراءة وثيقة الطالب** وإنشاء "خريطة محتوى" موضوعية دقيقة.
+    prompt = f"""أنت محلل نصوص أكاديمي.{corpus_block}
+مهمتك **قراءة وثيقة الطالب** وإنشاء "خريطة محتوى" موضوعية دقيقة.
 
 لا تُصدر أي حكم جودة الآن. فقط استخرج الحقائق:
 
@@ -682,6 +734,7 @@ async def evaluate_one(
     student: str,
     adv_constraints: Dict[str, Any],
     content_map: Optional[dict] = None,   # NEW: shared memory from pre-analysis
+    corpus_block: str = "",
 ) -> Tuple[str, Dict]:
     """Evaluate a single criterion using configured AI provider (OpenAI or Anthropic)."""
 
@@ -709,10 +762,25 @@ async def evaluate_one(
         }
 
     cache_k = _cache_key(assignment, student, code)
-    cached = _get_cached(cache_k)
+    try:
+        from app.services.local_rag import RAG_ENABLED as _LOCAL_RAG_ON
+    except Exception:
+        _LOCAL_RAG_ON = False
+    # Corpus-augmented prompts must not reuse pre-RAG cache entries
+    cached = _get_cached(cache_k) if not _LOCAL_RAG_ON else None
     if cached:
         logger.info(f"Cache hit for {code}")
         return code, cached
+
+    effective_corpus = (corpus_block or "").strip()
+    if not effective_corpus:
+        try:
+            effective_corpus = await _grader_rag_context_block(
+                assignment, student, criterion_code=code, criterion_desc=desc or ""
+            )
+        except Exception as _rag_e:
+            logger.warning("[ForensicRAG] per-criterion fetch failed for %s: %s", code, _rag_e)
+            effective_corpus = ""
 
     band = band_from_code(code)
 
@@ -858,6 +926,7 @@ async def evaluate_one(
     calibration_block = get_calibration_block(band)
 
     prompt = f"""أنت مقيّم أكاديمي معتمد من Pearson لمؤهلات BTEC International Level 3.
+{effective_corpus}
 مهمتك: تقييم المعيار {code} بعد فهم السيناريو الكامل للواجب أولاً — لا تشدد ولا تساهل.
 
 {quant_warning}
@@ -1127,7 +1196,15 @@ async def forensic_grade_stream(assignment_text: str, student_text: str) -> Asyn
             "phase": "pre_analysis"
         }, ensure_ascii=False) + "\n"
 
-        content_map = await pre_analyze_student_work(assignment_text, student_text)
+        corpus_block = ""
+        try:
+            corpus_block = await _grader_rag_context_block(assignment_text, student_text)
+        except Exception as _rag_job_e:
+            logger.warning("[ForensicRAG] shared corpus block failed: %s", _rag_job_e)
+
+        content_map = await pre_analyze_student_work(
+            assignment_text, student_text, corpus_block=corpus_block
+        )
 
         companies_found = len(content_map.get("companies", []))
         yield json.dumps({
@@ -1153,6 +1230,7 @@ async def forensic_grade_stream(assignment_text: str, student_text: str) -> Asyn
                 student_text,
                 adv_constraints,
                 content_map=content_map,
+                corpus_block=corpus_block,
             )
             results[code] = result
 

@@ -5,25 +5,10 @@ import type { ReactNode } from 'react';
 import { Upload, FileText, Search, ShieldAlert, ChevronDown, Layers, BookOpen, GraduationCap, Trash2 } from 'lucide-react';
 import mammoth from 'mammoth';
 import JSZip from 'jszip';
+import { ACADEMIC_DATA } from '@/lib/academicSubjects';
+import { normalizeIntegratedResult, type EvaluationResult } from '@/lib/assessmentNormalize';
 
 // --- Interfaces ---
-interface Criterion {
-  code: string;
-  verdict: 'Achieved' | 'Not Achieved';
-  reasons: string[];
-  evidence: { quote: string; start: number; end: number }[];
-  recommendations: string[];
-}
-
-interface EvaluationResult {
-  success: boolean;
-  data: {
-    summary: { totalCriteria: number; achievedCount: number; achievedPercent: number };
-    criteria: Criterion[];
-    final_grade?: string;
-  };
-  report: string;
-}
 
 interface PlagiarismResult {
   similarity: number;
@@ -36,31 +21,6 @@ interface StudentSolutionFile {
   file_content: string;
   description?: string;
 }
-
-// --- 1. البيانات الأكاديمية ---
-interface AcademicData {
-  [className: string]: {
-    [sectionName: string]: string[];
-  };
-}
-
-const ACADEMIC_DATA: AcademicData = {
-  'الصف العاشر': {
-    'الفصل الأول': ['1. الغرض من إنشاء شركة', '2. مؤسسات الأعمال', '3. التنبؤ', '4. خطة التسويق'],
-    'الفصل الثاني': ['وحدة 15: إنشاء شركة صغيرة', 'وحدة 16: ضمن فريق', 'وحدة 17: إدارة الشؤون المالية', 'وحدة 19: الترويج البصري'],
-    'الفصل الثالث': ['وحدة 11: الشركات عبر الإنترنت', 'وحدة 13: أخلاقيات الأعمال', 'وحدة 28: إدارة الشركة', 'وحدة 5: الموظفون'],
-  },
-  'أول ثانوي': {
-    'الفصل الأول': ['حملة إطلاق منتج جديد'],
-    'الفصل الثاني': ['استكشاف الأعمال 2', 'التمويل - الجزء 1'],
-    'الفصل الثالث': ['إدارة الفعاليات', 'التمويل - الجزء 2'],
-  },
-  'الثاني ثانوي (توجيهي)': {
-    'الفصل الأول': ['اتخاذ قرارات الأعمال', 'الموارد البشرية - الجزء 1'],
-    'الفصل الثاني': ['مبادئ إدارة الأعمال', 'خدمة العملاء', 'الموارد البشرية - الجزء 2'],
-    'الفصل الثالث': ['أخلاقيات الأعمال'],
-  },
-};
 
 // [COPILOT_POLICY_START] — Assessment Policy & Local Plagiarism Engine (no external API)
 const ASSESSMENT_POLICY = {
@@ -359,58 +319,6 @@ export default function AssessmentPage() {
       };
       localStorage.setItem('nexus-last-grade', JSON.stringify(snapshot));
     } catch { /* ignore storage errors */ }
-  };
-
-  const normalizeIntegratedResult = (payload: any): EvaluationResult => {
-    const rawCriteria = payload?.criteria;
-
-    // Handle both array (already-normalized from route) and object/dict (from backend direct)
-    const criteriaArray: Criterion[] = Array.isArray(rawCriteria)
-      ? rawCriteria.map((item: any) => ({
-          code: item?.code || '?',
-          verdict: (item?.verdict === 'Achieved' || item?.achieved) ? 'Achieved' : 'Not Achieved',
-          reasons: Array.isArray(item?.reasons) ? item.reasons : (item?.feedback ? [item.feedback] : []),
-          evidence: Array.isArray(item?.evidence) ? item.evidence : (item?.evidence_quote ? [{ quote: item.evidence_quote, start: item.start_index ?? 0, end: item.end_index ?? 0 }] : []),
-          recommendations: Array.isArray(item?.recommendations) ? item.recommendations : [],
-        }))
-      : Object.entries(rawCriteria || {}).map(
-          ([code, data]: [string, any]) => ({
-            code,
-            verdict: data?.achieved ? 'Achieved' : 'Not Achieved',
-            reasons: Array.isArray(data?.reasons)
-              ? data.reasons
-              : (data?.feedback ? [data.feedback] : []),
-            evidence: Array.isArray(data?.evidence)
-              ? data.evidence
-              : (data?.evidence_quote
-                ? [{
-                  quote: data.evidence_quote,
-                  start: data.start_index ?? 0,
-                  end: data.end_index ?? 0,
-                }]
-                : []),
-            recommendations: Array.isArray(data?.recommendations) ? data.recommendations : [],
-          })
-        );
-
-    const achievedCount = criteriaArray.filter((c) => c.verdict === 'Achieved').length;
-    const totalCriteria = criteriaArray.length;
-
-    return {
-      success: true,
-      data: {
-        summary: {
-          totalCriteria,
-          achievedCount,
-          achievedPercent: totalCriteria > 0 ? Math.round((achievedCount / totalCriteria) * 100) : 0,
-        },
-        criteria: criteriaArray,
-        final_grade: payload?.final_grade || 'PENDING',
-      },
-      report: typeof payload?.consolidated_summary === 'string' && payload.consolidated_summary
-        ? payload.consolidated_summary
-        : typeof payload?.summary === 'string' ? payload.summary : ''
-    };
   };
 
   // --- API Calls ---

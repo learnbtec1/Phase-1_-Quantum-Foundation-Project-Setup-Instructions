@@ -19,3 +19,20 @@ __pycache__
 venv
 venv311/
 backend/venv311/
+
+# Local runtime data (keep on disk, do not commit)
+backend/data/postgres/
+backend/data/audio/
+backend/data/analytics/
+backend/data/store/
+backend/data/btec-bus/*.pdf
+backend/data/btec-bus/*.docx
+backend/data/chroma_cogni/
+tts.wav
+
+# Local / vendor bundles (do not ship in repo)
+HabibiJordan/
+frontend/public/assets/*.exe
+*.winmd
+# Too large for GitHub (>100MB); host separately or use Git LFS
+frontend/public/assets/blue_carpet.glb

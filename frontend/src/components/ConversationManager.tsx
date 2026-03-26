@@ -103,13 +103,10 @@ export default function ConversationManager({
     const onUserStart = () => {
       setIsUserSpeaking(true);
       
-      // Force silence avatar immediately
+      // Temporarily disable stopTTS to prevent interruptions
       if (isAvatarSpeaking) {
-        console.log('[ConversationManager] 🛑 User is speaking — interrupting avatar');
-        stopTTS();
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('cogni:avatar:interrupt'));
-        }
+        console.log('[ConversationManager] User is speaking, but avatar will not be interrupted.');
+        // stopTTS(); // Disabled
       }
 
       onUserSpeaking?.();

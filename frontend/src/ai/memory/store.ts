@@ -39,10 +39,14 @@ let shortTerm: Turn[] = [];
 
 // ── Motor memory — cooldown per gesture type ──────────────────────────────────
 const GESTURE_COOLDOWNS_MS: Record<string, number> = {
-  point:     8_000,
-  wave:     12_000,
-  openHand:  6_000,
-  beat:      5_000,
+  /** V20 — teaching gestures: faster re-fire */
+  point:     1_200,
+  openHand:  1_200,
+  wave:      6_000,
+  beat:      2_500,
+  think:     3_250,
+  peace:     3_500,
+  agree:     2_750,
 };
 const _lastGestureTime = new Map<string, number>();
 
@@ -67,15 +71,20 @@ export function getLastGestureLog(): string[] {
   return [..._gestureLog];
 }
 
+export interface GestureCooldownOpts {
+  /** Backend `action` / gesture field explicitly requests this token — allow closer repeats. */
+  explicitActionToken?: string;
+}
+
 /**
  * Returns true if the gesture may be played (passes all memory gates).
  * Gates applied in order:
  *   1. Wave: once-per-session
- *   2. Consecutive: never repeat same type twice in a row
+ *   2. Consecutive: same type back-to-back blocked within a short window (1.2s teaching / 3s general)
  *   3. Cooldown: per-type time window
  * Updates internal state on approval.
  */
-export function checkGestureCooldown(gestureType: string): boolean {
+export function checkGestureCooldown(gestureType: string, opts?: GestureCooldownOpts): boolean {
   // Gate 1 — wave is a once-per-session gesture
   if (gestureType === 'wave') {
     if (_waveUsedThisSession) return false;
@@ -84,15 +93,30 @@ export function checkGestureCooldown(gestureType: string): boolean {
     console.log('[HUMANIZE][GESTURE] wave allowed (first use this session)');
     return true;
   }
-  // Gate 2 — consecutive repetition prevention
-  if (_gestureLog.length > 0 && _gestureLog[_gestureLog.length - 1] === gestureType) {
-    console.log(`[HUMANIZE][GESTURE] ${gestureType} blocked (consecutive repeat)`);
-    return false;
+  const nowMs = Date.now();
+  const explicit = opts?.explicitActionToken?.trim().toLowerCase() ?? '';
+  const explicitDemands =
+    !!explicit
+    && (explicit === gestureType
+      || explicit.includes(gestureType)
+      || gestureType.includes(explicit));
+  const consecutiveMinMs =
+    gestureType === 'openHand' || gestureType === 'point' ? 1_200 : 3_000;
+  if (
+    !explicitDemands
+    && _gestureLog.length > 0
+    && _gestureLog[_gestureLog.length - 1] === gestureType
+  ) {
+    const lastSame = _lastGestureTime.get(gestureType) ?? 0;
+    if (nowMs - lastSame < consecutiveMinMs) {
+      console.log(`[HUMANIZE][GESTURE] ${gestureType} blocked (consecutive repeat <${consecutiveMinMs}ms)`);
+      return false;
+    }
   }
   // Gate 3 — time-based cooldown
-  const cooldown = GESTURE_COOLDOWNS_MS[gestureType] ?? 5_000;
+  const cooldown = GESTURE_COOLDOWNS_MS[gestureType] ?? 2_000;
   const last     = _lastGestureTime.get(gestureType) ?? 0;
-  const now      = Date.now();
+  const now      = nowMs;
   if (now - last < cooldown) {
     const rem = Math.round((cooldown - (now - last)) / 1000);
     console.log(`%c[GESTURE] ${gestureType} blocked (cooldown: ${rem}s remaining)`, 'color:#64748b');

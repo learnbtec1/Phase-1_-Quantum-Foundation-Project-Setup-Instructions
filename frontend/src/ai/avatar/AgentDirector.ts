@@ -1,37 +1,6 @@
 /**
- * AgentDirector.ts — Phase 4 Real-Time Avatar Orchestration Engine
- *
- * Subscribes to useBrainStore and translates every relevant state change into
- * a live, timed avatar performance:
- *
- *   PAD change   → BehaviorRulesEngine → gesture + voice update
- *   emotionLabel → micro-expression + full behavior contract (nod, blink, pose)
- *   lastFrame    → gesture from AgentFrame.gesture field + voice params
- *   currentAction (explicit) → honored as-is with thinking delay
- *
- * Conflict resolution (priority, lowest number = highest priority):
- *   0 — interrupt / user-override
- *   1 — explicit currentAction from processFrame
- *   2 — emotion-driven behavior contract
- *   3 — PAD-change fallback behavior
- *
- * Human-like randomisation:
- *   • All gestures include ±variance noise
- *   • Micro-expressions fire 80–180 ms after the trigger
- *   • Full behavior fires after emotion-appropriate thinking delay
- *   • Gesture fire-time includes 200 ms pre-roll (fires before speech keyword)
- *
- * Usage:
- *   import { agentDirector } from '@/ai/avatar/AgentDirector';
- *
- *   // In your app root (once):
- *   agentDirector.start();
- *
- *   // When done (e.g. on component unmount):
- *   agentDirector.stop();
- *
- *   // Explicit TTS scheduling (when no PCM audio comes from the backend):
- *   await agentDirector.scheduleTTS('مرحباً', 'happy');
+ * AgentDirector.ts — THE FINAL MASTER VERSION (Phase 4)
+ * تم دمج ميزات "النشامي" التفاعلية مع تصحيح هيكلي شامل للأقواس.
  */
 
 import type {
@@ -40,12 +9,16 @@ import type {
   BehaviorOutput,
   AgentFrame,
 } from '@/types/ai';
-import { useBrainStore }                    from '@/store/useBrainStore';
-import { decideBehaviorFromPAD }            from '@/ai/cognitive/BehaviorRulesEngine';
-import { gestureEngine }                    from '@/ai/cognitive/GestureEngine';
-import { checkGestureCooldown, recordGestureLog } from '@/ai/memory/store';
-import { dispatchAvatar }                   from '@/utils/events/normalizeAvatarEvents';
-import { speakWithTTS, stopTTS }            from '@/ai/io/tts';
+import { useBrainStore }                     from '@/store/useBrainStore';
+import { decideBehaviorFromPAD }             from '@/ai/cognitive/BehaviorRulesEngine';
+import type { EmotionalContextBrief }        from '@/ai/cognitive/BehaviorRulesEngine';
+import { gestureEngine }                     from '@/ai/cognitive/GestureEngine';
+import { checkGestureCooldown, recordGestureLog, getLastGestureLog } from '@/ai/memory/store';
+import { dispatchAvatar }                    from '@/utils/events/normalizeAvatarEvents';
+import { speakWithTTS, stopTTSGlobally, resolveSpeakRate } from '@/ai/io/tts';
+import { COGNI_PERSONA, AVATAR_PERSONALITY } from '@/config/personality';
+import { ENABLE_MIME_MODE } from '@/config/avatar';
+import { emotionalMemoryManager }            from '@/ai/avatar/EmotionalMemoryManager';
 import {
   microReactionDelay,
   humanDelay,
@@ -55,494 +28,498 @@ import {
   gesturePrerollMs,
 } from '@/utils/TimingUtils';
 
-// ─── Internal types ───────────────────────────────────────────────────────────
+declare global {
+  interface Window { __AUDIO_UNLOCKED__?: boolean; }
+}
 
-/**
- * Duck-typed shape ACTUALLY returned by BehaviorRulesEngine.decideBehaviorFromPAD.
- * The function annotates its return as BehaviorOutput but writes extra fields
- * (expression, voiceParameters) that the types/ai.ts interface does not declare.
- * We cast internally to avoid TS errors while still accessing those fields.
- */
 interface _RulesEngineBehavior {
-  gesture:         string;
-  expression:      string;
-  voiceParameters: { pitch: number; rate: number };
+  gesture:       string;
+  expression:    string;
+  voiceParameters: {
+    pitch: number;
+    rate: number;
+    /** Optional: curiosity-based offset (BehaviorRulesEngine + personality) */
+    personalityPitchNudge?: number;
+    padPitch?: number;
+  };
   thinkingDelayMs: number;
 }
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-/** Minimum ms between two PAD-change reactions (debounce). */
 const PAD_DEBOUNCE_MS = 300;
-
-/** Minimum ms between two emotion-label reactions (debounce). */
 const EMOTION_DEBOUNCE_MS = 250;
-
-/** Maximum simultaneous in-flight timer handles. */
 const MAX_TIMERS = 64;
 
-// ─── DOM event dispatcher ─────────────────────────────────────────────────────
+/** Safe fallbacks if persona fields are ever stripped in a bad build */
+const COGNI_TIMING = {
+  deliberationScale:        COGNI_PERSONA.timing?.deliberationScale ?? 1,
+  gestureVarianceScale:     COGNI_PERSONA.timing?.gestureVarianceScale ?? 1,
+  baselineGestureIntensity: COGNI_PERSONA.timing?.baselineGestureIntensity ?? 1,
+};
+const COGNI_VOICE = {
+  rate:       COGNI_PERSONA.voiceParameters?.rate ?? 1,
+  pitchScale: COGNI_PERSONA.voiceParameters?.pitchScale ?? 1,
+};
+
+function devLog(...args: unknown[]): void {
+  if (typeof process !== 'undefined' && process.env.NODE_ENV === 'development') {
+    console.log('[AgentDirector][Cogni]', ...args);
+  }
+}
 
 function emit(name: string, detail: Record<string, unknown>): void {
   if (typeof window === 'undefined') return;
-  if (
-    name === 'avatar:gesture' ||
-    name === 'avatar:emotion' ||
-    name === 'avatar:listening'
-  ) {
-    // Route through the canonical normaliser (handles field-name aliasing)
-    dispatchAvatar(name as 'avatar:gesture', detail as Record<string, unknown>);
+  if (['avatar:gesture', 'avatar:emotion', 'avatar:listening', 'avatar:nod', 'avatar:headpose', 'avatar:speak:start', 'avatar:speak:end'].includes(name)) {
+    dispatchAvatar(name as any, detail);
   } else {
     window.dispatchEvent(new CustomEvent(name, { detail }));
   }
 }
 
-// ─── Gesture → emotion mapping ────────────────────────────────────────────────
-// Preferred gesture per emotion, used when the emotion drives the behavior
-// contract but no explicit gesture was supplied.
+/** Cogni: slightly longer “thinking” before reacting — patient educator */
+function cogniDelayMs(base: number): number {
+  return Math.round(base * COGNI_TIMING.deliberationScale);
+}
 
 const EMOTION_GESTURE_MAP: Partial<Record<EmotionLabel, string>> = {
-  excited:     'wave',
-  happy:       'openHand',
-  encouraging: 'openHand',
-  proud:       'openHand',
-  surprised:   'openHand',
-  angry:       'point',
-  thinking:    'openHand',
-  curious:     'beat',
-  attentive:   'beat',
-  concerned:   'openHand',
-  calm:        'openHand',
-  relaxed:     'openHand',
-  empathetic:  'openHand',
-  sad:         'beat',
-  anxious:     'beat',
-  bored:       'beat',
-  sleepy:      'beat',
-  neutral:     'beat',
+  excited: 'clap', happy: 'openHand', encouraging: 'openHand', proud: 'cheer',
+  surprised: 'openHand', angry: 'point', thinking: 'openHand', curious: 'beat',
+  attentive: 'beat', concerned: 'openHand', calm: 'openHand', relaxed: 'openHand',
+  empathetic: 'openHand', sad: 'beat', anxious: 'beat', bored: 'beat', sleepy: 'beat', neutral: 'beat',
 };
 
-// ─── AgentDirector ────────────────────────────────────────────────────────────
-
 export class AgentDirector {
-  private _unsubs:             Array<() => void>             = [];
+  /** V31 — dedupe rapid identical scheduleTTS (quota / WS duplicate frames) */
+  private _lastScheduledTtsText = '';
+  private _lastScheduledTtsAt = 0;
+  private _unsubs:             Array<() => void>               = [];
   private _timers:             ReturnType<typeof setTimeout>[] = [];
   private _running             = false;
-
-  // Debounce timestamps
   private _lastEmotionReact    = 0;
   private _lastPADReact        = 0;
-
-  // Track last-dispatched emotion to suppress no-op updates
   private _lastEmotion:        EmotionLabel | '' = '';
 
   // ── Lifecycle ───────────────────────────────────────────────────────────────
 
-  /**
-   * Subscribe to BrainStore and begin orchestrating.
-   * Idempotent — safe to call multiple times.
-   */
   start(): void {
-    if (this._running) {
-      console.warn('[AgentDirector] Already running — ignoring duplicate start()');
-      return;
-    }
+    if (this._running) return;
     this._running = true;
     console.log('%c[AgentDirector] STARTED — Phase 4 orchestration active', 'color:#7c3aed;font-weight:bold');
+    devLog(
+      'persona active',
+      COGNI_PERSONA.id,
+      'deliberation×',
+      COGNI_TIMING.deliberationScale,
+      'variance×',
+      COGNI_TIMING.gestureVarianceScale,
+      'intensity×',
+      COGNI_TIMING.baselineGestureIntensity,
+    );
+    // After Canvas listeners attach, force standing (avoids missing the event if start() runs first).
+    this._later(80, () => {
+      if (!this._running) return;
+      emit('avatar:sit', { sitting: false });
+    });
 
-    // ── Subscription 1: emotion label changes ─────────────────────────────
-    const unsubEmotion = useBrainStore.subscribe(
-      s => s.emotionLabel,
-      (next, prev) => {
-        if (next !== prev) {
-          const now = Date.now();
-          if (now - this._lastEmotionReact < EMOTION_DEBOUNCE_MS) {
-            console.log(`[AgentDirector] Emotion reaction debounced (${now - this._lastEmotionReact}ms < ${EMOTION_DEBOUNCE_MS}ms)`);
-            return;
-          }
-          this._lastEmotionReact = now;
-          console.log(`%c[BRAIN][AgentDirector] emotionLabel: ${prev} → ${next}`, 'color:#06b6d4;font-weight:bold');
+    const subs = [
+      // 1. مراقبة العواطف
+      useBrainStore.subscribe(s => s.emotionLabel, (next, prev) => {
+        if (next !== prev && Date.now() - this._lastEmotionReact > EMOTION_DEBOUNCE_MS) {
+          this._lastEmotionReact = Date.now();
           this._reactToEmotion(next);
         }
-      },
-    );
-
-    // ── Subscription 2: PAD vector changes ───────────────────────────────
-    const unsubPAD = useBrainStore.subscribe(
-      s => s.pad,
-      (next, prev) => {
-        const delta =
-          Math.abs(next.pleasure  - prev.pleasure)  +
-          Math.abs(next.arousal   - prev.arousal)   +
-          Math.abs(next.dominance - prev.dominance);
-        if (delta < 0.10) return; // noise threshold
-        const now = Date.now();
-        if (now - this._lastPADReact < PAD_DEBOUNCE_MS) return;
-        this._lastPADReact = now;
-        console.log(`[AgentDirector] PAD delta=${delta.toFixed(3)} pad=${JSON.stringify(next)}`);
-        this._reactToPAD(next);
-      },
-    );
-
-    // ── Subscription 3: explicit currentAction (from processFrame) ────────
-    const unsubAction = useBrainStore.subscribe(
-      s => s.currentAction,
-      (action) => {
-        if (action) {
-          console.log('[AgentDirector] currentAction received:', action);
-          this._executeAction(action);
+      }),
+      // 2. مراقبة متجهات PAD
+      useBrainStore.subscribe(s => s.pad, (next, prev) => {
+        const delta = Math.abs(next.pleasure - prev.pleasure) + Math.abs(next.arousal - prev.arousal);
+        if (delta > 0.1 && Date.now() - this._lastPADReact > PAD_DEBOUNCE_MS) {
+          this._lastPADReact = Date.now();
+          this._reactToPAD(next);
         }
-      },
-    );
+      }),
+      // 3. الأوامر الصريحة والإطارات
+      useBrainStore.subscribe(s => s.currentAction, a => { if (a) this._executeAction(a); }),
+      useBrainStore.subscribe(s => s.lastFrame, f => { if (f) this._reactToFrame(f); }),
+      
+      // 4. ميزة السمع النشط (Active Listening)
+      useBrainStore.subscribe(s => (s as any).isUserSpeaking, isSpeaking => { 
+        if (isSpeaking) this._handleUserSpeaking(); 
+      }),
+      
+      // 5. كسر جمود وضعية Neutral
+      useBrainStore.subscribe(s => s.emotionLabel, emotion => { 
+        if (emotion === 'neutral') this._handleNeutralEmotion(); 
+      })
+    ];
+    this._unsubs.push(...subs);
 
-    // ── Subscription 4: new LLM frame (gesture + voice from AgentFrame) ──
-    const unsubFrame = useBrainStore.subscribe(
-      s => s.lastFrame,
-      (frame) => {
-        if (frame) {
-          console.log('[AgentDirector] lastFrame received:', frame.emotion, frame.gesture);
-          this._reactToFrame(frame);
+    // V28 — emotional contagion hints from backend (student affect → calmer / warmer avatar)
+    if (typeof window !== 'undefined') {
+      const onContagion = (e: Event) => {
+        const d = (e as CustomEvent).detail as { emotion?: string; intensity?: number };
+        if (!d?.emotion) return;
+        emit('avatar:emotion', { emotion: d.emotion });
+        if (d.emotion === 'calm') {
+          emit('avatar:gesture', { type: 'openHand', duration: 2 });
         }
-      },
-    );
-
-    this._unsubs.push(unsubEmotion, unsubPAD, unsubAction, unsubFrame);
+      };
+      window.addEventListener('cogni:student_contagion', onContagion);
+      this._unsubs.push(() => window.removeEventListener('cogni:student_contagion', onContagion));
+    }
   }
 
-  /** Unsubscribe all listeners, cancel all pending timers. Idempotent. */
   stop(): void {
     if (!this._running) return;
     this._running = false;
     this._unsubs.forEach(fn => fn());
-    this._unsubs = [];
     this._timers.forEach(t => clearTimeout(t));
+    this._unsubs = []; 
     this._timers = [];
-    console.log('[AgentDirector] STOPPED — all subscriptions and timers cleared');
+    console.log('[AgentDirector] STOPPED — All systems cleared');
   }
 
-  // ── Internal reaction handlers ──────────────────────────────────────────────
+  // ── Reaction Handlers ───────────────────────────────────────────────────────
 
-  /** React to an emotion-label transition with a two-phase response. */
   private _reactToEmotion(emotion: EmotionLabel): void {
     this._lastEmotion = emotion;
-
-    // Phase 1 — micro-expression (near-instant, mimics involuntary facial flash)
-    const micro = microReactionDelay();
-    this._later(micro, () => {
-      emit('avatar:emotion', { emotion });
-      console.log(`%c[AgentDirector][MICRO] expression=${emotion} +${micro}ms`, 'color:#22d3ee');
-    });
-
-    // Phase 2 — full behavior contract after human-like thinking delay
-    const think = humanDelay(emotion);
-    this._later(think, () => this._applyEmotionContract(emotion));
+    const lf = useBrainStore.getState().lastFrame;
+    const emoStr =
+      typeof lf?.emotion === 'string' && lf.emotion.trim().length > 0
+        ? lf.emotion.trim()
+        : emotion;
+    emit('avatar:emotion', { emotion: emoStr });
+    this._later(cogniDelayMs(humanDelay(emotion)), () => this._applyEmotionContract(emotion));
   }
 
-  /**
-   * React to a significant PAD change by running the BehaviorRulesEngine
-   * and dispatching the resulting gesture + voice params.
-   */
   private _reactToPAD(pad: PADVector): void {
-    const raw      = decideBehaviorFromPAD(pad) as unknown as _RulesEngineBehavior;
-    const delay    = jitter(raw.thinkingDelayMs, 0.20);
-    console.log(`[AgentDirector] PAD behavior: gesture=${raw.gesture} expression=${raw.expression} in ${delay}ms`);
+    const traj = emotionalMemoryManager.getTrajectory();
+    const emoCtx: EmotionalContextBrief = {
+      trend: traj.trend,
+      avgPleasure: traj.avgPleasure,
+      variance: traj.variance,
+    };
+    // FIX: Phase 3/4 — PAD + emotional trajectory in one rules pass
+    const raw = decideBehaviorFromPAD(pad, emoCtx) as unknown as _RulesEngineBehavior;
+    const expr = (raw.expression ?? 'neutral').toLowerCase();
+    this._later(cogniDelayMs(microReactionDelay()), () => {
+      emit('avatar:emotion', { emotion: expr });
+    });
+    let gesture = raw.gesture;
+    if (traj.trend === 'volatile' && traj.variance > 0.35 && gesture === 'point') {
+      gesture = 'beat';
+    }
+    if (
+      AVATAR_PERSONALITY.friendliness >= 0.75
+      && pad.pleasure >= -0.15
+      && gesture === 'point'
+    ) {
+      gesture = 'openHand';
+    }
 
-    this._later(delay, () => {
-      // Voice parameters
+    const thinkMs = jitter(raw.thinkingDelayMs, 0.2) * COGNI_TIMING.deliberationScale;
+    const adaptPG = emotionalMemoryManager.getPersonalityAdaptation();
+    if (adaptPG.preferPointingGestures && gesture === 'openHand' && Math.random() < 0.38) {
+      gesture = 'point';
+    }
+    let calmIntensity = Math.min(0.82, 0.65 * COGNI_TIMING.baselineGestureIntensity);
+    if (traj.trend === 'rising_positive') {
+      calmIntensity = Math.min(0.92, calmIntensity * 1.12);
+    }
+    if (traj.trend === 'falling_negative' || traj.trend === 'stable_negative') {
+      calmIntensity *= 0.88;
+    }
+
+    this._later(thinkMs, () => {
       emit('avatar:voice', {
-        rate:  raw.voiceParameters.rate,
-        pitch: raw.voiceParameters.pitch,
+        rate: raw.voiceParameters.rate * COGNI_VOICE.rate,
+        pitch: raw.voiceParameters.pitch * COGNI_VOICE.pitchScale,
       });
-
-      // Gesture (PAD-driven fallback; lower priority than emotion contracts)
-      this._fireGesture(raw.gesture, { intensity: 0.65, durationSec: 1.4, side: 'right' });
+      this._fireGesture(gesture, { intensity: calmIntensity, durationSec: 1.8, side: 'right' });
+      // Occasional playful flourish when long-term memory suggests the user enjoys light tone
+      const pg = emotionalMemoryManager.getPersonalityAdaptation();
+      if (Math.random() < pg.playfulGestureChance * 0.24) {
+        this._later(850 + Math.random() * 550, () => {
+          // Prefer peace/agree — `wave` is once-per-session in gesture memory store
+          const playG = Math.random() < 0.55 ? 'peace' : 'agree';
+          this._fireGesture(playG, {
+            intensity: 0.52 * COGNI_TIMING.baselineGestureIntensity,
+            durationSec: 2.05,
+            side: 'right',
+          });
+        });
+      }
     });
   }
 
-  /**
-   * React to an incoming AgentFrame from the LLM:
-   *   • Apply voice pitch/rate immediately (no delay)
-   *   • Schedule ≥1 gestures via GestureEngine.planGestures() (multi-gesture support)
-   *   • Honor thinking_time_ms as the pre-speech reaction delay
-   */
   private _reactToFrame(frame: AgentFrame): void {
-    const delay = jitter(frame.thinking_time_ms, 0.15);
+    const delay = jitter(frame.thinking_time_ms, 0.15) * COGNI_TIMING.deliberationScale;
+    this._later(0, () => emit('avatar:voice', {
+      rate: frame.voice.rate * COGNI_VOICE.rate,
+      pitch: frame.voice.pitch * COGNI_VOICE.pitchScale,
+    }));
 
-    // Voice update first (zero latency — perceived immediately)
-    this._later(0, () => {
-      emit('avatar:voice', { rate: frame.voice.rate, pitch: frame.voice.pitch });
-    });
-
-    // Multi-gesture scheduling via GestureEngine.planGestures()
-    const speechMs = estimateSpeechDurationMs(frame.text ?? '');
-    const planned  = gestureEngine.planGestures(
-      frame.gesture?.trim() || '',
-      frame.emotion,
-      speechMs,
-    );
-
-    planned.forEach(({ descriptor, fireAtMs }) => {
-      this._later(delay + fireAtMs, () => {
-        console.log(
-          `%c[AgentDirector][FRAME] scheduled gesture type=${descriptor.type} +${delay + fireAtMs}ms`,
-          'color:#a78bfa',
-        );
-        this._fireGesture(descriptor.type as string, {
-          intensity:   descriptor.intensity   ?? 0.75,
-          durationSec: descriptor.duration    ?? 2.0,
-          side:        descriptor.side        ?? 'right',
-        });
-      });
-    });
-  }
-
-  /**
-   * Execute an explicit BehaviorOutput stored in BrainStore.currentAction.
-   * Priority: higher than PAD-change fallback.
-   */
-  private _executeAction(action: BehaviorOutput): void {
-    const delay = jitter(action.thinkingDelayMs, 0.12);
-    this._later(delay, () => {
-      if (action.gesture) {
-        this._fireGesture(
-          action.gesture,
-          {
-            intensity:   action.gestureIntensity  ?? 0.75,
-            durationSec: action.gestureDurationMs ? action.gestureDurationMs / 1000 : 1.5,
-            side:        action.gestureSide        ?? 'right',
-          },
-        );
-      }
-
-      if (action.voiceTone) {
-        // Map voiceTone → approximate pitch offset
-        const pitchMap: Record<string, number> = {
-          warm: -1, excited: 2, firm: -2, soft: -1, neutral: 0,
-        };
-        const pitch = pitchMap[action.voiceTone] ?? 0;
-        emit('avatar:voice', { rate: 1.0, pitch });
-      }
-
-      console.log(`[AgentDirector][ACTION] executed gesture=${action.gesture} delay=${delay}ms`);
-    });
-  }
-
-  // ── Emotion behavior contracts ──────────────────────────────────────────────
-
-  /**
-   * Apply the full behavior contract for a given emotion.
-   * Each emotion has a prescribed set of body language signals fired in sequence.
-   */
-  private _applyEmotionContract(emotion: EmotionLabel): void {
-    console.log(`[AgentDirector] Applying behavior contract: ${emotion}`);
-
-    // Gesture
-    const gestureType = EMOTION_GESTURE_MAP[emotion] ?? 'beat';
-    const intensity   = this._gestureIntensityForEmotion(emotion);
-    this._fireGesture(gestureType, { intensity, durationSec: 1.6, side: 'right' });
-
-    // Blink style
-    if (['calm', 'relaxed', 'sad', 'sleepy', 'thinking', 'concerned', 'empathetic'].includes(emotion)) {
-      emit('avatar:blink', { style: 'slow' });
-    } else if (['excited', 'surprised', 'angry'].includes(emotion)) {
-      emit('avatar:blink', { style: 'rapid', count: 2 });
-    } else {
-      emit('avatar:blink', { style: 'normal' });
-    }
-
-    // Head pose
-    this._applyHeadPose(emotion);
-
-    // Nod (for affirming emotions)
-    if (['attentive', 'encouraging', 'happy', 'proud', 'calm', 'empathetic'].includes(emotion)) {
-      const nodDelay = getRandomDelay(280, 550);
-      this._later(nodDelay, () => {
-        emit('avatar:nod', {
-          intensity: 0.22 + Math.random() * 0.18,
-          duration:  (430 + Math.random() * 200) / 1000,   // seconds — AvatarCanvas multiplies ×1000
-        });
-        console.log(`[AgentDirector] Nod dispatched for ${emotion} at +${nodDelay}ms`);
-      });
-    }
-
-    // Laugh for peak-joy states
-    if (['excited', 'happy'].includes(emotion)) {
-      this._later(getRandomDelay(100, 350), () => {
-        emit('avatar:laugh', { intensity: emotion === 'excited' ? 0.75 : 0.45, duration: 0.9 });   // seconds
-      });
-    }
-
-    console.log(`%c[BRAIN][CONTRACT] ${emotion} → gesture=${gestureType} intensity=${intensity.toFixed(2)}`, 'color:#a78bfa;font-weight:bold');
-  }
-
-  /** Map emotion to a sensible gesture intensity (0–1). */
-  private _gestureIntensityForEmotion(emotion: EmotionLabel): number {
-    const intensityMap: Partial<Record<EmotionLabel, number>> = {
-      excited:     0.95,
-      surprised:   0.88,
-      happy:       0.78,
-      angry:       0.90,
-      encouraging: 0.80,
-      proud:       0.72,
-      curious:     0.55,
-      attentive:   0.45,
-      thinking:    0.50,
-      concerned:   0.52,
-      calm:        0.55,
-      relaxed:     0.48,
-      sad:         0.35,
-      neutral:     0.45,
-      bored:       0.30,
-      sleepy:      0.25,
-      anxious:     0.60,
-    };
-    return intensityMap[emotion] ?? 0.55;
-  }
-
-  /** Apply an emotion-appropriate head pose. */
-  private _applyHeadPose(emotion: EmotionLabel): void {
-    type HeadPoseDetail = { yaw: number; pitch: number; duration: number };
-    const poses: Partial<Record<EmotionLabel, HeadPoseDetail>> = {
-      thinking:  { yaw: -0.09, pitch:  0,     duration: 3200 },
-      sad:       { yaw:  0,    pitch:  0.12,   duration: 4000 },
-      curious:   { yaw: -0.08, pitch:  0,     duration: 2800 },
-      attentive: { yaw:  0,    pitch: -0.04,   duration: 3000 },
-      sleepy:    { yaw:  0,    pitch:  0.08,   duration: 4500 },
-      proud:     { yaw:  0,    pitch: -0.06,   duration: 3000 },
-      concerned: { yaw:  0,    pitch:  0.07,   duration: 3200 },
-      // 'blush' is not a standard EmotionLabel — omitted from the map
-    };
-    const pose = poses[emotion];
-    if (pose) {
-      emit('avatar:headpose', pose);
-      console.log(`[AgentDirector] headpose for ${emotion}:`, pose);
-    }
-  }
-
-  // ── Gesture dispatch ─────────────────────────────────────────────────────────
-
-  /**
-   * Dispatch a gesture event, respecting motor-memory cooldowns and applying
-   * a humanising pre-roll offset.
-   */
-  private _fireGesture(
-    gestureType: string,
-    opts: { intensity: number; durationSec: number; side: string },
-  ): void {
-    if (!checkGestureCooldown(gestureType)) {
-      console.log(`[AgentDirector] Gesture "${gestureType}" blocked by motor-memory cooldown`);
+    // Single source of truth: LLM `performance` → performanceTags / avatar:performance only.
+    if (frame.gesturesFromStructuredPerformance) {
       return;
     }
-    recordGestureLog(gestureType);
 
-    // Pre-roll: fire slightly before the audio keyword (or immediately if no audio)
-    const preroll = gesturePrerollMs();
-    const fireAt  = Math.max(0, preroll - 200); // 200 ms is the canonical pre-roll window
-
-    this._later(fireAt, () => {
-      emit('avatar:gesture', {
-        type:      gestureType,
-        side:      opts.side,
-        duration:  opts.durationSec,
-        intensity: opts.intensity,
-        variance:  Math.random() * 0.12,
-      });
-      console.log(
-        `%c[AgentDirector][GESTURE] type=${gestureType} side=${opts.side} dur=${opts.durationSec}s int=${opts.intensity.toFixed(2)} +${fireAt}ms`,
-        'color:#a78bfa;font-weight:bold',
-      );
-    });
-  }
-
-  // ── TTS scheduling ──────────────────────────────────────────────────────────
-
-  /**
-   * Schedule TTS playback with voice parameters drawn from the current
-   * BrainStore action (if available) and the given emotion context.
-   *
-   * This method is intended as fallback when the backend returns tts_unavailable.
-   * When PCM audio arrives from the WebSocket, the hook should play it directly
-   * instead of calling this method.
-   *
-   * @param text         — Arabic or English text to speak
-   * @param emotionLabel — current emotion (used for TTS rate/pitch mapping)
-   * @param delayMs      — optional pre-speech delay (in addition to thinking delay)
-   */
-  async scheduleTTS(
-    text:         string,
-    emotionLabel: EmotionLabel,
-    delayMs       = 0,
-  ): Promise<void> {
-    if (!text?.trim()) return;
-
-    const speechMs = estimateSpeechDurationMs(text);
-    console.log(
-      `[AgentDirector] scheduleTTS delay=${delayMs}ms est=${speechMs}ms emotion=${emotionLabel}`,
+    const planned = gestureEngine.planGestures(
+      frame.gesture?.trim() || '',
+      frame.emotion,
+      estimateSpeechDurationMs(frame.text ?? ''),
     );
 
-    await new Promise<void>(resolve => {
-      this._later(delayMs, async () => {
-        useBrainStore.getState().setTalking(true);
+    const gi = COGNI_TIMING.baselineGestureIntensity;
+    planned.forEach(p => {
+      this._later(delay + p.fireAtMs, () => this._fireGesture(p.descriptor.type as string, {
+        intensity: Math.min(0.88, (p.descriptor.intensity ?? 0.75) * gi),
+        // Keep 1.55–2.2s visible window so VRMA clips complete before restore (AvatarCanvas uses `duration`)
+        durationSec: Math.max(1.55, (p.descriptor.duration ?? 2.0) * 1.05),
+        side: p.descriptor.side ?? 'right',
+      }));
+    });
+  }
 
-        const success = await speakWithTTS(text, {
-          emotion: emotionLabel,
-          // Dr. Hamza always speaks in Jordanian Arabic (ar-JO-TaimNeural).
-          // If the text is English this is harmless — edge-tts ignores it for Latin text.
-          arVoice: 'male',
-          onStart: () => {
-            emit('avatar:speak:start', {});
-            console.log('[AgentDirector] TTS speak:start');
-          },
-          onEnd: () => {
-            useBrainStore.getState().setTalking(false);
-            emit('avatar:speak:end', {});
-            console.log('[AgentDirector] TTS speak:end');
-            resolve();
-          },
-        });
-
-        if (!success) {
-          console.warn('[AgentDirector] speakWithTTS returned false — TTS path failed');
-          useBrainStore.getState().setTalking(false);
-          resolve();
-        }
+  private _executeAction(action: BehaviorOutput): void {
+    this._later(jitter(action.thinkingDelayMs, 0.12) * COGNI_PERSONA.timing.deliberationScale, () => {
+      if (!action.gesture) return;
+      // FIX: emotional memory biases explicit actions too
+      const traj = emotionalMemoryManager.getTrajectory();
+      let g = action.gesture;
+      if (
+        (traj.trend === 'falling_negative' || traj.trend === 'stable_negative')
+        && ['point', 'head_down', 'lean_back'].includes(g)
+      ) {
+        g = 'openHand';
+      }
+      let gi = (action.gestureIntensity ?? 0.75) * COGNI_PERSONA.timing.baselineGestureIntensity;
+      if (traj.trend === 'rising_positive') gi = Math.min(0.95, gi * 1.08);
+      if (traj.trend === 'falling_negative' || traj.trend === 'stable_negative') gi *= 0.87;
+      this._fireGesture(g, {
+        intensity: Math.min(0.92, gi),
+        durationSec: ((action.gestureDurationMs ?? 1800) / 1000) * 1.02,
+        side: action.gestureSide ?? 'right',
       });
     });
   }
 
-  /** Immediately interrupt speech, cancel pending timers, reset talking state. */
+  // ── [NEW] Behavioral Features (النشامي) ─────────────────────────────────────
+
+  /** السمع النشط: يهز الأفاتار رأسه عند اكتشاف صوت المستخدم */
+  private _handleUserSpeaking(): void {
+    this._later(cogniDelayMs(getRandomDelay(100, 400)), () => {
+      emit('avatar:nod', { intensity: 0.15, duration: 0.6 });
+      // ميل بسيط للرأس لإظهار الاهتمام
+      emit('avatar:headpose', { 
+        yaw: 0.05 * (Math.random() > 0.5 ? 1 : -1), 
+        pitch: -0.05, 
+        duration: 1500 
+      });
+    });
+  }
+
+  /** كسر الجمود: حركات عشوائية بسيطة عند الصمت الطويل */
+  private _handleNeutralEmotion(): void {
+    this._later(getRandomDelay(5000, 8000), () => {
+      if (useBrainStore.getState().emotionLabel === 'neutral') {
+        const fallbackGestures = ['look', 'blink', 'relax'];
+        const randomG = fallbackGestures[Math.floor(Math.random() * fallbackGestures.length)];
+        this._fireGesture(randomG, {
+          intensity: 0.28 * COGNI_TIMING.baselineGestureIntensity,
+          durationSec: 1.35,
+          side: 'right',
+        });
+      }
+    });
+  }
+
+  /** خطة بديلة عند تعطل الصوت: محاكاة أداء الكلام حركياً */
+  private _handleTTSFallback(text: string, emotion: EmotionLabel): void {
+    console.warn('[AgentDirector] TTS Fallback — Simulating performance');
+    // CRITICAL ORDER: fire gesture FIRST so vrmaGestureUntilRef is set
+    // before avatar:speak:start reaches AvatarCanvas onSpeakStart.
+    // If speak:start fires first, onSpeakStart sees no active gesture and
+    // immediately plays sitTalk, killing the gesture animation.
+    this._applyEmotionContract(emotion);
+    emit('avatar:speak:start', {});
+    this._later(estimateSpeechDurationMs(text), () => emit('avatar:speak:end', {}));
+  }
+
+  // ── Emotion Contracts ───────────────────────────────────────────────────────
+
+  private _applyEmotionContract(emotion: EmotionLabel): void {
+    const skipBodyGesture = useBrainStore.getState().lastFrame?.gesturesFromStructuredPerformance;
+    if (!skipBodyGesture) {
+      const intensity = this._gestureIntensityForEmotion(emotion);
+      this._fireGesture(EMOTION_GESTURE_MAP[emotion] ?? 'beat', { intensity, durationSec: 3.5, side: 'right' });
+    }
+
+    emit('avatar:blink', { 
+      style: ['calm', 'relaxed', 'sad', 'thinking'].includes(emotion) ? 'slow' : 'normal' 
+    });
+
+    this._applyHeadPose(emotion);
+
+    if (['attentive', 'encouraging', 'happy', 'calm'].includes(emotion)) {
+      this._later(getRandomDelay(300, 600), () => emit('avatar:nod', { intensity: 0.25, duration: 0.5 }));
+    }
+  }
+
+  private _gestureIntensityForEmotion(e: EmotionLabel): number {
+    const map: Partial<Record<EmotionLabel, number>> = {
+      excited: 0.95, happy: 0.78, encouraging: 0.8, thinking: 0.5, neutral: 0.45,
+    };
+    const raw = map[e] ?? 0.55;
+    return Math.min(0.9, raw * COGNI_TIMING.baselineGestureIntensity);
+  }
+
+  private _applyHeadPose(e: EmotionLabel): void {
+    const poses: any = { 
+      thinking: { yaw: -0.09, pitch: 0, duration: 3200 }, 
+      attentive: { yaw: 0, pitch: -0.04, duration: 3000 }, 
+      concerned: { yaw: 0, pitch: 0.07, duration: 3200 } 
+    };
+    if (poses[e]) emit('avatar:headpose', poses[e]);
+  }
+
+  private _fireGesture(g: string, o: any): void {
+    // Standing-first: emit full gesture tokens. AvatarCanvas maps seated-safe motion only when UI sit is active.
+    // FIX: personality-consistent gestures — high friendliness softens point unless user profile prefers technical pointing
+    const adaptPG = emotionalMemoryManager.getPersonalityAdaptation();
+    let mapped = g;
+    if (AVATAR_PERSONALITY.friendliness >= 0.75 && mapped === 'point') {
+      if (!adaptPG.preferPointingGestures || Math.random() < 0.42) {
+        mapped = 'openHand';
+      }
+    } else if (adaptPG.preferPointingGestures && mapped === 'openHand' && Math.random() < 0.34) {
+      mapped = 'point';
+    }
+    const traj = emotionalMemoryManager.getTrajectory();
+    let intensity = Number(o.intensity);
+    if (traj.trend === 'rising_positive') {
+      intensity = Math.min(0.95, intensity * 1.06);
+    }
+    if (traj.trend === 'falling_negative' || traj.trend === 'stable_negative') {
+      intensity *= 0.9;
+    }
+    intensity = Math.min(0.94, intensity);
+
+    const lfAct = useBrainStore.getState().lastFrame?.gesture?.trim();
+    if (!checkGestureCooldown(mapped, { explicitActionToken: lfAct })) return;
+
+    const lastLog = getLastGestureLog();
+    const lastG = lastLog.length ? lastLog[lastLog.length - 1] : '';
+    const explicit = lfAct?.toLowerCase() ?? '';
+    const explicitMatch =
+      !!explicit
+      && (explicit === mapped.toLowerCase()
+        || explicit.includes(mapped)
+        || mapped.includes(explicit));
+    if (!explicitMatch && lastG === mapped && ['openHand', 'point', 'beat'].includes(mapped)) {
+      const alts: Record<string, string> = { point: 'openHand', openHand: 'beat', beat: 'point' };
+      mapped = alts[mapped] ?? 'beat';
+      if (!checkGestureCooldown(mapped, { explicitActionToken: lfAct })) return;
+    }
+
+    recordGestureLog(mapped);
+    const v = COGNI_TIMING.gestureVarianceScale;
+    const rnd =
+      typeof window !== 'undefined' && typeof (window as unknown as { __GESTURE_RNG__?: () => number }).__GESTURE_RNG__ === 'function'
+        ? (window as unknown as { __GESTURE_RNG__: () => number }).__GESTURE_RNG__
+        : Math.random;
+    const durJitterSec = (rnd() - 0.5) * 0.35 * v;
+    const durationSec = Math.max(0.45, (o.durationSec ?? 1.8) + durJitterSec);
+    const variance = rnd() * 0.12 * v;
+    const ampScale = 0.85 + rnd() * 0.3;
+    const wristTwist = (rnd() - 0.5) * 0.09 * v;
+    const asym = (rnd() - 0.5) * 0.04;
+    intensity = Math.min(0.95, intensity * ampScale + asym);
+
+    this._later(Math.max(0, gesturePrerollMs() - 200), () => {
+      devLog('gesture →', mapped, 'dur≈', durationSec.toFixed(2), 's', 'side=', o.side, 'I=', intensity.toFixed(2));
+      emit('avatar:gesture', {
+        type: mapped,
+        side: o.side,
+        duration: durationSec,
+        intensity,
+        variance: variance + wristTwist,
+      });
+    });
+  }
+
+  // ── TTS Scheduling ──────────────────────────────────────────────────────────
+
+  async scheduleTTS(text: string, emotion: EmotionLabel, delay = 0): Promise<void> {
+    if (!text?.trim()) return;
+    const trimmed = text.trim();
+    const now = Date.now();
+    if (
+      trimmed === this._lastScheduledTtsText
+      && now - this._lastScheduledTtsAt < 10_000
+    ) {
+      console.warn('[AgentDirector] scheduleTTS skipped — duplicate text within 10s');
+      return;
+    }
+    this._lastScheduledTtsText = trimmed;
+    this._lastScheduledTtsAt = now;
+
+    if (ENABLE_MIME_MODE) {
+      await new Promise<void>(res => {
+        this._later(delay, () => {
+          stopTTSGlobally();
+          useBrainStore.getState().setTalking(true);
+          emit('avatar:speak:start', {});
+          const simulatedMs = Math.max(400, Math.min(120_000, trimmed.length * 65));
+          const endT = setTimeout(() => {
+            this._timers = this._timers.filter(x => x !== endT);
+            useBrainStore.getState().setTalking(false);
+            emit('avatar:speak:end', {});
+            res();
+          }, simulatedMs);
+          this._timers.push(endT);
+        });
+      });
+      return;
+    }
+
+    await new Promise<void>(res => {
+      this._later(delay, async () => {
+        stopTTSGlobally();
+        useBrainStore.getState().setTalking(true);
+        const ok = await speakWithTTS(text, { 
+          emotion,
+          rate: resolveSpeakRate(emotion, COGNI_VOICE.rate),
+          ...(COGNI_VOICE.pitchScale > 1.01 ? { pitch: '+2Hz' as const } : {}),
+          arVoice: 'male', 
+          onStart: () => {
+            emit('avatar:speak:start', {});
+          }, 
+          onEnd: () => { 
+            useBrainStore.getState().setTalking(false); 
+            emit('avatar:speak:end', {}); 
+            res(); 
+          } 
+        });
+        if (!ok) { this._handleTTSFallback(text, emotion); res(); }
+      });
+    });
+  }
+
   interruptSpeech(): void {
-    console.log('%c[AgentDirector] INTERRUPT — stopping TTS and clearing timers', 'color:#ef4444;font-weight:bold');
-    stopTTS();
+    stopTTSGlobally(); 
     useBrainStore.getState().interrupt();
-    // Clear gesture timers (keep subscription timers)
-    this._timers.forEach(t => clearTimeout(t));
+    this._timers.forEach(t => clearTimeout(t)); 
     this._timers = [];
   }
 
-  // ── Timer management ─────────────────────────────────────────────────────────
-
   private _later(ms: number, fn: () => void): void {
-    const t = setTimeout(() => {
-      this._timers = this._timers.filter(x => x !== t);
-      fn();
+    const t = setTimeout(() => { 
+      this._timers = this._timers.filter(x => x !== t); 
+      fn(); 
     }, Math.max(0, ms));
-
     this._timers.push(t);
-    // Prevent unbounded timer list growth
-    if (this._timers.length > MAX_TIMERS) {
-      this._timers.shift();
-    }
+    if (this._timers.length > MAX_TIMERS) this._timers.shift();
   }
-}
 
-// ─── Singleton ────────────────────────────────────────────────────────────────
+} // <--- هذا هو القوس النهائي والوحيد للفئة
 
-/**
- * Singleton AgentDirector.
- *
- * Call `agentDirector.start()` once in your application root component
- * (e.g. in a useEffect with an empty dependency array, or in layout.tsx)
- * and `agentDirector.stop()` on unmount.
- */
 export const agentDirector = new AgentDirector();

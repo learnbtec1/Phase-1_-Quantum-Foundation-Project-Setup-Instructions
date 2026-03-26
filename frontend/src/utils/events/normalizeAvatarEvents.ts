@@ -3,73 +3,105 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * PERMANENT NORMALIZER — Full Human Persona Kernel / Avatar Event Schema
  *
- * RIG SOURCE-OF-TRUTH (both AvatarCanvas.tsx and VRMAvatar.tsx agree):
- *
- *   avatar:gesture  → { type: GestureToken, side?: 'left'|'right'|'both',
- *                        duration?: number, intensity?: number,
- *                        variance?: number, preroll?: number }
- *     Rig reads:  detail.type   (camelCase tokens)
- *     Rig tokens: 'wave' | 'openHand' | 'point' | 'beat'
- *     Note: 'emphasis' is NOT in any rig switch → normalised → 'beat'
- *
- *   avatar:emotion  → { emotion: string }
- *     Rig reads:  detail.emotion
- *
- *   avatar:listening → { active: boolean }
- *     Rig reads:  detail.active  (boolean; NOT state:'start'|'stop')
- *
- * This util accepts either the cognitive-layer shape OR the rig shape and
- * always outputs the rig shape, making all dispatchers safe regardless of
- * which field-name convention the caller uses.
+ * Maps BehaviorRulesEngine + AgentDirector gesture aliases → rig tokens consumed
+ * by AvatarCanvas.onGesture (VRMA + procedural paths).
  */
 
 // ─── Gesture token canonicalisation ─────────────────────────────────────────
 
-export type GestureToken = 'wave' | 'openHand' | 'point' | 'beat';
+/** Tokens AvatarCanvas.onGesture handles (VRMA keys + procedural aliases). */
+export type GestureToken =
+  | 'wave'
+  | 'openHand'
+  | 'point'
+  | 'beat'
+  | 'cheer'
+  | 'clap'
+  | 'relax'
+  | 'look'
+  | 'think'
+  | 'blink'
+  | 'idle'
+  | 'peace'
+  | 'agree'
+  | 'shoulder_sigh'
+  | 'head_down'
+  | 'tilt'
+  | 'hands_up'
+  | 'lean_back'
+  | 'celebration';
 
-/** Map any variant spelling/casing to the rig's exact camelCase token. */
-const GESTURE_TOKEN_MAP: Record<string, GestureToken> = {
-  wave:      'wave',
-  Wave:      'wave',
-  WAVE:      'wave',
+/**
+ * BehaviorRulesEngine + legacy aliases → canonical rig token.
+ * See BehaviorRulesEngine.ts gesture strings.
+ */
+const BEHAVIOR_TO_RIG: Record<string, GestureToken> = {
+  // Core rig
+  wave: 'wave',
+  Wave: 'wave',
+  WAVE: 'wave',
+  openHand: 'openHand',
+  openhand: 'openHand',
+  open_hand: 'openHand',
+  'open-hand': 'openHand',
+  OpenHand: 'openHand',
+  point: 'point',
+  Point: 'point',
+  POINT: 'point',
+  pointing: 'point',
+  beat: 'beat',
+  Beat: 'beat',
+  BEAT: 'beat',
+  emphasis: 'beat',
+  Emphasis: 'beat',
+  sit: 'beat',
 
-  openHand:   'openHand',
-  openhand:   'openHand',
-  open_hand:  'openHand',
-  'open-hand':'openHand',
-  OpenHand:   'openHand',
+  // BehaviorRulesEngine outputs — keep tokens Canvas can branch on
+  celebration: 'celebration',
+  celebrate: 'clap',
+  smile: 'openHand',
+  shoulder_sigh: 'shoulder_sigh',
+  head_down: 'head_down',
+  hands_up: 'hands_up',
+  lean_back: 'lean_back',
+  rest: 'idle',
+  lean_forward: 'think',
+  idle: 'idle',
+  tilt: 'tilt',
+  blink: 'blink',
+  relaxed: 'relax',
+  relax: 'relax',
 
-  point:     'point',
-  Point:     'point',
-  POINT:     'point',
-  pointing:  'point',
-
-  beat:      'beat',
-  Beat:      'beat',
-  BEAT:      'beat',
-
-  // 'emphasis' is from brain.ts ResponsePlan type but unsupported in rig switch;
-  // remap to a gentle beat so something visible always fires.
-  emphasis:  'beat',
-  Emphasis:  'beat',
-
-  // 'sit' appears in actions.ts GestureType but has no rig pose handler — keep as-is
-  // so the event is dispatched and the rig silently falls through to idle.
-  sit:       'beat',
+  // Director / co-speech
+  think: 'think',
+  peace: 'peace',
+  agree: 'agree',
+  clap: 'clap',
+  cheer: 'cheer',
+  look: 'look',
 };
 
 function canonicalGestureToken(raw: string | undefined): GestureToken {
-  if (!raw) return 'beat';
-  return GESTURE_TOKEN_MAP[raw] ?? (raw as GestureToken);
+  if (!raw?.trim()) {
+    if (typeof console !== 'undefined') {
+      console.warn('[normalizeAvatarEvents] empty gesture → idle');
+    }
+    return 'idle';
+  }
+  const key = raw.trim();
+  const mapped = BEHAVIOR_TO_RIG[key] ?? BEHAVIOR_TO_RIG[key.toLowerCase()];
+  if (mapped) return mapped;
+  if (typeof console !== 'undefined') {
+    console.warn('[normalizeAvatarEvents] unmapped gesture → idle:', key);
+  }
+  return 'idle';
 }
 
 // ─── Typed input shapes ──────────────────────────────────────────────────────
 
 /** What the cognitive layer / director might emit (accepts BOTH old and new keys). */
 export interface GestureEventInput {
-  // rig key (direction: keep)
   type?: string;
-  // specced alternative — normaliser maps this to type
   name?: string;
   side?: 'left' | 'right' | 'both';
   duration?: number;
@@ -79,18 +111,14 @@ export interface GestureEventInput {
 }
 
 export interface EmotionEventInput {
-  // rig key (direction: keep)
   emotion?: string;
-  // specced alternative
   tag?: string;
   strength?: number;
   duration?: number;
 }
 
 export interface ListeningEventInput {
-  // rig key (direction: keep)
   active?: boolean;
-  // specced alternative
   state?: 'start' | 'stop';
   reason?: string;
 }
@@ -119,24 +147,12 @@ export interface ListeningEventDetail {
 
 // ─── Core normaliser ─────────────────────────────────────────────────────────
 
-/**
- * Normalise any avatar event detail to the shape the rig actually reads.
- *
- * Works for all three event kinds:
- *   - gesture  (accepts { type | name } → emits { type })
- *   - emotion  (accepts { emotion | tag } → emits { emotion })
- *   - listening (accepts { active | state } → emits { active })
- *
- * Pass-through for any other keys/events — nothing is lost.
- */
 export function normalizeAvatarEvent(detail: GestureEventInput): GestureEventDetail;
 export function normalizeAvatarEvent(detail: EmotionEventInput): EmotionEventDetail;
 export function normalizeAvatarEvent(detail: ListeningEventInput): ListeningEventDetail;
 export function normalizeAvatarEvent(
   detail: GestureEventInput | EmotionEventInput | ListeningEventInput,
 ): GestureEventDetail | EmotionEventDetail | ListeningEventDetail {
-
-  // ── Gesture ──────────────────────────────────────────────────────────────
   if ('type' in detail || 'name' in detail) {
     const g = detail as GestureEventInput;
     const rawToken = g.type ?? g.name;
@@ -150,7 +166,6 @@ export function normalizeAvatarEvent(
     };
   }
 
-  // ── Emotion ──────────────────────────────────────────────────────────────
   if ('emotion' in detail || 'tag' in detail) {
     const em = detail as EmotionEventInput;
     const result: EmotionEventDetail = {
@@ -161,7 +176,6 @@ export function normalizeAvatarEvent(
     return result;
   }
 
-  // ── Listening ────────────────────────────────────────────────────────────
   if ('active' in detail || 'state' in detail) {
     const ls = detail as ListeningEventInput;
     const active = ls.active !== undefined
@@ -172,17 +186,9 @@ export function normalizeAvatarEvent(
     return result;
   }
 
-  // ── Fallback: return as-is (unknown event shape) ─────────────────────────
   return detail as GestureEventDetail;
 }
 
-// ─── dispatchAvatar helper ───────────────────────────────────────────────────
-
-/**
- * Drop-in replacement for `window.dispatchEvent(new CustomEvent(eventType, {detail}))`.
- * Normalises the detail payload before dispatch so the rig always receives
- * the correct field names and token casing.
- */
 export function dispatchAvatar(
   eventType: 'avatar:gesture',
   detail: GestureEventInput,

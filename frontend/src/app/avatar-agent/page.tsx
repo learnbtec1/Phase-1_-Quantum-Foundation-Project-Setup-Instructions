@@ -1,24 +1,40 @@
-import type { Metadata } from 'next';
+'use client';
+
 import { Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import AvatarAgentClient from './AvatarAgentClient';
 
 // [COPILOT_FORCE_DYNAMIC] Removed: force-dynamic caused Cache-Control: no-store which blocks bfcache.
-// Using 'auto' lets Next.js cache the RSC shell while the 'use client' component handles its own state.
 export const dynamic = 'auto';
 
-export const metadata: Metadata = {
-  title: 'Avatar Agent — NEXUS',
-  description: 'محادثة صوتية مع الدكتور حمزة — النظام الذكي للتعلم التفاعلي',
-};
+/**
+ * ADDED: Read teacher deep-link query params inside Suspense (required by useSearchParams).
+ * Example: /avatar-agent?unit=6&target=distinction&subject=Business%20Purpose
+ */
+function AvatarAgentSearchParamsBridge() {
+  const sp = useSearchParams();
+  const initialUnit = sp.get('unit')?.trim() ?? '';
+  const initialTarget = sp.get('target')?.trim() ?? '';
+  const initialSubject = sp.get('subject')?.trim() ?? '';
+  return (
+    <AvatarAgentClient
+      initialUnit={initialUnit}
+      initialTarget={initialTarget}
+      initialSubject={initialSubject}
+    />
+  );
+}
 
 export default function AvatarAgentPage() {
   return (
-    <Suspense fallback={
-      <div className="flex items-center justify-center min-h-screen bg-[#0a0a12] text-white text-sm">
-        جاري التحميل...
-      </div>
-    }>
-      <AvatarAgentClient />
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen items-center justify-center bg-[#0a0a12] text-sm text-white">
+          جاري التحميل...
+        </div>
+      }
+    >
+      <AvatarAgentSearchParamsBridge />
     </Suspense>
   );
 }

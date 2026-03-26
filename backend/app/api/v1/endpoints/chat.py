@@ -13,10 +13,20 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.v1.endpoints.tutor import _get_cogni_response as _get_dr_hamza_response
+from app.services.emotional_memory_manager import EmotionalMemoryManager
 from app.services.forensic_engine import forensic_grade
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Per-client HTTP memory (optional client_id) — aligns with thinker/plan injection when populated
+_HTTP_MEMORY: dict[str, EmotionalMemoryManager] = {}
+
+
+def _http_emotional_memory(client_id: str) -> EmotionalMemoryManager:
+    if client_id not in _HTTP_MEMORY:
+        _HTTP_MEMORY[client_id] = EmotionalMemoryManager()
+    return _HTTP_MEMORY[client_id]
 
 
 # ── Request / Response schemas ────────────────────────────────────────────────
@@ -29,6 +39,10 @@ class HistoryEntry(BaseModel):
 class SimpleChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     history: Optional[List[HistoryEntry]] = Field(default_factory=list)
+    client_id: Optional[str] = Field(
+        None,
+        description="Optional stable id so last_internal_thought / lesson plan can persist for this HTTP client",
+    )
 
 
 class SimpleChatResponse(BaseModel):
@@ -272,7 +286,22 @@ async def chat_simple(body: SimpleChatRequest):
 
     intent       = _classify_intent(body.message)
     history_list = [{"user": h.user, "assistant": h.assistant} for h in (body.history or [])]
-    context      = {"history": history_list[-6:]}   # last 3 exchanges
+    context: dict = {"history": history_list[-6:]}   # last 3 exchanges
+
+    _cid = (body.client_id or "default").strip() or "default"
+    _mm = _http_emotional_memory(_cid)
+    try:
+        _lt = _mm.get_last_of_type("internal_thought")
+        if _lt and str(_lt).strip():
+            context["last_internal_thought"] = str(_lt).strip()[:800]
+    except Exception as _e:
+        logger.debug("[chat] last_internal_thought skipped: %s", _e)
+    try:
+        _ap = _mm.get_active_lesson_plan()
+        if _ap and str(_ap).strip():
+            context["active_lesson_plan"] = str(_ap).strip()[:8000]
+    except Exception as _e:
+        logger.debug("[chat] active_lesson_plan skipped: %s", _e)
 
     # Inject secret distinction roadmap when intent matches
     message_with_context = body.message
@@ -310,6 +339,15 @@ async def chat_simple(body: SimpleChatRequest):
             reply_text = _patch_format(reply_text)
 
         parsed = _parse_reply(reply_text)
+        try:
+            _mm.observe_dialogue_turn(
+                body.message,
+                parsed["dialogue"],
+                user_mood="neutral",
+                avatar_emotion=parsed["emotion"],
+            )
+        except Exception:
+            pass
         return SimpleChatResponse(
             reply    = reply_text,
             dialogue = parsed['dialogue'],

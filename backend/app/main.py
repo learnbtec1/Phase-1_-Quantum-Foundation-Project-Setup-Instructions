@@ -33,9 +33,19 @@ from app.api.v1.endpoints.agent_ws import router as agent_ws_router
 from app.api.v1.endpoints.nexus_ip import router as nexus_ip_router
 from app.api.v1.endpoints.reports import router as reports_router
 from app.api.v1.endpoints.btec_ingest import router as btec_router
+from app.api.v1.endpoints.auth import router as auth_router
+from app.api.v1.endpoints.dashboard import router as dashboard_router
+from app.api.v1.endpoints.curriculum import router as curriculum_router
+from app.api.v1.endpoints.admin import router as admin_router
+from app.api.v1.endpoints.users import router as users_router
+from app.api.v1.endpoints.digital_human_api import router as digital_human_router
+from app.api.v1.endpoints.stripe_webhook import router as stripe_webhook_router
+from app.api.v1.endpoints.saml_auth import router as saml_auth_router
 from app.api.memory import router as memory_router
 
 from app.core.config import settings
+from app.core.middleware_request_id import RequestIdMiddleware
+from app.core.rate_limit import ApiRateLimitMiddleware
 from app.services.tts_service import AzureTTSService
 
 logger = logging.getLogger(__name__)
@@ -133,6 +143,20 @@ async def lifespan(app_instance):
     _ping_task = asyncio.create_task(_tts_ping_loop())
     app_instance.state.tts_ping_task = _ping_task
 
+    # AutonomousThinker («الفص الجبهي») runs per WebSocket session in agent_ws (session memory +
+    # idle/LLM-busy guards). It is not started here to avoid a global singleton sharing one memory.
+
+    # Dev: ensure Phase A tables (users extensions, user_memory) exist — production should use Alembic.
+    if os.getenv("AUTO_CREATE_TABLES", "true").lower() in ("1", "true", "yes"):
+        try:
+            from app.database import Base, engine
+            import app.models.db_models  # noqa: F401 — register models on Base.metadata
+
+            Base.metadata.create_all(bind=engine)
+            logger.info("AUTO_CREATE_TABLES: SQLAlchemy metadata applied")
+        except Exception as _meta_err:
+            logger.warning("AUTO_CREATE_TABLES skipped: %s", _meta_err)
+
     yield
 
     # Cleanup
@@ -168,6 +192,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestIdMiddleware)
+app.add_middleware(ApiRateLimitMiddleware)
 
 # Include routers
 app.include_router(assessment_router)
@@ -180,6 +206,14 @@ app.include_router(nexus_ip_router)  # NEXUS IP: /api/v1/nexus/*
 app.include_router(reports_router)   # Academic PDF reports: /api/v1/reports/*
 app.include_router(memory_router)    # Conversation memory: /api/v1/memory/*
 app.include_router(btec_router, prefix="/api/v1")  # BTEC Knowledge Ingestion: /api/v1/btec/*
+app.include_router(auth_router, prefix="/api/v1")
+app.include_router(dashboard_router, prefix="/api/v1")
+app.include_router(curriculum_router, prefix="/api/v1")
+app.include_router(admin_router, prefix="/api/v1")
+app.include_router(users_router, prefix="/api/v1")
+app.include_router(digital_human_router, prefix="/api/v1")
+app.include_router(stripe_webhook_router, prefix="/api/v1")
+app.include_router(saml_auth_router, prefix="/api/v1")
 
 
 @app.get("/api/health")
@@ -200,11 +234,19 @@ async def api_health():
     ping_result = _tts_health.get("ok")
     audio = ping_result if ping_result is not None else credentials_ok
 
+    try:
+        from app.core.redis_client import redis_ping
+
+        redis_ok = redis_ping()
+    except Exception:
+        redis_ok = None
+
     return {
         "ok":            True,
         "env":           bool(os.getenv("OPENAI_API_KEY") or settings.OPENAI_API_KEY),
         "audio":         audio,
         "reach":         True,
+        "redis":         redis_ok,
         "last_tts_ms":   _tts_health.get("latency_ms"),
         "last_check_ts": _tts_health.get("ts") or None,
     }

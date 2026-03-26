@@ -1,9 +1,14 @@
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
+sqlalchemy>=2.0.0
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+email-validator>=2.0.0
 python-dotenv>=1.0.0
 pydantic>=2.5.0
 pydantic-settings>=2.0.0
 openai>=1.0.0
+chromadb>=0.4.22
 anthropic>=0.40.0
 httpx>=0.25.0
 pytest>=7.0.0
@@ -27,3 +32,16 @@ python-bidi>=0.4.2
 
 # ── PostgreSQL (optional, enabled via USE_DB=true) ───────────────────────────
 psycopg2-binary>=2.9.0
+
+# ── Phase C: Redis (session state / rate limits), Stripe webhooks ───────────
+redis>=5.0.0
+stripe>=10.0.0
+
+# ── BTEC Chroma ingestion (backend/scripts/btec_ingest.py) ───────────────────
+langchain>=0.2.14
+langchain-core>=0.2.14
+langchain-community>=0.2.10
+langchain-openai>=0.1.8
+langchain-text-splitters>=0.2.2
+pypdf>=4.0.0
+unstructured>=0.14.0

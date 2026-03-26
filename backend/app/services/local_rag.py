@@ -6,8 +6,8 @@ Performs a "thermal scan" of a configured local directory for BTEC
 PDF / DOCX / TXT files, chunks them, builds an inverted TF-IDF index,
 and retrieves the top-k most relevant passages for a given query.
 
-Used to enrich Cogni's responses for Merit and Distinction levels with
-direct inline citations from actual BTEC specification documents.
+Used to enrich Cogni's responses at all persona levels with
+synthesized context from local BTEC specification documents and exemplars.
 
 Configuration (env vars):
   LOCAL_RAG_DIR         Path to scan  (default: E:/BTEC)
@@ -270,31 +270,34 @@ async def _ensure_index() -> Optional[_DocIndex]:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+_QUICK_REVIEW_CHUNK_RE = re.compile(
+    r"(summary|key\s*concept|overview|ملخص|مفهوم\s*رئيسي|المفاهيم\s*الأساسية)",
+    re.I,
+)
+
+
 async def retrieve_local_context(
     query: str,
     top_k: int = 3,
     min_score: float = 0.5,
     persona_level: str = "pass",
     unit_id: str = "",
+    quick_review: bool = False,
 ) -> List[RagChunk]:
     """Retrieve the top-k most relevant local document chunks for a query.
 
-    Only activates for Merit and Distinction personas (Pass receives no RAG
-    augmentation — keep it warm and conversational).
+    Runs for all persona levels when RAG is enabled so Pass learners still get
+    textbook-aligned scaffolding toward Merit/Distinction.
 
     Args:
         query:         Student message or derived search query.
         top_k:         Maximum chunks to return.
         min_score:     Minimum TF-IDF score threshold.
-        persona_level: "pass" | "merit" | "distinction"
+        persona_level: "pass" | "merit" | "distinction" (affects scoring boosts only).
 
     Returns:
         List of RagChunk (may be empty if RAG disabled or no matches).
     """
-    # Pass mode → skip RAG (keep it warm, not academic)
-    if persona_level == "pass":
-        return []
-
     if not RAG_ENABLED:
         return []
 
@@ -323,13 +326,22 @@ async def retrieve_local_context(
         if s >= min_score:
             scored.append((s, i))
 
-    # Sort descending by score, take top_k
+    # Sort descending by score; widen pool in Quick Review to prefer Summary / Key Concept chunks
     scored.sort(reverse=True)
-    results: List[RagChunk] = []
-    for score, idx in scored[:top_k]:
+    pool = max(top_k, top_k * 6 if quick_review else top_k)
+    candidates: List[RagChunk] = []
+    for score, idx in scored[:pool]:
         chunk = index.chunks[idx]
         chunk.score = round(score, 3)
-        results.append(chunk)
+        candidates.append(chunk)
+    if quick_review:
+        pref = [
+            c
+            for c in candidates
+            if _QUICK_REVIEW_CHUNK_RE.search((c.text or "")[:700] + " " + (c.source or ""))
+        ]
+        candidates = pref if pref else candidates
+    results = candidates[:top_k]
 
     logger.info(
         "[RAG] Query=%r persona=%s → %d chunks found (top score=%.2f)",

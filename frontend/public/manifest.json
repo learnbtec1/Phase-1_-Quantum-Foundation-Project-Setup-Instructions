@@ -1,0 +1,19 @@
+{
+  "name": "إيدوفيرس — كوجني",
+  "short_name": "كوجني",
+  "description": "المعلم الذكي التفاعلي",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a12",
+  "theme_color": "#4c1d95",
+  "lang": "ar",
+  "dir": "rtl",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "48x48",
+      "type": "image/x-icon",
+      "purpose": "any"
+    }
+  ]
+}

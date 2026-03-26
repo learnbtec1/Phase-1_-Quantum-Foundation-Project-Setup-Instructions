@@ -1,4 +1,17 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: nexus_redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
   db:
     image: postgres:16-alpine
     container_name: nexus_db
@@ -21,25 +34,37 @@ services:
   backend:
     build: ./backend
     container_name: nexus_backend
+    env_file:
+      - .env
     environment:
       HOST: 0.0.0.0
       PORT: 8000
       DATABASE_URL: postgresql+psycopg2://nexus:nexus@db:5432/nexus
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-change_this_in_production_docker}
       PYTHONIOENCODING: "utf-8"
       PYTHONUTF8: "1"
       LANG: "C.UTF-8"
       LC_ALL: "C.UTF-8"
-      # Azure Speech SDK (libMicrosoft.CognitiveServices.Speech.core.so) needs CA certs
-      # to initialise its HTTP singleton — prevents "Error 27" at startup.
       SSL_CERT_FILE: "/etc/ssl/certs/ca-certificates.crt"
       SSL_CERT_DIR: "/etc/ssl/certs"
+      TTS_ARABIC_VOICE: "ar-JO-TaimNeural"
+      COGNI_ARABIC_TTS_VOICE_LOCKED: "ar-JO-TaimNeural"
+      # Allow edge-tts / gTTS when Azure fails (401 auth, rate limits, etc.)
+      TTS_DISABLE_NON_AZURE_FALLBACK: "false"
+      # BTEC textbook / rubric / exemplar corpus (host path mounted read-only below)
+      LOCAL_RAG_ENABLED: "true"
+      LOCAL_RAG_DIR: "/app/btec_corpus"
     ports:
       - "8000:8000"
     volumes:
       - ./backend/data:/app/data
+      - ./backend/data/btec-bus:/app/btec_corpus:ro
       - whisper_model_cache:/root/.cache/huggingface
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -66,15 +91,11 @@ services:
       - /app/node_modules
     command: ["npm", "run", "dev", "--", "-H", "0.0.0.0", "-p", "3000"]
     environment:
-      # NEXT_PUBLIC_* vars are browser-visible — use the HOST-mapped port (localhost:8000),
-      # NOT the internal Docker service name (backend:8000) which browsers cannot resolve.
       NEXT_PUBLIC_API_URL: http://localhost:8000
       NEXT_PUBLIC_AGENT_WS: ws://localhost:8000/ws/agent
-      # Server-side only (no NEXT_PUBLIC prefix) — resolved inside Docker network.
-      # These MUST use the Docker service name "backend", NOT 127.0.0.1 (which would
-      # resolve to the frontend container itself and cause a 503 on every proxy call).
       BACKEND_URL: http://backend:8000
       TTS_BACKEND_URL: http://backend:8000/api/v1/tts-with-timing
+      TTS_PROXY_TIMEOUT_MS: "90000"
       CHAT_BACKEND_URL: http://backend:8000/api/v1/chat
     ports:
       - "3000:3000"

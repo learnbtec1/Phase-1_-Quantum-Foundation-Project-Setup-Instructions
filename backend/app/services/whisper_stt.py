@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import struct
 import sys
+import tempfile
 from typing import Optional
 
 # Force UTF-8 on stdout/stderr at import time (Windows cp1252 fallback guard).
@@ -63,6 +65,12 @@ except Exception:
     STT_MIME_OK = ["audio/webm", "audio/ogg", "audio/wav", "audio/mp4"]
 
 logger = logging.getLogger(__name__)
+
+# When local Whisper is unavailable or all STT paths fail, this user message is
+# sent through the same LLM pipeline as typed text so the client can verify E2E.
+STT_PIPELINE_FALLBACK_USER_AR = (
+    "أنا أسمعك ولكن الترجمة الصوتية غير مفعلة حالياً."
+)
 
 
 def _safe_log(text: object, maxlen: int = 80) -> str:
@@ -277,6 +285,10 @@ async def transcribe_audio(
     if not _init_whisper():
         raise STTError("model_unavailable", "Whisper نموذج STT غير متاح — ثبت faster-whisper")
 
+    # Ignore empty or very short audio (must raise — bare return broke the WS pipeline)
+    if not audio_bytes or len(audio_bytes) < 1000:
+        raise STTError("audio_too_short", "لم أسمع شيئاً — حاول مرة أخرى")
+
     try:
         import numpy as np
 
@@ -365,3 +377,48 @@ async def transcribe_audio(
             pass  # logging must never kill the pipeline
         _exc_safe = str(exc).encode('utf-8', errors='replace').decode('utf-8')
         raise STTError("transcription_error", f"STT خطأ غير متوقع: {_exc_safe}")
+
+
+async def transcribe_openai_whisper_api(
+    audio_bytes: bytes,
+    req_id: str = "",
+) -> str | None:
+    """
+    Optional cloud STT when local faster-whisper is missing or fails.
+    Set OPENAI_API_KEY in the environment. Returns None if unavailable or on error.
+    """
+    label = f"[STT-OpenAI req={req_id}]" if req_id else "[STT-OpenAI]"
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        logger.debug("%s skipped — OPENAI_API_KEY not set", label)
+        return None
+    suffix = ".webm"
+    if len(audio_bytes) >= 12 and audio_bytes[:4] == b"RIFF" and audio_bytes[8:12] == b"WAVE":
+        suffix = ".wav"
+    path: str | None = None
+    try:
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        with os.fdopen(fd, "wb") as tmp:
+            tmp.write(audio_bytes)
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key=api_key)
+        with open(path, "rb") as audio_file:
+            resp = await client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                language="ar",
+            )
+        text = (getattr(resp, "text", None) or "").strip()
+        if text:
+            logger.info("%s OK text=%s", label, _safe_log(text))
+        return text or None
+    except Exception as exc:
+        logger.warning("%s failed: %s", label, _safe_log(exc))
+        return None
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass

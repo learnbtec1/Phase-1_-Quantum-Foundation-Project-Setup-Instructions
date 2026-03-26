@@ -17,9 +17,9 @@ export interface UseVADOptions {
   onSpeechEnd?: (audio: Blob) => void;
   /** Called the instant voice activity is first detected in a segment. */
   onSpeechStart?: () => void;
-  /** Silence threshold (0–1). Lower = more sensitive. Default 0.015 */
+  /** RMS threshold (0–1). Lower = more sensitive. Default 0.03 */
   silenceThreshold?: number;
-  /** Ms of silence before speech considered ended. Default 900 */
+  /** Ms of silence after speech before segment end. Default 700 */
   silenceGapMs?: number;
   /** Language hint for Web Speech fallback. Default 'ar-SA' */
   lang?: string;
@@ -29,6 +29,13 @@ export interface UseVADReturn {
   isRecording: boolean;
   startListening: () => Promise<void>;
   stopListening: () => void;
+  /**
+   * Push-to-talk: start recording (no VAD / no auto-send on silence).
+   * Stop with `stopManualAndSend()` to build WAV and call `onSpeechEnd`.
+   */
+  startManualRecording: () => Promise<void>;
+  /** End manual segment and invoke `onSpeechEnd` with encoded audio (unless cancelled via `stopListening`). */
+  stopManualAndSend: () => void;
   isSupported: boolean;
   /** True if no audio input device found — stop retrying */
   micNotFound: boolean;
@@ -91,8 +98,8 @@ async function buildWavBlob(chunks: Blob[], sampleRate: number): Promise<Blob | 
 export function useVAD({
   onSpeechEnd,
   onSpeechStart,
-  silenceThreshold = 0.008,
-  silenceGapMs = 900,
+  silenceThreshold = 0.03,
+  silenceGapMs = 700,
   lang = 'ar-SA',
 }: UseVADOptions = {}): UseVADReturn {
   const [isRecording, setIsRecording] = useState(false);
@@ -101,6 +108,7 @@ export function useVAD({
   const micNotFoundRef      = useRef(false);
   const permissionDeniedRef = useRef(false);
   const streamRef = useRef<MediaStream | null>(null);
+  const mimeTypeRef = useRef('audio/webm');
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -119,6 +127,12 @@ export function useVAD({
   // hadSpeechThisSegmentRef: distinguishes "only saved the silent header chunk"
   // from "actually recorded speech" so onstop can skip no-speech segments.
   const hadSpeechThisSegmentRef = useRef(false);
+  /** Push-to-talk — isolated from amplitude-VAD pipeline */
+  const manualActiveRef = useRef(false);
+  const manualCancelRef = useRef(false);
+  const manualStreamRef = useRef<MediaStream | null>(null);
+  const manualRecorderRef = useRef<MediaRecorder | null>(null);
+  const manualChunksRef = useRef<Blob[]>([]);
 
   const isSupported =
     typeof navigator !== 'undefined' &&
@@ -127,6 +141,24 @@ export function useVAD({
     !!window.MediaRecorder;
 
   const stopListening = useCallback(() => {
+    // Cancel push-to-talk without delivering audio
+    const mRec = manualRecorderRef.current;
+    if (mRec && mRec.state === 'recording') {
+      manualCancelRef.current = true;
+      try {
+        mRec.stop();
+      } catch {
+        /* ignore */
+      }
+      // recorder.onstop clears manual* refs (avoid clearing chunks before onstop runs)
+    } else {
+      manualRecorderRef.current = null;
+      manualStreamRef.current?.getTracks().forEach((t) => t.stop());
+      manualStreamRef.current = null;
+      manualChunksRef.current = [];
+      manualActiveRef.current = false;
+    }
+
     activeRef.current = false;
     setIsRecording(false);
     cancelAnimationFrame(rafRef.current);
@@ -159,6 +191,10 @@ export function useVAD({
 
   const startListening = useCallback(async () => {
     if (!isSupported || isRecording) return;
+    if (manualActiveRef.current) {
+      console.warn('[useVAD] startListening ignored — manual recording active');
+      return;
+    }
 
     // Don't retry if we already know there's no device or permission was denied
     if (micNotFoundRef.current || permissionDeniedRef.current) {
@@ -230,52 +266,80 @@ export function useVAD({
         }, { once: true });
       }
 
-      // Set up recorder
+      // Set up recorder — restart after each segment happens inside onstop only
+      // (never clear chunksRef from a timer before onstop copies data — race fix).
       const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : 'audio/webm';
+      mimeTypeRef.current = mime;
+
+      const wireRecorder = (rec: MediaRecorder) => {
+        rec.ondataavailable = (e) => {
+          if (!activeRef.current) return;
+          if (e.data.size === 0) return;
+          if (!firstChunkSavedRef.current) {
+            firstChunkSavedRef.current = true;
+            chunksRef.current.push(e.data);
+          } else if (speechStartedRef.current) {
+            chunksRef.current.push(e.data);
+          }
+        };
+
+        rec.onstop = async () => {
+          if (!activeRef.current) return;
+
+          const hadSpeech = hadSpeechThisSegmentRef.current;
+          hadSpeechThisSegmentRef.current = false;
+          const savedChunks = [...chunksRef.current];
+          chunksRef.current = [];
+          speechStartedRef.current = false;
+
+          const restartSegment = () => {
+            if (!activeRef.current || !streamRef.current) return;
+            try {
+              const newRec = new MediaRecorder(streamRef.current, {
+                mimeType: mimeTypeRef.current || 'audio/webm',
+              });
+              recorderRef.current = newRec;
+              firstChunkSavedRef.current = false;
+              wireRecorder(newRec);
+              newRec.start(100);
+            } catch (err) {
+              console.error('[useVAD] Failed to restart MediaRecorder after segment:', err);
+            }
+          };
+
+          if (!hadSpeech || savedChunks.length === 0) {
+            console.log('[VAD] onstop: no speech in segment — restarting recorder only');
+            queueMicrotask(restartSegment);
+            return;
+          }
+
+          console.log(
+            `[VAD] onstop: building WAV from ${savedChunks.length} chunks (type=${savedChunks[0]?.type ?? '?'})`,
+          );
+          const wav = await buildWavBlob(savedChunks, 16000);
+          if (wav) {
+            console.log(
+              `[VAD] WAV ready — invoking onSpeechEnd | size=${wav.size} bytes type=${wav.type || 'audio/wav'}`,
+            );
+            onSpeechEnd?.(wav);
+          } else {
+            const rawBlob = new Blob(savedChunks, { type: savedChunks[0]?.type ?? 'audio/webm' });
+            console.warn(
+              `[VAD] buildWavBlob failed — invoking onSpeechEnd with raw blob | size=${rawBlob.size} type=${rawBlob.type}`,
+            );
+            onSpeechEnd?.(rawBlob);
+          }
+
+          queueMicrotask(restartSegment);
+        };
+      };
+
       const recorder = new MediaRecorder(stream, { mimeType: mime });
       recorderRef.current = recorder;
       chunksRef.current = [];
-      recorder.ondataavailable = (e) => {
-        // Guard: ignore any chunks fired after stopListening() sets activeRef=false.
-        // Without this, the recorder's final pending chunk (100ms timeslice) arrives
-        // AFTER stopListening resets firstChunkSavedRef=false, re-sets it to true,
-        // and pollutes chunksRef — causing the NEXT session to drop its EBML header.
-        if (!activeRef.current) return;
-        if (e.data.size === 0) return;
-        if (!firstChunkSavedRef.current) {
-          // Always save the first chunk — it contains the WebM EBML container
-          // header that AudioContext.decodeAudioData and PyAV both require.
-          firstChunkSavedRef.current = true;
-          chunksRef.current.push(e.data);
-        } else if (speechStartedRef.current) {
-          chunksRef.current.push(e.data);
-        }
-      };
-      recorder.onstop = async () => {
-        if (!activeRef.current) return;
-        const hadSpeech = hadSpeechThisSegmentRef.current;
-        hadSpeechThisSegmentRef.current = false;
-        const savedChunks = [...chunksRef.current];
-        chunksRef.current = [];
-        speechStartedRef.current = false;
-        // Skip if no actual speech was detected (only the silent header chunk present)
-        if (!hadSpeech || savedChunks.length === 0) return;
-
-        console.log(`[VAD] onstop: building WAV from ${savedChunks.length} chunks (type=${savedChunks[0]?.type ?? '?'})`);
-        const wav = await buildWavBlob(savedChunks, 16000);
-        if (wav) {
-          console.log(`[VAD] WAV ready size=${wav.size} bytes — calling onSpeechEnd`);
-          if (onSpeechEnd) onSpeechEnd(wav);
-        } else {
-          // buildWavBlob failed (e.g. webm decode error in AudioContext)
-          // Send the raw container bytes so the backend can decode via ffmpeg/PyAV
-          const rawBlob = new Blob(savedChunks, { type: savedChunks[0]?.type ?? 'audio/webm' });
-          console.warn(`[VAD] buildWavBlob returned null — sending raw blob size=${rawBlob.size} type=${rawBlob.type}`);
-          if (onSpeechEnd) onSpeechEnd(rawBlob);
-        }
-      };
+      wireRecorder(recorder);
       recorder.start(100);
 
       // Set up analyser for VAD
@@ -302,7 +366,7 @@ export function useVAD({
         if (rms > silenceThreshold) {
           // Log once per speech segment — only when transitioning from silence to speech
           if (!speechStartedRef.current) {
-            console.log(`[VAD] Speech Detected — Recording... (rms=${rms.toFixed(4)}, threshold=${silenceThreshold})`);
+            console.log(`[useVAD] Speech Detected — Recording... (rms=${rms.toFixed(4)}, threshold=${silenceThreshold})`);
             hadSpeechThisSegmentRef.current = true;
             onSpeechStart?.();
           }
@@ -315,24 +379,10 @@ export function useVAD({
           silenceTimerRef.current = setTimeout(() => {
             silenceTimerRef.current = null;
             if (!activeRef.current) return;
-            console.log(`[VAD] Silence Detected — Sending to Backend... (gap=${silenceGapMs}ms)`);
-            // Speech segment ended — stop/restart recorder to get blob
+            console.log(`[VAD] Silence Detected — ending segment (gap=${silenceGapMs}ms) → stop → onstop → WAV`);
             const rec = recorderRef.current;
             if (rec && rec.state === 'recording') {
               rec.stop();
-              // Immediately restart
-              setTimeout(() => {
-                if (!activeRef.current) return;
-                const newRec = new MediaRecorder(stream, { mimeType: mime });
-                recorderRef.current = newRec;
-                firstChunkSavedRef.current = false;   // new recorder → new WebM header
-                hadSpeechThisSegmentRef.current = false;
-                chunksRef.current = [];
-                speechStartedRef.current = false;
-                newRec.ondataavailable = recorder.ondataavailable;
-                newRec.onstop = recorder.onstop;
-                newRec.start(100);
-              }, 50);
             }
           }, silenceGapMs);
         }
@@ -380,6 +430,133 @@ export function useVAD({
     }
   }, [isSupported, isRecording, onSpeechEnd, onSpeechStart, silenceThreshold, silenceGapMs]);
 
+  const stopManualAndSend = useCallback(() => {
+    manualCancelRef.current = false;
+    const rec = manualRecorderRef.current;
+    if (rec && rec.state === 'recording') {
+      rec.stop();
+    }
+  }, []);
+
+  const startManualRecording = useCallback(async () => {
+    if (!isSupported || isRecording) return;
+    if (activeRef.current) {
+      console.warn('[useVAD] startManualRecording ignored — VAD listening active');
+      return;
+    }
+    if (micNotFoundRef.current || permissionDeniedRef.current) {
+      console.log('[useVAD] Manual: not retrying — micNotFound or permissionDenied');
+      return;
+    }
+
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputCount = devices.filter((d) => d.kind === 'audioinput').length;
+      if (audioInputCount === 0) {
+        console.warn('[useVAD] Manual: 0 audioinput in enumerateDevices — proceeding to getUserMedia');
+      }
+    } catch (enumErr) {
+      console.warn('[useVAD] Manual: enumerateDevices failed:', enumErr);
+    }
+
+    try {
+      console.log('[useVAD] Manual: requesting microphone...');
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, sampleRate: { ideal: 16000 }, echoCancellation: true, noiseSuppression: true },
+      });
+      manualStreamRef.current = stream;
+      manualChunksRef.current = [];
+      manualCancelRef.current = false;
+      manualActiveRef.current = true;
+
+      for (const track of stream.getAudioTracks()) {
+        track.addEventListener(
+          'ended',
+          () => {
+            if (!manualActiveRef.current) return;
+            console.debug('[useVAD] Manual: track ended — stopping');
+            manualCancelRef.current = true;
+            try {
+              manualRecorderRef.current?.stop();
+            } catch {
+              /* ignore */
+            }
+          },
+          { once: true },
+        );
+      }
+
+      const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : 'audio/webm';
+
+      const recorder = new MediaRecorder(stream, { mimeType: mime });
+      manualRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (e) => {
+        if (!manualActiveRef.current) return;
+        if (e.data.size > 0) manualChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        const cancelled = manualCancelRef.current;
+        manualCancelRef.current = false;
+        const chunks = [...manualChunksRef.current];
+        manualChunksRef.current = [];
+        manualStreamRef.current?.getTracks().forEach((t) => t.stop());
+        manualStreamRef.current = null;
+        manualRecorderRef.current = null;
+        manualActiveRef.current = false;
+        setIsRecording(false);
+        window.dispatchEvent(new CustomEvent('voice:mic:stopped'));
+
+        if (cancelled || chunks.length === 0) {
+          if (cancelled) console.log('[useVAD] Manual: cancelled — no upload');
+          return;
+        }
+
+        const wav = await buildWavBlob(chunks, 16000);
+        if (wav) {
+          console.log(`[useVAD] Manual: WAV ready — onSpeechEnd | ${wav.size} bytes`);
+          onSpeechEnd?.(wav);
+        } else {
+          const raw = new Blob(chunks, { type: chunks[0]?.type ?? 'audio/webm' });
+          console.warn('[useVAD] Manual: buildWavBlob failed — sending raw blob');
+          onSpeechEnd?.(raw);
+        }
+      };
+
+      recorder.start(100);
+      setIsRecording(true);
+      window.dispatchEvent(new CustomEvent('voice:mic:started'));
+      console.log('[useVAD] Manual: recording started');
+    } catch (err: unknown) {
+      manualActiveRef.current = false;
+      setIsRecording(false);
+      const e = err as { name?: string; message?: string };
+      if (e?.name === 'NotFoundError' || e?.message?.includes('device not found')) {
+        console.warn('[useVAD] Manual: no microphone');
+        setMicNotFound(true);
+        micNotFoundRef.current = true;
+        return;
+      }
+      if (e?.name === 'NotAllowedError' || e?.name === 'PermissionDeniedError') {
+        console.warn('[useVAD] Manual: permission denied');
+        setPermissionDenied(true);
+        permissionDeniedRef.current = true;
+        return;
+      }
+      if (e?.name === 'SecurityError') {
+        console.error('[useVAD] Manual: SecurityError — HTTPS or localhost required');
+        setPermissionDenied(true);
+        permissionDeniedRef.current = true;
+        return;
+      }
+      console.error('[useVAD] Manual: unexpected error', e?.name, e?.message);
+      throw err;
+    }
+  }, [isSupported, isRecording, onSpeechEnd]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -396,5 +573,15 @@ export function useVAD({
     console.log('[useVAD] resetPermissionDenied — refs cleared, ready to retry');
   }, []);
 
-  return { isRecording, startListening, stopListening, isSupported, micNotFound, permissionDenied, resetPermissionDenied };
+  return {
+    isRecording,
+    startListening,
+    stopListening,
+    startManualRecording,
+    stopManualAndSend,
+    isSupported,
+    micNotFound,
+    permissionDenied,
+    resetPermissionDenied,
+  };
 }

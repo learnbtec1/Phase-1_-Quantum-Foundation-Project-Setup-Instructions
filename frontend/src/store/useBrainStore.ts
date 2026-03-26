@@ -41,6 +41,8 @@ export interface BrainState {
   // Emotional state
   emotionLabel:       EmotionLabel;
   pad:                PADVector;
+  /** User / listener engagement PAD (VAD, future SER) — blended into `pad` in processFrame. */
+  userPad:            PADVector | null;
 
   // LLM frame state
   lastFrame:          AgentFrame | null;
@@ -89,6 +91,12 @@ export interface BrainState {
 
   /** Reset all state to initial values. */
   reset: () => void;
+
+  /**
+   * V20 — apply emotion/PAD immediately from a normalized WS frame (before processFrame).
+   * Keeps embodiment in sync when the same tick also runs full processFrame after.
+   */
+  applyStreamingEmbodiment: (emotionLabel: EmotionLabel, padOverride?: PADVector) => void;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -153,15 +161,25 @@ function padIntensity(pad: PADVector): number {
 const MAX_HISTORY      = 20;
 const MAX_EMOTION_MEM  = 50;
 
+function blendPad(a: PADVector, b: PADVector, wB: number): PADVector {
+  const wA = 1 - wB;
+  return {
+    pleasure:  a.pleasure * wA + b.pleasure * wB,
+    arousal:   a.arousal * wA + b.arousal * wB,
+    dominance: a.dominance * wA + b.dominance * wB,
+  };
+}
+
 // ─── Initial state ────────────────────────────────────────────────────────────
 
 const INITIAL: Omit<BrainState,
-  | 'setTalking' | 'setThinking' | 'setPhysical'
-  | 'pushTurn' | 'processFrame' | 'interrupt' | 'reset'
+  | 'setTalking' | 'setThinking' | 'setPhysical' | 'setUserPad'
+  | 'pushTurn' | 'processFrame' | 'interrupt' | 'reset' | 'applyStreamingEmbodiment'
   | 'recordEmotionalMoment' | 'addImportantMoment' | 'learnInterest'
 > = {
   emotionLabel:       'neutral',
   pad:                { ...DEFAULT_PAD },
+  userPad:            null,
   lastFrame:          null,
   currentAction:      null,
   talking:            false,
@@ -186,6 +204,8 @@ export const useBrainStore = create<BrainState>()(
       physical: { ...s.physical, ...v },
     })),
 
+    setUserPad: (pad) => set({ userPad: pad }),
+
     pushTurn: (turn) => set(s => {
       const entry: ConversationTurn = { ...turn, ts: Date.now() };
       const history = [...s.conversationHistory, entry];
@@ -196,10 +216,21 @@ export const useBrainStore = create<BrainState>()(
       };
     }),
 
+    applyStreamingEmbodiment: (emotionLabel, padOverride) => {
+      const pad = padOverride ?? EMOTION_TO_PAD[emotionLabel] ?? DEFAULT_PAD;
+      set({ emotionLabel, pad: { ...pad } });
+    },
+
     processFrame: (frame) => {
       const emotionLabel: EmotionLabel =
         EMOTION_TO_LABEL[frame.emotion as string] ?? 'neutral';
-      const pad = EMOTION_TO_PAD[emotionLabel] ?? DEFAULT_PAD;
+      let pad = EMOTION_TO_PAD[emotionLabel] ?? DEFAULT_PAD;
+      const { userPad } = get();
+      if (frame.user_pad) {
+        pad = blendPad(pad, frame.user_pad, 0.38);
+      } else if (userPad) {
+        pad = blendPad(pad, userPad, 0.35);
+      }
 
       // NOTE: currentAction is intentionally NOT derived here.
       // AgentDirector sub-3 (currentAction) would double-fire with sub-4 (lastFrame).
@@ -256,6 +287,7 @@ export const useBrainStore = create<BrainState>()(
       ...INITIAL,
       // Re-create objects so references change (triggers subscriptions)
       pad:                { ...DEFAULT_PAD },
+      userPad:            null,
       physical:           { isListening: false },
       conversationHistory: [],
       emotionalMemory:    [],

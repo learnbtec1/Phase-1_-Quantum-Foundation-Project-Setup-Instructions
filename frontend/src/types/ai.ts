@@ -58,6 +58,17 @@ export interface AgentFrame {
   voice:               { pitch: number; rate: number };
   /** Thinking / reaction delay in milliseconds. */
   thinking_time_ms:    number;
+  /**
+   * Optional user-side PAD from backend (e.g. future sentiment / SER).
+   * When set, BrainStore blends with avatar PAD for independent affect.
+   */
+  user_pad?:           PADVector;
+  /**
+   * True when the WS frame included a non-empty LLM `performance` array.
+   * AgentDirector must not infer body gestures from legacy action text,
+   * GestureEngine, emotion contracts, or co-speech — only `avatar:performance` cues apply.
+   */
+  gesturesFromStructuredPerformance?: boolean;
 }
 
 // ─── Behavior output ───────────────────────────────────────────────────────────
@@ -69,6 +80,8 @@ export interface AgentFrame {
 export interface BehaviorOutput {
   /** Gesture type string (e.g. 'openHand', 'point', 'idle'). */
   gesture:             string;
+  /** Face / rules-engine expression hint (e.g. 'happy', 'strict'). */
+  expression?:       string;
   /** Gesture intensity (0–1.5). */
   gestureIntensity?:   number;
   /** Gesture duration in milliseconds. */

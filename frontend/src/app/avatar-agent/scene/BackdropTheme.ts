@@ -4,14 +4,14 @@
  */
 import * as THREE from 'three';
 
-// ── Palette ──────────────────────────────────────────────────────────────────
+// ── Palette — بني دافئ يقترب من خشب/جدران مكتب (مثل صورة Eduverse) ────────────
 export const ROOM_PALETTE = {
-  backWall:  '#1B2432',
-  leftWall:  '#182030',
-  rightWall: '#182030',
+  backWall:  '#6B5344',
+  leftWall:  '#5C4336',
+  rightWall: '#5C4336',
   floor:     '#121A26',
-  trims:     '#0E141C',
-  ceiling:   '#101820',
+  trims:     '#3D2E26',
+  ceiling:   '#4A3A32',
 } as const;
 
 export type RoomPalette = typeof ROOM_PALETTE;

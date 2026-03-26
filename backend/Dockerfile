@@ -1,6 +1,7 @@
 # ── Stage 1: dependency build ────────────────────────────────────────────────
-# Heavy build tools stay in this stage; only the installed packages are copied.
-FROM python:3.10-slim AS builder
+# bullseye = Debian 11 with OpenSSL 1.1.x — required by Azure Speech SDK 1.38
+# (Debian 12/13 ships OpenSSL 3.x which triggers Error 27 in the SDK's HTTP singleton)
+FROM python:3.10-slim-bullseye AS builder
 
 WORKDIR /install
 
@@ -15,18 +16,21 @@ RUN pip install --no-cache-dir --prefix=/install/pkgs -r requirements.txt
 
 
 # ── Stage 2: runtime image ───────────────────────────────────────────────────
-FROM python:3.10-slim
+FROM python:3.10-slim-bullseye
 
 WORKDIR /app
 
 # Only runtime system libs — no compiler, no headers
+# libssl1.1 provides OpenSSL 1.1.x needed by Azure Speech SDK on Debian 11
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
         ffmpeg \
         ca-certificates \
         openssl \
+        libssl1.1 \
         libasound2 \
         libgomp1 \
+    && update-ca-certificates --fresh \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy compiled packages from builder
@@ -39,7 +43,8 @@ ENV PYTHONIOENCODING=utf-8 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
-    SSL_CERT_DIR=/etc/ssl/certs
+    SSL_CERT_DIR=/etc/ssl/certs \
+    OPENSSL_CONF=/etc/ssl/openssl.cnf
 
 # Copy application source
 COPY . .
