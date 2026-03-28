@@ -56,6 +56,24 @@ e:\Phase 1_ Quantum Foundation Project Setup Instructions\
 
 ---
 
+## ✅ تحديث سريع — جلسة 2026-03-28 (Avatar Feet + Sub-floor)
+
+### المشاكل
+- عودة مشكلة اتجاه القدمين (Feet up) في بعض مسارات الوقوف.
+- هبوط الأفاتار أحياناً تحت أرضية الغرفة أثناء الوقوف/المشي.
+
+### الإصلاحات
+- تم اعتماد استرجاع bind-pose للجزء السفلي في الوقوف عبر `resetLowerBodyToIdle()` بدل فرض زوايا صفرية عامة.
+- أضيفت حماية جديدة `V122 standing Y guard clamp` داخل `useFrame` في `AvatarCanvas.tsx`:
+  - تمنع نزول `group.position.y` تحت baseline الوقوف (`ROOM_BOUNDS.floorY + yOffset + footOffset - 0.01`).
+  - حماية أحادية الاتجاه (للأسفل فقط) حتى لا تكسر التنفس/الحركة الطبيعية.
+
+### ملفات الجلسة
+- `frontend/src/app/avatar-agent/AvatarCanvas.tsx`
+- `docs/AVATAR_FEET_AND_SUBFLOOR_FIX_V122.md`
+
+---
+
 ## ✅ المنجز الكامل — الجلسة الأخيرة (ما بعد 2026-03-14): Mic Architecture + TS Fixes + bfcache
 
 ### ملفات جديدة أُنشئت
