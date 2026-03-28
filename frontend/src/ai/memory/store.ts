@@ -47,6 +47,9 @@ const GESTURE_COOLDOWNS_MS: Record<string, number> = {
   think:     3_250,
   peace:     3_500,
   agree:     2_750,
+  /** V50 — performance / bridge tokens */
+  thumbUp:   1_200,
+  beckon:    1_200,
 };
 const _lastGestureTime = new Map<string, number>();
 
@@ -74,6 +77,11 @@ export function getLastGestureLog(): string[] {
 export interface GestureCooldownOpts {
   /** Backend `action` / gesture field explicitly requests this token — allow closer repeats. */
   explicitActionToken?: string;
+  /**
+   * V50 — performance tags / explicit LLM gesture: shorten consecutive-repeat window to 1.5s
+   * (was up to 3s for non–point/openHand) so back-to-back AI cues are not swallowed.
+   */
+  fromAI?: boolean;
 }
 
 /**
@@ -100,8 +108,11 @@ export function checkGestureCooldown(gestureType: string, opts?: GestureCooldown
     && (explicit === gestureType
       || explicit.includes(gestureType)
       || gestureType.includes(explicit));
-  const consecutiveMinMs =
-    gestureType === 'openHand' || gestureType === 'point' ? 1_200 : 3_000;
+  const consecutiveMinMs = opts?.fromAI
+    ? 1_500
+    : gestureType === 'openHand' || gestureType === 'point'
+      ? 1_200
+      : 3_000;
   if (
     !explicitDemands
     && _gestureLog.length > 0

@@ -11,7 +11,7 @@ let _cachedVoiceUri: string | null = null;
 const MALE_HINTS =
   /omar|taim|male|hamed|hamid|naayf|khalid|mohammed|محمد|ahmad|ahmed|zayd|zaid|fadl|mamdouh|riadh|maged/i;
 const FEMALE_HINTS =
-  /female|sana|layla|maysoon|noura|salma|dalia|zaynab|amina|lina|hala|maram|فاطمة|هدى/i;
+  /female|sana|layla|maysoon|noura|salma|dalia|zaynab|amina|lina|hala|maram|hoda|هدى|فاطمة|زينة|مريم|لمياء|amal|amira/i;
 
 export interface PickWebSpeechVoiceOptions {
   /** BCP-47 tag, e.g. ar-JO, en-US */

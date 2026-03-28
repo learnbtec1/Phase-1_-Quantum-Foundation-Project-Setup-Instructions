@@ -21,6 +21,7 @@
  */
 import React, { useMemo } from 'react';
 import * as THREE from 'three';
+import { readRugWalkSurfaceYExtraEnv } from '@/config/avatar';
 import { ROOM_PALETTE, getRoomMaterial, getNoiseNormalMap } from './BackdropTheme';
 
 // ── Warm wood parquet (square tiles, canvas-generated — no external image) ─
@@ -219,17 +220,117 @@ export function RoomShell({
   );
 }
 
-/** Static world bounds used by physics system */
-export const ROOM_BOUNDS = {
-  /**
-   * أرض المشهد (متر). تُضبط لمحاذاة أرضية الباركيه/الشبكة مع أرضية غرفة صورة Eduverse.
-   * (قيمة سالبة = خفض المشهد 3D ليتطابق مع منظور الصورة.)
-   */
-  /** محاذاة مع أرضية صورة Eduverse — خفّض القيمة إذا بقي المشهد “عالياً” عن الخلفية */
-  floorY:     -2.95,
-  ceilY:      5.0,
-  minX:      -3.0,
-  maxX:       3.0,
-  minZ:      -5.0,
-  maxZ:       3.0,
-} as const;
+/** Default snapshot (reset / docs). Mutable `ROOM_BOUNDS` starts as a copy. */
+export const ROOM_BOUNDS_DEFAULT = {
+  floorY: -2.95,
+  ceilY:  5.0,
+  minX:  -3.0,
+  maxX:   3.0,
+  minZ:  -5.0,
+  maxZ:   3.0,
+};
+
+export type RoomBounds = typeof ROOM_BOUNDS_DEFAULT;
+
+/**
+ * World bounds — mutable so V55 can align floor + playable XZ to the carpet mesh AABB.
+ * Physics, clamping, and foot–floor calibration read this object.
+ */
+export const ROOM_BOUNDS: RoomBounds = { ...ROOM_BOUNDS_DEFAULT };
+
+/**
+ * Apply carpet / floor mesh world-space AABB: walking surface at max.y, playable XZ from min/max.
+ *
+ * **Walk surface (COGNI / `__COGNI_SUB_FLOOR_FIX_REPORT__.md`):**
+ * `ROOM_BOUNDS.floorY = carpetWorldBox.max.y + readRugWalkSurfaceYExtraEnv()` (default extra **0.10** m).
+ *
+ * Prefer {@link applyCarpetFloorYFromWorldBox} for gameplay XZ-default path; `AvatarCanvas` uses GroundLock
+ * `tryApplyFloorY` with the same `max.y + extra` formula via `RUG_WALK_SURFACE_Y_EXTRA`.
+ */
+export function applyRoomBoundsFromCarpetWorldBox(
+  worldBox: THREE.Box3,
+  opts?: { ceilY?: number; xzMargin?: number },
+): void {
+  if (worldBox.isEmpty()) return;
+  const m = opts?.xzMargin ?? 0.08;
+  let minX = worldBox.min.x + m;
+  let maxX = worldBox.max.x - m;
+  let minZ = worldBox.min.z + m;
+  let maxZ = worldBox.max.z - m;
+  if (maxX - minX < 0.2) {
+    const c = (worldBox.min.x + worldBox.max.x) / 2;
+    minX = c - 0.1;
+    maxX = c + 0.1;
+  }
+  if (maxZ - minZ < 0.2) {
+    const c = (worldBox.min.z + worldBox.max.z) / 2;
+    minZ = c - 0.1;
+    maxZ = c + 0.1;
+  }
+  ROOM_BOUNDS.floorY = worldBox.max.y + readRugWalkSurfaceYExtraEnv();
+  ROOM_BOUNDS.minX = minX;
+  ROOM_BOUNDS.maxX = maxX;
+  ROOM_BOUNDS.minZ = minZ;
+  ROOM_BOUNDS.maxZ = maxZ;
+  if (opts?.ceilY !== undefined) {
+    ROOM_BOUNDS.ceilY = opts.ceilY;
+  }
+}
+
+/** V56 — ignore sub-centimeter AABB noise so `floorY` cannot drift frame-to-frame. */
+export const CARPET_FLOOR_Y_TRIVIAL_DELTA = 0.05;
+
+/**
+ * Align rug walk height to the carpet mesh without changing playable XZ — keeps the full default room
+ * footprint for clamps, physics, and backdrop sizing (avoids carpet↔state remeasure loops).
+ *
+ * @returns `true` if `ROOM_BOUNDS` was updated; `false` if the proposed floor matches the current
+ *   value within {@link CARPET_FLOOR_Y_TRIVIAL_DELTA} (prevents micro-creep).
+ */
+export function applyCarpetFloorYFromWorldBox(worldBox: THREE.Box3): boolean {
+  if (worldBox.isEmpty()) return false;
+  const proposed = worldBox.max.y + readRugWalkSurfaceYExtraEnv();
+  if (Math.abs(proposed - ROOM_BOUNDS.floorY) < CARPET_FLOOR_Y_TRIVIAL_DELTA) {
+    return false;
+  }
+  ROOM_BOUNDS.floorY = proposed;
+  ROOM_BOUNDS.minX = ROOM_BOUNDS_DEFAULT.minX;
+  ROOM_BOUNDS.maxX = ROOM_BOUNDS_DEFAULT.maxX;
+  ROOM_BOUNDS.minZ = ROOM_BOUNDS_DEFAULT.minZ;
+  ROOM_BOUNDS.maxZ = ROOM_BOUNDS_DEFAULT.maxZ;
+  return true;
+}
+
+export function getRoomZCenter(b?: RoomBounds): number {
+  const r = b ?? ROOM_BOUNDS;
+  return (r.maxZ + r.minZ) / 2;
+}
+
+/** V54/V55 — stand near room center, slightly toward −Z (desk / glass), clamped to carpet. */
+export function getDefaultStandXZ(b?: RoomBounds, margin = 0.35): { x: number; z: number } {
+  const r = b ?? ROOM_BOUNDS;
+  const zc = (r.minZ + r.maxZ) / 2;
+  const xc = (r.minX + r.maxX) / 2;
+  const z = THREE.MathUtils.clamp(zc - 1.0, r.minZ + margin, r.maxZ - margin);
+  const x = THREE.MathUtils.clamp(xc, r.minX + margin, r.maxX - margin);
+  return { x, z };
+}
+
+export function getCameraPosZ(b?: RoomBounds, offset = 3.2): number {
+  return (b ?? ROOM_BOUNDS).maxZ + offset;
+}
+
+/** Patrol loop: small rectangle around default stand, clamped to playable bounds. */
+export function buildPatrolWaypoints(b?: RoomBounds): [number, number][] {
+  const r = b ?? ROOM_BOUNDS;
+  const { x, z } = getDefaultStandXZ(r);
+  const margin = 0.35;
+  const maxDx = Math.max(0.15, Math.min(1.2, (r.maxX - r.minX) / 2 - margin));
+  const maxDz = Math.max(0.12, Math.min(0.45, (r.maxZ - r.minZ) / 2 - margin));
+  return [
+    [x - maxDx, z - maxDz],
+    [x + maxDx, z - maxDz],
+    [x + maxDx, z + maxDz],
+    [x - maxDx, z + maxDz],
+  ];
+}

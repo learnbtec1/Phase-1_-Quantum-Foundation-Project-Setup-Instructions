@@ -448,6 +448,11 @@ async def synthesize_edge_tts_mp3(
             last_err = e
             logger.warning("[EdgeTTS] voice %s failed: %s", vn, e)
 
+    logger.error(
+        "[TTS][edge-tts] all voice fallbacks exhausted — type=%s detail=%s",
+        type(last_err).__name__ if last_err else "unknown",
+        last_err,
+    )
     raise RuntimeError(f"edge-tts: all voices failed ({last_err!s})")
 
 

@@ -3,7 +3,7 @@
  * Body:    { text: string }
  * Returns: { audio: string }  — base64-encoded MP3 (browser AudioContext decodable)
  *
- * Uses OpenAI TTS (tts-1 / shimmer) — best quality for Arabic.
+ * Uses OpenAI TTS (tts-1) — default voice aligns with Cogni (male-presenting), not Verona-era shimmer.
  * Falls back to a minimal silent MP3 if OPENAI_API_KEY is missing or upstream fails,
  * so V20 animations continue running without a hard error.
  */
@@ -31,6 +31,8 @@ export async function POST(req: NextRequest) {
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
+    /** OpenAI voices: onyx/echo = male-presenting; shimmer/nova = female (avoid for Cogni). */
+    const openaiVoice = (process.env.OPENAI_TTS_VOICE || 'onyx').trim() || 'onyx';
     if (!apiKey) {
       console.warn('[voice-arabic] OPENAI_API_KEY not set — returning silent audio');
       return NextResponse.json({ audio: SILENT_MP3_B64 });
@@ -49,7 +51,7 @@ export async function POST(req: NextRequest) {
         },
         body: JSON.stringify({
           model           : 'tts-1',
-          voice           : 'shimmer',   // warm female — works well for Arabic
+          voice           : openaiVoice,
           input           : text,
           response_format : 'mp3',
           speed           : 0.95,

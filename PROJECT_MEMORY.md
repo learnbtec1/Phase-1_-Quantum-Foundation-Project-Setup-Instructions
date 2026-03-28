@@ -74,6 +74,31 @@ e:\Phase 1_ Quantum Foundation Project Setup Instructions\
 
 ---
 
+## ✅ تحديث سريع — جلسة 2026-03-28 (Final Action Plan: VRM + Gestures + Bind Mask)
+
+### المشاكل
+- 404 أولي على `teach.vrm` بسبب default prop قديم في `AvatarCanvas`.
+- بعض الإيماءات VRMA كانت تُحجب أثناء الجلوس/المشي.
+- حاجة إلى قناع ثابت للجزء السفلي بعد تحديث الميكسَر كل فريم.
+
+### الإصلاحات
+- تم تغيير default `vrmUrl` في `AvatarCanvas` إلى `/models/cogni-avatar.vrm` (الموجود فعلياً).
+- تم ترقية وظيفة القناع إلى `resetLowerBodyToBind()` مع alias محافظ `resetLowerBodyToIdle`.
+- تم استدعاء `resetLowerBodyToBind()` مباشرة بعد `mixerRef.current.update(safeDelta)` داخل `useFrame` كل فريم.
+- تمت إزالة حجب `playCogniAnimation()` أثناء الجلوس/المشي.
+- تم إتاحة `relax/look/celebration/idle` عبر VRMA حتى في وضع الجلوس.
+- تمت إضافة/تثبيت متغيرات البيئة في `frontend/.env.local`:
+  - `NEXT_PUBLIC_RUG_WALK_SURFACE_Y_EXTRA=0.10`
+  - `AZURE_SPEECH_KEY=`
+  - `AZURE_SPEECH_REGION=eastus`
+
+### تحقق سريع
+- `docker compose up -d --build` تم بنجاح للـ backend/frontend.
+- `GET /api/health` عاد `ok=true` وكل المؤشرات الأساسية `true`.
+- `POST /api/v1/tts-with-timing` نجح (`provider=azure`, `format=wav`, حفظ `tts.wav`).
+
+---
+
 ## ✅ المنجز الكامل — الجلسة الأخيرة (ما بعد 2026-03-14): Mic Architecture + TS Fixes + bfcache
 
 ### ملفات جديدة أُنشئت

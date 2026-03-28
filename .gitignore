@@ -1,36 +1,61 @@
-node_modules
-.next
+# =================================================================
+# 🚨 SECURITY & ENVIRONMENT VARIABLES (السيادة والأمن القومي للمشروع)
+# =================================================================
 .env
 .env.*
 !.env.example
 backend/.env
-*.log
-.DS_Store
-Thumbs.db
-dist
-build
-out
+frontend/.env
+*.pem
+*.key
+
+# =================================================================
+# 📦 NODE.JS & NEXT.JS (الواجهة الأمامية)
+# =================================================================
+node_modules/
+.next/
+out/
+build/
+dist/
+.turbo/
+.vercel/
 *.tsbuildinfo
-.turbo
-.vercel
-__pycache__
-*.pyc
-.venv
-venv
+
+# =================================================================
+# 🐍 PYTHON & VIRTUAL ENVIRONMENTS (الخادم الخلفي)
+# =================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
 venv311/
 backend/venv311/
 
-# Local runtime data (keep on disk, do not commit)
+# =================================================================
+# 🗄️ LOCAL RUNTIME DATA & DATABASES (قواعد البيانات والملفات المؤقتة)
+# =================================================================
 backend/data/postgres/
 backend/data/audio/
 backend/data/analytics/
 backend/data/store/
+backend/data/chroma_cogni/
 backend/data/btec-bus/*.pdf
 backend/data/btec-bus/*.docx
-backend/data/chroma_cogni/
 tts.wav
+*.log
 
-# Local / vendor bundles (do not ship in repo)
+# =================================================================
+# 🖥️ OS & EDITOR GENERATED FILES (ملفات النظام والمحررات)
+# =================================================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# =================================================================
+# 🗃️ VENDOR BUNDLES & LARGE ASSETS (الملفات الضخمة غير المدعومة في GitHub)
+# =================================================================
 HabibiJordan/
 frontend/public/assets/*.exe
 *.winmd

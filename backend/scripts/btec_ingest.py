@@ -304,6 +304,9 @@ def main() -> int:
     chroma_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        from app.sqlite_chroma_compat import ensure_modern_sqlite3_for_chroma
+
+        ensure_modern_sqlite3_for_chroma()
         import chromadb
         from langchain_community.document_loaders import PyPDFLoader, UnstructuredWordDocumentLoader
         from langchain_openai import OpenAIEmbeddings

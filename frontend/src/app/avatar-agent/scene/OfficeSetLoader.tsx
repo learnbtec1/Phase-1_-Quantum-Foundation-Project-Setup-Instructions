@@ -26,7 +26,7 @@ import {
   Box3, BoxGeometry, Color, DoubleSide, Group, Mesh,
   MeshStandardMaterial, Object3D, Quaternion, Scene, Vector2, Vector3,
 } from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { useThree } from '@react-three/fiber';
 import { setDeskScene, computeChairAnchor } from '../physics/WorldColliders';
 import { ROOM_BOUNDS } from './RoomShell';
@@ -313,6 +313,36 @@ function setupOffice(
   // Always add the processed (scaled + centred) office group.
   // Never add raw root — it would bypass scaleFix and auto-centering.
   scene.add(office!);
+
+  // ── V55 — carpet / floor mesh → world AABB for playable bounds (largest horizontal footprint) ──
+  {
+    const NAME_FLOOR = /carpet|floor|ground|rug|parquet/i;
+    let best: { mesh: Mesh; area: number; name: string } | null = null;
+    office!.updateMatrixWorld(true);
+    office!.traverse((o: Object3D) => {
+      if (!(o as Mesh).isMesh) return;
+      const mesh = o as Mesh;
+      const label = `${mesh.name} ${mesh.parent?.name ?? ''}`;
+      if (!NAME_FLOOR.test(label)) return;
+      mesh.updateMatrixWorld(true);
+      const bb = new Box3().setFromObject(mesh);
+      const sx = bb.max.x - bb.min.x;
+      const sz = bb.max.z - bb.min.z;
+      const area = sx * sz;
+      if (!best || area > best.area) best = { mesh, area, name: mesh.name };
+    });
+    if (best) {
+      const wbox = new Box3().setFromObject(best.mesh);
+      console.info(
+        '%c[V55] OfficeSetLoader carpet/floor pick',
+        'color:#22d3ee;font-weight:bold',
+        { name: best.name, worldMin: wbox.min.toArray(), worldMax: wbox.max.toArray() },
+      );
+      window.dispatchEvent(new CustomEvent('room:carpetBounds', { detail: { box: wbox.clone() } }));
+    } else if (debug) {
+      console.info('[V55] OfficeSetLoader — no mesh matched carpet|floor|ground|rug|parquet');
+    }
+  }
 
   // ── Back-wall panel hider (world-space, post-scale) ──────────────────
   // After scene.add, hide large flat panels at the far back of the room so

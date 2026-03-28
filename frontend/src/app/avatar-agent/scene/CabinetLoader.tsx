@@ -13,7 +13,7 @@ import {
   Box3, Color, DoubleSide, Group, Mesh,
   MeshStandardMaterial, Object3D, Vector3,
 } from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { useThree } from '@react-three/fiber';
 import { ROOM_BOUNDS } from './RoomShell';
 

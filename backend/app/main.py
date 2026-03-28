@@ -42,6 +42,7 @@ from app.api.v1.endpoints.digital_human_api import router as digital_human_route
 from app.api.v1.endpoints.stripe_webhook import router as stripe_webhook_router
 from app.api.v1.endpoints.saml_auth import router as saml_auth_router
 from app.api.memory import router as memory_router
+from app.api.tts_v110 import router as tts_v110_router  # V110: /health/tts  /tts/speak
 
 from app.core.config import settings
 from app.core.middleware_request_id import RequestIdMiddleware
@@ -93,8 +94,8 @@ async def _tts_ping_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app_instance):
-    """Pre‑warm TTS and STT models on startup and initialize Azure TTS service."""
-    import asyncio
+    """Initialize services on startup. Heavy model loads (Kokoro / Whisper) run in the background
+    so uvicorn can bind and pass Docker healthchecks while Hugging Face downloads complete."""
     loop = asyncio.get_running_loop()
 
     # 0) Re-patch logging handlers that uvicorn registered AFTER our module-top
@@ -105,21 +106,30 @@ async def lifespan(app_instance):
     except Exception:
         pass
 
-    # 1) Kokoro TTS (local)
-    try:
-        from app.services.kokoro_tts import _init_kokoro
-        await loop.run_in_executor(None, _init_kokoro)
-        logger.info("Kokoro TTS pre‑warmed")
-    except Exception as e:
-        logger.warning("Kokoro pre‑warm failed: %s", e)
+    async def _warm_kokoro_bg() -> None:
+        try:
+            from app.services.kokoro_tts import _init_kokoro
 
-    # 2) Whisper STT (local)
-    try:
-        from app.services.whisper_stt import _init_whisper
-        await loop.run_in_executor(None, _init_whisper)
-        logger.info("Whisper STT pre‑warmed")
-    except Exception as e:
-        logger.warning("Whisper pre‑warm failed: %s", e)
+            await loop.run_in_executor(None, _init_kokoro)
+            logger.info("Kokoro TTS pre‑warmed (background)")
+        except Exception as e:
+            logger.warning("Kokoro pre‑warm failed: %s", e)
+
+    async def _warm_whisper_bg() -> None:
+        try:
+            from app.services.whisper_stt import _init_whisper
+
+            await loop.run_in_executor(None, _init_whisper)
+            logger.info("Whisper STT pre‑warmed (background)")
+        except Exception as e:
+            logger.warning("Whisper pre‑warm failed: %s", e)
+
+    # 1–2) Do not block startup: first Whisper download can exceed Docker healthcheck start_period.
+    _warm_tasks = [
+        asyncio.create_task(_warm_kokoro_bg()),
+        asyncio.create_task(_warm_whisper_bg()),
+    ]
+    app_instance.state.model_warmup_tasks = _warm_tasks
 
     # 3) Azure Neural TTS (cloud) – store in app.state for dependency injection
     try:
@@ -161,6 +171,8 @@ async def lifespan(app_instance):
 
     # Cleanup
     _ping_task.cancel()
+    for _t in getattr(app_instance.state, "model_warmup_tasks", []) or []:
+        _t.cancel()
     if hasattr(app_instance.state, "tts_service") and app_instance.state.tts_service:
         logger.info("Azure TTS service released (garbage collected).")
 
@@ -214,6 +226,7 @@ app.include_router(users_router, prefix="/api/v1")
 app.include_router(digital_human_router, prefix="/api/v1")
 app.include_router(stripe_webhook_router, prefix="/api/v1")
 app.include_router(saml_auth_router, prefix="/api/v1")
+app.include_router(tts_v110_router)  # V110 sovereign TTS — no prefix → /health/tts  /tts/speak
 
 
 @app.get("/api/health")

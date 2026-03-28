@@ -9,6 +9,12 @@ export interface PerformanceCue {
   blendshape?: string;
   intensity?: number;
   animation?: string;
+  /** V50 — `'left' | 'right' | 'both'` from LLM JSON when present */
+  side?: 'left' | 'right' | 'both';
+  /**
+   * V50 — duration in **seconds** (after normalize). Raw payload may be ms (≥100 → divided by 1000).
+   */
+  duration?: number;
 }
 
 export interface WordCue {
@@ -46,6 +52,12 @@ export function normalizePerformanceList(raw: unknown): PerformanceCue[] {
       inten = 0.5;
     }
     cue.intensity = Math.max(0, Math.min(1, inten));
+    const sd = o.side;
+    if (sd === 'left' || sd === 'right' || sd === 'both') cue.side = sd;
+    const durRaw = o.duration ?? o.duration_sec;
+    if (typeof durRaw === 'number' && Number.isFinite(durRaw) && durRaw > 0) {
+      cue.duration = durRaw >= 100 ? durRaw / 1000 : durRaw;
+    }
     out.push(cue);
   }
   return out;
@@ -81,7 +93,7 @@ export function startWordToDelayMs(
 
 export type ResolvedPerformance =
   | { kind: 'emotion'; emotion: string }
-  | { kind: 'gesture'; token: string }
+  | { kind: 'gesture'; token: string; side?: 'left' | 'right' | 'both' }
   | { kind: 'blendshape'; key: string; intensity: number };
 
 /**
@@ -111,31 +123,43 @@ export function resolvePerformanceCue(cue: PerformanceCue): ResolvedPerformance 
     return { kind: 'emotion', emotion: emoMap[inner] ?? 'neutral' };
   }
 
-  const anim = (cue.animation || '').toLowerCase();
-  const gMap: Record<string, string> = {
-    point_forward: 'point',
-    point: 'point',
-    explain_01: 'think',
-    explain: 'think',
-    wave: 'wave',
-    clap: 'clap',
-    open_hand: 'openHand',
-    cheer: 'cheer',
-    beckon: 'beckon',
+  const anim = (cue.animation || '').toLowerCase().replace(/\s+/g, '_');
+  const gMap: Record<string, { token: string; side?: 'left' | 'right' | 'both' }> = {
+    point_forward: { token: 'point' },
+    point: { token: 'point' },
+    point_left: { token: 'point', side: 'left' },
+    point_right: { token: 'point', side: 'right' },
+    open_hand: { token: 'openHand' },
+    open_hand_left: { token: 'openHand', side: 'left' },
+    open_hand_right: { token: 'openHand', side: 'right' },
+    explain_01: { token: 'think' },
+    explain: { token: 'think' },
+    thinking: { token: 'think' },
+    wave: { token: 'wave' },
+    clap: { token: 'clap' },
+    cheer: { token: 'cheer' },
+    beckon: { token: 'beckon' },
+    two_fingers: { token: 'peace' },
+    thumbs_up: { token: 'thumbUp' },
+    thumb_up: { token: 'thumbUp' },
   };
   if (anim && gMap[anim]) {
-    return { kind: 'gesture', token: gMap[anim] };
+    const g = gMap[anim];
+    return { kind: 'gesture', token: g.token, side: g.side ?? cue.side };
   }
   if (tag.startsWith('[GESTURE_')) {
-    if (tag.includes('POINT')) return { kind: 'gesture', token: 'point' };
-    if (tag.includes('EXPLAIN')) return { kind: 'gesture', token: 'think' };
-    if (tag.includes('WAVE')) return { kind: 'gesture', token: 'wave' };
-    if (tag.includes('CLAP')) return { kind: 'gesture', token: 'clap' };
-    if (tag.includes('OPEN')) return { kind: 'gesture', token: 'openHand' };
-    return { kind: 'gesture', token: 'openHand' };
+    if (tag.includes('POINT')) return { kind: 'gesture', token: 'point', side: cue.side };
+    if (tag.includes('EXPLAIN')) return { kind: 'gesture', token: 'think', side: cue.side };
+    if (tag.includes('WAVE')) return { kind: 'gesture', token: 'wave', side: cue.side };
+    if (tag.includes('CLAP')) return { kind: 'gesture', token: 'clap', side: cue.side };
+    if (tag.includes('OPEN')) return { kind: 'gesture', token: 'openHand', side: cue.side };
+    return { kind: 'gesture', token: 'openHand', side: cue.side };
   }
   if (anim) {
-    return { kind: 'gesture', token: gMap[anim] ?? 'openHand' };
+    console.warn(
+      `[performanceTags] Unknown performance animation "${cue.animation}" (tag=${cue.tag}) — falling back to openHand`,
+    );
+    return { kind: 'gesture', token: 'openHand', side: cue.side ?? 'right' };
   }
   return null;
 }

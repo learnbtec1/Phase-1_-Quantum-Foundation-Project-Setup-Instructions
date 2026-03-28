@@ -3,27 +3,27 @@
  *
  * Orchestrates the complete Phase 4 pipeline:
  *
- *   [Microphone] → useVAD → WebSocket → [Backend]
- *       → JSON AgentFrame → BrainStore.processFrame()
- *       → AgentDirector (gestures, expressions, head, voice)
- *       → PCM / MP3 audio from server or client /api/tts-with-timing
- *       → EmotionalMemoryManager (trajectory tracking)
+ * [Microphone] → useVAD → WebSocket → [Backend]
+ * → JSON AgentFrame → BrainStore.processFrame()
+ * → AgentDirector (gestures, expressions, head, voice)
+ * → PCM / MP3 audio from server or client /api/tts-with-timing
+ * → EmotionalMemoryManager (trajectory tracking)
  *
  * Key differences from useAvatarAgent:
- *   1. Drives useBrainStore.processFrame() for every AI reply, updating the
- *      full emotional state (PAD, emotionLabel, lastFrame).
- *   2. Delegates all body-language performances to AgentDirector (which
- *      reacts automatically to BrainStore subscription changes).
- *   3. Feeds EmotionalMemoryManager after each interaction for long-term
- *      trajectory tracking.
- *   4. Provides a clean sendText() API for text-only (non-VAD) input.
- *   5. Every text/audio frame carries COGNI_PERSONA.system_prompt for LLM consistency.
+ * 1. Drives useBrainStore.processFrame() for every AI reply, updating the
+ * full emotional state (PAD, emotionLabel, lastFrame).
+ * 2. Delegates all body-language performances to AgentDirector (which
+ * reacts automatically to BrainStore subscription changes).
+ * 3. Feeds EmotionalMemoryManager after each interaction for long-term
+ * trajectory tracking.
+ * 4. Provides a clean sendText() API for text-only (non-VAD) input.
+ * 5. Every text/audio frame carries COGNI_PERSONA.system_prompt for LLM consistency.
  *
  * Usage:
- *   const {
- *     isListening, toggleListening, sendText,
- *     isConnected, emotion, lastTranscript, lastReply, error,
- *   } = useAgentAgent();
+ * const {
+ * isListening, toggleListening, sendText,
+ * isConnected, emotion, lastTranscript, lastReply, error,
+ * } = useAgentAgent();
  */
 'use client';
 
@@ -41,10 +41,7 @@ import type { EmotionLabel, AgentFrame } from '@/types/ai';
 import { COGNI_PERSONA }                   from '@/config/personality';
 import { buildDeviceContextPayload }       from '@/lib/deviceContext';
 import { resolveSpeakRate, stopTTSGlobally } from '@/ai/io/tts';
-import {
-  getStableWebSpeechVoice,
-  ensureWebSpeechVoicesChangeHook,
-} from '@/ai/io/webSpeechVoice';
+// تم إزالة الاستيرادات الخاصة بالـ WebSpeechVoice لأننا لن نستخدمها بعد الآن.
 import {
   durationMsFromVisemeCues,
   estimateDialogueDurationMs,
@@ -423,7 +420,7 @@ export function useAgentAgent({
         if (!mountedRef.current) return;
         window.dispatchEvent(
           new CustomEvent('avatar:gesture', {
-            detail: { type: pl.gesture, side: 'right', duration: 2.2 },
+            detail: { type: pl.gesture, side: 'right', duration: 2.2, fromAI: true },
           }),
         );
         if (pl.emphasis === 'eyebrow') {
@@ -455,6 +452,8 @@ export function useAgentAgent({
     }
     serverTtsPlaybackActive = false;
     stopTTSGlobally();
+    
+    // إيقاف المتصفح الصوتي إن وجد
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
@@ -625,7 +624,14 @@ export function useAgentAgent({
     const frame = raw as Record<string, unknown>;
     const type  = (frame.type ?? '') as string;
 
-    console.log(`[useAgentAgent] WS frame type="${type}"`, frame);
+    // Dev-only; skip noisy / high-frequency frame types
+    if (
+      process.env.NODE_ENV === 'development'
+      && type !== 'heartbeat'
+      && type !== 'device_context_ack'
+    ) {
+      console.log(`[useAgentAgent] WS frame type="${type}"`, frame);
+    }
 
     switch (type) {
 
@@ -766,7 +772,7 @@ export function useAgentAgent({
 
         // 4. Audio output
         //    - PCM audio from backend → play directly (preferred)
-        //    - tts_unavailable or no audio → fall back to AgentDirector TTS
+        //    - tts_unavailable or no audio → Do NOT play browser TTS
         const contagion = frame.contagion as
           | { emotion?: string; intensity?: number; note?: string }
           | undefined;
@@ -789,16 +795,20 @@ export function useAgentAgent({
           if (type === 'tts_unavailable' && typeof window !== 'undefined') {
             window.dispatchEvent(
               new CustomEvent('cogni:tts-secondary-voice', {
-                detail: { message: 'Using secondary voice engine...', source: 'ws' },
+                detail: { message: 'Waiting for server audio...', source: 'ws' },
               }),
             );
           }
           lastTtsFallbackTextRef.current = dialogue;
           lastTtsFallbackAtRef.current = tsNow;
+          
           if (!perf.length) {
             scheduleCoSpeechForDialogue(dialogue, estimateDialogueDurationMs(dialogue));
           }
-          agentDirector.scheduleTTS(dialogue, emotionLabel);
+          
+          // 🚀 هُنا تم تعطيل استدعاء المتصفح الآلي للأبد! (No more window.speechSynthesis)
+          // agentDirector.scheduleTTS(dialogue, emotionLabel);
+          console.log('[useAgentAgent] tts_unavailable received. Browser fallback disabled. Waiting for backend audio.');
         }
 
         console.log(
@@ -841,8 +851,11 @@ export function useAgentAgent({
       }
 
       case 'heartbeat':
-        // Heartbeat frame received — update ping timer, no action needed
-        console.log('[useAgentAgent] Heartbeat frame received');
+        // Heartbeat — no action (omit per-frame log to reduce console noise)
+        break;
+
+      // ── Backend acknowledged device / context payload (no UI action) ───
+      case 'device_context_ack':
         break;
 
       case 'goal_update': {
@@ -965,7 +978,8 @@ export function useAgentAgent({
   const { isRecording, startListening: vadStart, stopListening: vadStop } = useVAD({
     lang,
     silenceThreshold: 0.03,
-    silenceGapMs:     700,
+    /** Longer pause before end-of-utterance so Cogni does not cut the user off mid-thought. */
+    silenceGapMs:     1500,
     onSpeechEnd: async (blob: Blob) => {
       console.log(
         '[useAgentAgent] VAD onSpeechEnd — blob',
@@ -973,9 +987,6 @@ export function useAgentAgent({
         'bytes',
         blob.type || '(no type)',
       );
-      // Full-duplex interrupt: send audio even if the avatar was speaking — backend
-      // cancels the LLM/TTS turn and replies to the new utterance. Stop local playback
-      // first to reduce speaker bleed (headphones recommended).
       if (isSpeakingRef.current) {
         console.log('[useAgentAgent] Interrupt: user spoke during avatar speech — stopping playback, sending audio');
         stopAllAudio();
@@ -993,7 +1004,6 @@ export function useAgentAgent({
         const payload = {
           type: 'audio',
           data: audioBase64,
-          /** Canonical key for LLM — same text as persona_init / tutor context */
           system_prompt: COGNI_PERSONA.systemPrompt,
           persona_system_prompt: COGNI_PERSONA.systemPrompt,
           persona: { id: COGNI_PERSONA.id, platform: COGNI_PERSONA.platformName },
@@ -1029,10 +1039,6 @@ export function useAgentAgent({
     }
   }, [isRecording]);
 
-  // ── Stable ref wrappers for vadStart / vadStop ─────────────────────────────
-  // The avatar:speak event handlers (useEffect below) need to call the latest
-  // vadStart/vadStop without them in the effect dependency array (adding them
-  // would re-register handlers on every isRecording change, risking double-fires).
   const _vadStartRef = useRef(vadStart);
   const _vadStopRef  = useRef(vadStop);
   _vadStartRef.current = vadStart;
@@ -1044,7 +1050,6 @@ export function useAgentAgent({
     if (isListeningRef.current) return;
     isListeningRef.current = true;
 
-    // Interrupt any ongoing speech before listening (prevents echo)
     stopAllAudio();
     agentDirector.interruptSpeech();
     useBrainStore.getState().setPhysical({ isListening: true });
@@ -1057,7 +1062,6 @@ export function useAgentAgent({
   const stopListening = useCallback((): void => {
     if (!isListeningRef.current) return;
     isListeningRef.current = false;
-    // Cancel any pending half-duplex auto-resume — the user explicitly stopped listening.
     wasListeningRef.current = false;
 
     vadStop();
@@ -1085,15 +1089,11 @@ export function useAgentAgent({
     }
 
     const trimmed = (text || '').trim();
-    /** لا تُسجَّل في BrainStore كرسالة مستخدم — تبقى تعليماً داخلياً للـ LLM فقط */
     const isInternalProactive = INTERNAL_SYSTEM_EVENT_PREFIX.test(trimmed);
     if (!isInternalProactive) {
       lastUserMoodRef.current = 'neutral';
     }
 
-    // One-shot: attach the BTEC grade snapshot from the assessment page (if any).
-    // The backend's process_text() injects it as a Debrief Context block so
-    // the avatar can say "أرى إنك حصلت على Merit في موضوع X…" naturally.
     const gradeSnapshot = _consumeLastGrade();
     const emotionalCtx = emotionalMemoryManager.getContextSummary();
     const payload = JSON.stringify({
@@ -1102,7 +1102,6 @@ export function useAgentAgent({
       lang,
       practice,
       ...(opts?.topicId != null ? { topic_id: opts.topicId } : {}),
-      /** Injected every turn so LLM stays aligned with Cogni / Eduverse even if persona_init raced */
       system_prompt: COGNI_PERSONA.systemPrompt,
       persona_system_prompt: COGNI_PERSONA.systemPrompt,
       persona: { id: COGNI_PERSONA.id, platform: COGNI_PERSONA.platformName },
@@ -1132,7 +1131,6 @@ export function useAgentAgent({
     }
   }, [lang]);
 
-  // FIX: Phase 3/4 — proactive silence question (30s + jitter), does not touch 3D scene
   const resetProactiveSilenceTimer = useCallback((): void => {
     if (typeof window === 'undefined') return;
     if (proactiveSilenceTimerRef.current) {
@@ -1186,7 +1184,7 @@ export function useAgentAgent({
     setLastDialogue('');
     setEmotion('neutral');
     setError(null);
-    setHasInitiated(false); // Allow one new proactive greeting after history reset
+    setHasInitiated(false); 
     if (proactiveSilenceTimerRef.current) {
       clearTimeout(proactiveSilenceTimerRef.current);
       proactiveSilenceTimerRef.current = null;
@@ -1194,17 +1192,10 @@ export function useAgentAgent({
     console.log('[useAgentAgent] History cleared');
   }, [stopAllAudio]);
 
-  // ── Avatar speaking tracker + Half-duplex VAD gate ────────────────────────
-  // PRIMARY HALF-DUPLEX ENFORCEMENT:
-  //   Start: pause the microphone the instant TTS begins — prevents the avatar
-  //          from hearing its own voice through the speakers (echo-interruption loop).
-  //   End:   restore the microphone 250 ms after TTS finishes so any residual
-  //          speaker echo has decayed before the next VAD analysis window opens.
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const onStart = (): void => {
       isSpeakingRef.current = true;
-      // Mute VAD the instant TTS playback begins.
       if (isListeningRef.current) {
         wasListeningRef.current = true;
         _vadStopRef.current();
@@ -1213,7 +1204,6 @@ export function useAgentAgent({
     };
     const onEnd = (): void => {
       isSpeakingRef.current = false;
-      // Re-enable VAD after a 250 ms settling delay once TTS finishes.
       if (wasListeningRef.current) {
         wasListeningRef.current = false;
         setTimeout(() => {
@@ -1232,9 +1222,8 @@ export function useAgentAgent({
       window.removeEventListener('avatar:speak:start', onStart);
       window.removeEventListener('avatar:speak:end',   onEnd);
     };
-  }, []); // intentionally empty — reads _vadStartRef / _vadStopRef for latest values
+  }, []); 
 
-  // ── Scene-ready gate — listen for VRM loaded signal from AvatarCanvas ──────
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const onReady = () => {
@@ -1247,25 +1236,17 @@ export function useAgentAgent({
     return () => window.removeEventListener('avatar:scene:ready', onReady);
   }, []);
 
-  // ── Smart heartbeat — proactive greeting after IDLE_TIMEOUT of silence ───
-
   useEffect(() => {
-    // Clear any previously scheduled timer on every dependency change
     if (idleTimerRef.current) {
       clearTimeout(idleTimerRef.current);
       idleTimerRef.current = null;
     }
 
-    // Block conditions: already greeted, not yet connected, busy, or user is speaking
     if (hasInitiated || !isConnected || isProcessing || isRecording) return;
 
     idleTimerRef.current = setTimeout(() => {
-      // Re-check live state via refs before firing (guards against stale closure)
-      // sceneReadyRef: blocks greeting if the VRM hasn't loaded yet (user still zooming in)
       if (!mountedRef.current || isSpeakingRef.current || !sceneReadyRef.current) return;
 
-      // If a grade snapshot exists, use a debrief-aware prompt so the avatar
-      // opens with "أرى إنك أنهيت التقييم…" instead of the generic greeting.
       const pendingGrade = (() => {
         try {
           const raw = typeof window !== 'undefined' ? localStorage.getItem('nexus-last-grade') : null;
@@ -1290,8 +1271,6 @@ export function useAgentAgent({
     };
   }, [isConnected, isProcessing, isRecording, hasInitiated, sendText]);
 
-  // ── Mount / unmount ───────────────────────────────────────────────────────
-
   useEffect(() => {
     const onAuthChanged = (): void => {
       if (reconnectTimer.current) {
@@ -1311,16 +1290,13 @@ export function useAgentAgent({
 
     mountedRef.current = true;
 
-    // Start AgentDirector (subscribes to BrainStore; idempotent)
     agentDirector.start();
 
-    // Open WebSocket
     connect();
 
     return () => {
       mountedRef.current = false;
 
-      // Clean up connections and playback
       agentDirector.stop();
       vadStop();
       stopAllAudio();

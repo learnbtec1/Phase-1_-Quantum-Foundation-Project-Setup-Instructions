@@ -1,6 +1,9 @@
 param()
 Set-StrictMode -Off
 $ErrorActionPreference = 'SilentlyContinue'
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 Write-Host ""
 Write-Host "==== PHASE A: Soft Engine Rehab ===="
@@ -98,13 +101,13 @@ $projectRoot = "E:\Phase 1_ Quantum Foundation Project Setup Instructions"
 Set-Location -LiteralPath $projectRoot
 
 Write-Host "Running compose down..."
-docker compose -f ".\docker-compose.yml" down --remove-orphans 2>&1
+docker compose -f ".\docker-compose.yml" down --remove-orphans
 
 Write-Host "Running compose up --build..."
-docker compose -f ".\docker-compose.yml" up -d --build 2>&1
+docker compose -f ".\docker-compose.yml" up -d --build
 if ($LASTEXITCODE -ne 0) {
     Write-Host "FAIL: docker compose up failed." -ForegroundColor Red
-    docker compose -f ".\docker-compose.yml" logs --tail=60 2>&1
+    docker compose -f ".\docker-compose.yml" logs --tail=60
     exit 1
 }
 

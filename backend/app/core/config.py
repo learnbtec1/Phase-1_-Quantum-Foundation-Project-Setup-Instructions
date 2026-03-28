@@ -1,4 +1,3 @@
-# app/core/config.py
 from __future__ import annotations
 import json
 import os
@@ -145,15 +144,12 @@ class Settings(BaseSettings):
     TTS_AZURE_RETRY_COUNT: int = Field(3, env="TTS_AZURE_RETRY_COUNT")
     TTS_AZURE_RETRY_DELAY_SEC: float = Field(2.5, env="TTS_AZURE_RETRY_DELAY_SEC")
     # When True: if Azure returns 429/rate-limit, fall through to edge-tts (same ar-JO voice name) instead of HTTP 503.
-    # Ignored if TTS_DISABLE_NON_AZURE_FALLBACK is True.
-    TTS_AZURE_429_FALLBACK_EDGE: bool = Field(False, env="TTS_AZURE_429_FALLBACK_EDGE")
-
-    # ----------------------------
-    # Helper for OpenAI API Key Validation
-    # ----------------------------
-    def validate_openai_key(self):
-        if not self.OPENAI_API_KEY:
-            raise ValueError("OPENAI_API_KEY is not set. Please configure it in the .env file.")
+    # Ignored if TTS_DISABLE_NON_AZURE_FALLBACK is True. Default True keeps Azure→edge resilient in tts-with-timing.
+    TTS_AZURE_429_FALLBACK_EDGE: bool = Field(True, env="TTS_AZURE_429_FALLBACK_EDGE")
+    # Last resort when edge-tts + Azure both fail (e.g. corporate firewall). Uses MSA Arabic, not Jordanian.
+    TTS_ALLOW_GTTS_ARABIC_FALLBACK: bool = Field(False, env="TTS_ALLOW_GTTS_ARABIC_FALLBACK")
+    # Arabic gTTS runs only after this many consecutive Arabic TTS failures (503). 0 = legacy (flag alone).
+    TTS_GTTS_ARABIC_MIN_CONSECUTIVE_FAILURES: int = Field(0, env="TTS_GTTS_ARABIC_MIN_CONSECUTIVE_FAILURES")
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -1,6 +1,6 @@
 # DEVELOPMENT MEMORY — Cogni (Eduverse)
 > Long-term engineering log. Update after every significant change.
-> Last updated: 2026-03-23 (Checkpoint #47 teacher QR + Quick Review)
+> Last updated: 2026-03-28 (Checkpoint #100 foot–carpet gap / rug extra calibration)
 
 ---
 
@@ -26,6 +26,7 @@ Phase 1_ Quantum Foundation Project Setup Instructions/
 │   │   ├── core/config.py
 │   │   └── services/           tts_service.py, whisper_stt.py
 │   ├── Dockerfile
+│   ├── main.py            # V100 — shim re-exports app.main (Docker uses app.main:app)
 │   └── requirements.txt
 └── frontend/              Next.js 16 / React 19 / TypeScript
     └── src/
@@ -90,6 +91,12 @@ Phase 1_ Quantum Foundation Project Setup Instructions/
 
 ## 3. Checkpoints
 
+### Checkpoint #100 – 2026-03-28 – Foot–carpet gap calibration (`NEXT_PUBLIC_RUG_WALK_SURFACE_Y_EXTRA`) ✅
+- **Context:** Avatar feet floating ~0.15 m above visible carpet (`floorY` below soles); same fix as earlier COGNI reports: raise logical floor with **rug walk extra** (metres), then V52 foot calibration.
+- **Code:** `readRugWalkSurfaceYExtraEnv()` in `frontend/src/config/avatar.ts`; `RUG_WALK_SURFACE_Y_EXTRA` + `applyLockedCarpetFloor` in `AvatarCanvas.tsx`. After `tryApplyFloorY` (which updates `ROOM_BOUNDS` and `setPlayableBounds` via `applyAvatarGroundOffset`), **`room:footRecalib`** is dispatched — does **not** break GroundLock.
+- **Ops:** Set `NEXT_PUBLIC_RUG_WALK_SURFACE_Y_EXTRA` in `.env` / `frontend/.env.local` (or `docker-compose` `environment`); rebuild frontend when needed. Dev: `window.__vrmRef`, `window.THREE`, `window.ROOM_BOUNDS` + console snippet in `AvatarCanvas` JSDoc to read `left_m`/`right_m`/`avg_m`/`suggest_extra_m`. Keep `?fixFeet=1` off while tuning height.
+- **Result:** Feet align to carpet walk plane (target gap ~0–2 cm vs `floorY`).
+
 ### Checkpoint #44 – 2026-03-26 – Complete BTEC Pedagogical Engine (production-ready) ✅
 - **State persistence:** `tutorial_progress` table (Alembic `0007_tutorial_progress`) + `TutorialProgress` model; `tutorial_progress_store.py` (CRUD, criterion ordering, `expects_mini_answer`); `ENABLE_TUTORIAL_PERSISTENCE` (default on).
 - **EMM API:** `EmotionalMemoryManager.get_tutorial_state` / `update_tutorial_state` / `clear_tutorial_state` delegate to the store.
@@ -104,6 +111,70 @@ Phase 1_ Quantum Foundation Project Setup Instructions/
 - **`agent_ws.py`:** `pending_grade_nudge` / `focus_subject` session state; clear on successful reply parse; `clear` resets both. `set_focus_subject` refetches latest row for the topic string; if a nudge applies, triggers the same proactive pattern as a new grade.
 - **`tutor.py`:** `build_proactive_nudge()` + mandatory «تغذية راجعة استباقية» system block when `pending_assessment_nudge` is present; optional «تركيز المادة» block; Chroma query text prefixed with `focus_subject` for tighter retrieval.
 - **Frontend shared modules:** `lib/academicSubjects.ts`, `lib/assessmentNormalize.ts`; `/assessment/page.tsx` imports refactored to avoid duplicating the curriculum tree and normalizer.
+
+### Checkpoint #51 – 2026-03-27 – Primary avatar: Cogni-AVatar.vrm ✅
+- **Asset:** On-disk name is often **`cogni-avatar.vrm`**; URL chain includes `/models/cogni-avatar.vrm` and casing alias `/models/Cogni-AVatar.vrm` (see #53 / `avatar.ts`).
+- **`config/avatar.ts`:** Optional `NEXT_PUBLIC_AVATAR_VRM_URL` first; then primary **`pickVrmUrl()`**; `teach.vrm?v=hips-fix` remains fallback.
+- **`AvatarAgentClient.tsx`:** Uses `pickVrmUrl()` → `AvatarCanvas`.
+
+### Checkpoint #54 – 2026-03-28 – Avatar visibility (camera + orbit target) ✅
+- **Symptom addressed:** VRM/VRMA/desk logs healthy but nothing visible — often orbit `target` stuck at static point while the avatar root moves after foot–floor calibration.
+- **`AvatarCanvas.tsx`:** `OrbitControls.target` now **lerps every frame** toward a world point derived from the avatar (**head** bone when present, else group origin + vertical offset). `v54OrbitLookAtWorld` shared state; `controls.update()` after lerp.
+- **Defaults:** `AVATAR_DEFAULT_STAND_Z` set to **`ROOM_Z_CENTER - 1.0`** (≈ −2.0) so the stand position stays clearly in front of the camera at `CAMERA_POS_Z`; `CAMERA_ORBIT_DISTANCE` recomputed from that Z.
+- **Diagnostics (dev):** One-per-second `[V54]` logs — group world/local, camera pos + **getWorldDirection**, raw **cam→avatar** vector, dot **inFront**, orbit target vs desired, desk/chair/head; **initial rig** log on mount (RAF); **`T`** sets `_v54TeleportLogPending` → **post-teleport snapshot**; **`Y`** dumps positions on demand.
+- **How to verify (dev):** Run frontend (`npm run dev` or Docker). Open F12 on `/avatar-agent`. Expect **`[V54] Initial rig`**, then repeating **`[V54]`** lines each second — **`inFront`** should be **true**; **`[ORBIT] target`** should track **`desired`**. Press **`Y`** for a one-shot dump (`groupWorld` ≈ default stand X≈0, Z≈−2, Y floor+calibration); **`T`** teleports + **`Post-teleport snapshot`**. If still invisible: confirm **`camera.far`** in logs; **`[OfficeDeskFromGltf]`** proves desk; temporarily disable **`EffectComposer`** (SSAO) if the mesh might be present but too dark.
+- **Manual QA:** Load `/avatar-agent` — avatar framed center; walk/patrol keeps subject in view; share console output after load + **Y** if fine-tuning defaults.
+
+### Checkpoint #56 – 2026-03-28 – V56 carpet floor lock (stop `floorY` creep & stabilise avatar Y) ✅
+- **Problem:** Repeated `EduverseCarpetGlbFloor` world AABB measurements nudged `ROOM_BOUNDS.floorY` upward over time; foot–floor recalibration kept lifting the avatar (e.g. floating above the desk).
+- **`scene/RoomShell.tsx`:** `applyCarpetFloorYFromWorldBox` returns `boolean`; skips mutation when `|proposed − current floorY| < 0.05` m (`CARPET_FLOOR_Y_TRIVIAL_DELTA`).
+- **`AvatarCanvas.tsx`:** First `room:carpetBounds` arms a **500ms** settle timer; the **latest** box at fire time is applied **once**, then `carpetBoundsAppliedRef` ignores further events. Logs: `[V56] carpet → floorY (locked, XZ = default room)`; when locked: `[V56] carpet bounds already locked — ignoring room:carpetBounds` (debug).
+
+### Checkpoint #55 – 2026-03-28 – Carpet-aligned `ROOM_BOUNDS` & floor recalibration ✅
+- **Problem addressed:** Cut-scene room with carpet only covering part of the old volume; avatar Y/Z wrong vs desk; walk/patrol used full-room bounds.
+- **`scene/RoomShell.tsx`:** `ROOM_BOUNDS` is **mutable** (starts from `ROOM_BOUNDS_DEFAULT`). Added `applyRoomBoundsFromCarpetWorldBox(worldBox)`, `getDefaultStandXZ`, `getCameraPosZ`, `getRoomZCenter`, `buildPatrolWaypoints`.
+- **`EduverseCarpetGlbFloor` (`AvatarCanvas.tsx`):** After the carpet root is in the scene, computes **world `Box3`**, logs `[V55] EduverseCarpetGlbFloor world AABB`, dispatches `room:carpetBounds` (detail: `box`).
+- **`OfficeSetLoader.tsx`:** Traverses loaded office for meshes whose names match `carpet|floor|ground|rug|parquet` (largest horizontal footprint), logs `[V55] OfficeSetLoader carpet/floor pick`, dispatches the same event (for full-room GLB workflows).
+- **Main `AvatarCanvas`:** Listens for `room:carpetBounds` → applies AABB to `ROOM_BOUNDS` (preserves `ceilY`), syncs React `playableBounds` only when values **change** (avoids re-render loops), dispatches `room:bounds:applied`. Camera, `OrbitControls`, `ContactShadows`, `EduverseRoomBackdrop`, `RoomShell`, `OfficeDeskFromGltf` use `playableBounds` / `getRoomZCenter`.
+- **`VRMScene`:** On `room:bounds:applied` — `footCalibDoneRef = false`, `resetRapierAvatarState()`, rebuild patrol waypoints, teleport to `getDefaultStandXZ()`, update perma-chair refs.
+- **Leva “Avatar Position”:** Standing control is **ΔY from floor** (default `0`), not absolute Y — so when `floorY` updates from the carpet, standing height stays correct.
+- **Rapier (`rapierColliders.ts`):** Floor cuboid still uses live `ROOM_BOUNDS` after statics reset.
+- **How to verify (dev):** F12 → `[V55] EduverseCarpetGlbFloor world AABB` → `[V55] carpet → ROOM_BOUNDS` (if AABB differs from defaults). Avatar feet on carpet; default stand Z from `getDefaultStandXZ` (center − 1 m, clamped); **T** uses current bounds. Final numeric bounds are **runtime** (see log object); defaults remain in `ROOM_BOUNDS_DEFAULT` in `RoomShell.tsx`.
+
+### Checkpoint #53 – 2026-03-28 – NEXUS V100 MAX (full-stack + Docker + avatar pipeline) ✅
+- **Goal:** Align compose, backend entrypoints, production Next build, env templates, and avatar load path so Cogni runs as a complete digital-human stack (WS + TTS + VRM + motion) without silent misconfig.
+- **`docker-compose.yml`:** Frontend **healthcheck** (Node `fetch` → :3000); backend/redis/db health + `depends_on`; `env_file: .env`; TTS/RAG env overrides preserved.
+- **`backend/main.py`:** Shim with `sys.path` fix — same `app` as `uvicorn app.main:app` (for docs referencing `backend/main.py`).
+- **`backend/app/main.py`:** Redundant `asyncio` import removed from `lifespan`.
+- **`backend/app/core/config.py`:** Duplicate `validate_openai_key` removed (single `REQUIRE_OPENAI` semantics).
+- **`frontend/Dockerfile`:** Builder **`NODE_ENV=production`** so `next.config.js` emits **`standalone`** for the `runner` stage.
+- **`frontend/.env.example`:** `NEXT_PUBLIC_API_URL` default **8000** (matches compose); avatar env knobs documented (`STAND` / `SIT` / `FACING` offsets).
+- **`frontend/src/config/avatar.ts`:** `VRM_FALLBACKS` / `pickVrmUrl()` — primary **`/models/cogni-avatar.vrm`** (+ casing alias + `teach.vrm` fallback).
+- **`AvatarCanvas.tsx` (with V52):** Foot–floor calibration, facing base, §8 `rawBone8` warn-once, normalized-bone diagnostics, seated/breath VRM1 tuning — see Checkpoint #52.
+- **Artefacts:** `NEXUS_V100_MAX_AUTOPILOT.md`, `FIX_SEQUENTIAL.md`, `__V100_MAX_LOG__.md`, `__NEXUS_V100_MAX_REPORT__.md`.
+- **Operator:** Copy `.env.example` → `.env`, set Azure/OpenAI/JWT; then `docker compose up -d --build`.
+
+### Checkpoint #52 – 2026-03-27 – New avatar calibration (Cogni-AVatar.vrm) ✅
+- **Root cause:** Cogni-AVatar differs from teach.vrm in bind pose / meta (often VRM 1.0 vs 0.x), forward axis, and foot height relative to the scene root — the old fixed `Math.PI` facing and raw `yOffset` floor assumption caused floating feet, wrong facing, and stiff motion when §8 fought the rest pose.
+- **`config/avatar.ts`:** `readAvatarStandYOffsetEnv()` / `readAvatarFacingYawBaseEnv()` (`NEXT_PUBLIC_AVATAR_STAND_Y_OFFSET`, `NEXT_PUBLIC_AVATAR_FACING_YAW_BASE`); `readAvatarSitWorldYOffsetEnv()` / `SIT_WORLD_Y_TRIM_VRM1` / `NEXT_PUBLIC_AVATAR_SIT_Y_OFFSET`; `AVATAR_BREATHE_SCALE_VRM1` + `BREATHE_AMP_*_VRM1` paired with base amps; seated leg constants `SIT_UPPER_LEG_X_VRM0` / `SIT_UPPER_LEG_X_VRM1` / `SIT_LOWER_LEG_X_SEATED`. Primary VRM URL on disk may be `cogni-avatar.vrm` (see `VRM_FALLBACKS` / `pickVrmUrl`).
+- **`AvatarCanvas.tsx`:** Post-load `[V52]` diagnostics (`metaVersion`, raw-bone probe, **`getNormalizedBoneNode` map** for hips/spine/head/arms/lowerLegs, hips local/world); `avatarFacingBaseRef` from meta or env; **one-shot** `Box3` foot–floor calibration (`footToFloorYOffsetRef`); group Y uses that offset for stand and sit; **seated world Y** += env + VRM1 trim; body yaw uses `baseYaw + …`; §8 uses **`rawBone8`** (warn-once on missing bones) for all final overrides; seated upper-leg X selects VRM0 vs VRM1; VRM1 **breathing** uses combined scale + amp ratio; clap separation already falls back hand→lowerArm.
+- **Safety:** `VRM_FALLBACKS` chain (incl. `teach.vrm`) on load failure — no automatic “deformation detect” heuristic.
+- **Manual QA:** Feet on floor, natural sit, breathing, gestures/walk, eyes, clean console — tune env offsets if a specific export still drifts.
+
+### Checkpoint #50 – 2026-03-27 – Body control fixes (V50 / P0–P1) ✅
+- **V49 follow-up:** Reduce loss of LLM/performance gesture intent before §8 / VRMA.
+- **`performanceTags.ts`:** `PerformanceCue.side` / `duration` (normalize ms≥100→s); expanded `resolvePerformanceCue` (`point_left`/`right`, `open_hand_*`, `two_fingers`→`peace`, `thumbs_up`→`thumbUp`, `thinking`, `beckon`); `console.warn` on unknown `animation` with `openHand` fallback.
+- **`avatarPerformanceBridge.ts`:** Passes `side`, `duration`, `fromPerformance`/`fromAI`; `checkGestureCooldown(..., { fromAI: true })` + `recordGestureLog` before dispatch.
+- **`normalizeAvatarEvents.ts`:** Tokens `thumbUp`/`beckon`; preserve `fromAI`/`fromPerformance` on normalised gesture detail.
+- **`AgentDirector.ts`:** No random `point`→`openHand` when action line locks `point`/`open_hand` variants; `fromAICooldown` shortens consecutive gate via `store` `fromAI`; `[AgentDirector] firing gesture` log.
+- **`store.ts`:** `GestureCooldownOpts.fromAI` → consecutive repeat window **1.5s**; cooldown entries for `thumbUp`/`beckon`.
+- **`AvatarCanvas.tsx`:** `useFrame` layer-order comment; `[GESTURE] received` log; skip Canvas variety swap when `fromPerformance`/`fromAI`; seated mapping for `thumbUp`/`beckon`; standing `beckon` VRMA; left-hand `point` uses procedural arm path; `thumbUp` uses `point` VRMA when right.
+- **`GestureEngine.ts` / `useAgentAgent.ts`:** `fromAI: true` on raw `avatar:gesture` dispatches.
+- **Limitations:** True thumb articulation still approximated (`point` VRMA); wave remains once-per-session via store; §8 vs VRMA layering unchanged beyond documentation.
+
+### Checkpoint #48 – 2026-03-27 – Autoplay audio: unmute button (V48) ✅
+- **Problem:** After browser `NotAllowedError` on TTS `audio.play()`, pipelines mute and dispatch `cogni:autoplay-blocked`, but `AvatarAgentClient` had no UI; `avatar:speak:start` also fired for muted playback and cleared `audioBlocked` immediately, so students never saw recovery.
+- **`AvatarAgentClient.tsx`:** Removed `avatar:speak:start` as an “unblock” signal. Listen only to `cogni:autoplay-blocked` (store latest `HTMLAudioElement`). Floating circular control (`bottom-36`, z above TTS notice): 🔇 + RTL copy «اضغط لتشغيل صوت كوجني»; `handleUnmuteAutoplay` sets `muted = false`, `await play()`, clears state on success; on `ended`, clear stale banner if user never tapped. Accessible `aria-label` / `focus-visible` ring.
 
 ### Checkpoint #47 – 2026-03-23 – Teacher QR Generator & Quick Review Mode ✅
 - **Summary:** Teacher-facing QR Generator & Quick Review Mode implemented. Unified deep-linking spec for all learning paths.

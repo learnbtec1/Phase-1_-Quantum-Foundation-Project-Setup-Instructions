@@ -1,6 +1,10 @@
 param()
 Set-StrictMode -Off
 $ErrorActionPreference = 'Continue'
+# Docker يكتب التقدم إلى stderr؛ في PowerShell 7+ يُعرَض ذلك كأخطاء وهمية
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 Write-Host "==== NEXUS Stack Launcher ===="
 Write-Host ("Time: {0:s}" -f (Get-Date))
@@ -37,18 +41,18 @@ Write-Host "Working dir: $PWD"
 # Compose down first
 Write-Host "Running compose down..."
 $env:DOCKER_API_VERSION = "1.44"
-docker compose -f ".\docker-compose.yml" down --remove-orphans 2>&1
+docker compose -f ".\docker-compose.yml" down --remove-orphans
 
 # Compose up
 Write-Host "Running compose up -d --build..."
 $env:DOCKER_API_VERSION = "1.44"
-docker compose -f ".\docker-compose.yml" up -d --build 2>&1
+docker compose -f ".\docker-compose.yml" up -d --build
 $cExit = $LASTEXITCODE
 Write-Host "Compose exit code: $cExit"
 
 if ($cExit -ne 0) {
     Write-Host "FAIL: compose up failed." -ForegroundColor Red
-    docker compose -f ".\docker-compose.yml" logs --tail=50 2>&1
+    docker compose -f ".\docker-compose.yml" logs --tail=50
     exit 1
 }
 
@@ -57,7 +61,7 @@ Start-Sleep -Seconds 15
 
 Write-Host "Container status:"
 $env:DOCKER_API_VERSION = "1.44"
-docker compose -f ".\docker-compose.yml" ps 2>&1
+docker compose -f ".\docker-compose.yml" ps
 
 Write-Host ""
 Write-Host "==== API Checks ===="
@@ -114,5 +118,5 @@ if ($healthOk -and $envOk -and $ttsOk) {
     if (-not $ttsOk) {
         Write-Host "  Hint: check docker compose logs -f backend for TTS startup errors."
     }
-    docker compose -f ".\docker-compose.yml" logs --tail=30 2>&1
+    docker compose -f ".\docker-compose.yml" logs --tail=30
 }

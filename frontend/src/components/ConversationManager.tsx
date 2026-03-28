@@ -4,7 +4,7 @@
  * ConversationManager.tsx — Phase 4 Turn-Taking System
  *
  * Manages the lifecycle of human-avatar conversation with strict turn-taking:
- *   1. Initial Interaction: "Start Session" overlay until user clicks
+ *   1. AudioContext unlock: attempted automatically ~500ms after mount (no blocking overlay)
  *   2. State Machine: tracks isUserSpeaking, isAvatarSpeaking states
  *   3. Interruption Logic: When user speaks, immediately silence the avatar
  *   4. Sequential Processing: Avatar only speaks after user finishes
@@ -36,14 +36,13 @@ export default function ConversationManager({
   onUserSpeaking,
   onUserSilent,
 }: ConversationManagerProps) {
-  const [sessionStarted, setSessionStarted] = useState(false);
   const [isUserSpeaking, setIsUserSpeaking] = useState(false);
   const [isAvatarSpeaking, setIsAvatarSpeaking] = useState(false);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const hasInteractedRef = useRef(false);
 
-  // ── Initialize AudioContext on first user gesture ──────────────────────
+  // ── Initialize AudioContext (auto on mount after short delay — no blocking overlay) ──
   const initializeAudio = async () => {
     if (!hasInteractedRef.current) {
       try {
@@ -60,7 +59,6 @@ export default function ConversationManager({
         }
 
         hasInteractedRef.current = true;
-        setSessionStarted(true);
 
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('cogni:conversation:started'));
@@ -74,6 +72,15 @@ export default function ConversationManager({
       }
     }
   };
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const t = window.setTimeout(() => {
+      void initializeAudio();
+    }, 500);
+    return () => window.clearTimeout(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount
+  }, []);
 
   // ── Listen for avatar speaking events ────────────────────────────────────
   useEffect(() => {
@@ -139,45 +146,6 @@ export default function ConversationManager({
       window.removeEventListener('cogni:user:silent', onUserStop);
     };
   }, [isAvatarSpeaking, onUserSpeaking, onUserSilent]);
-
-  // ── Session start overlay ────────────────────────────────────────────────
-  if (!sessionStarted) {
-    return (
-      <div className="fixed inset-0 z-[999] flex items-center justify-center
-        bg-black/80 backdrop-blur-sm">
-        <div className="flex flex-col items-center gap-6 text-white">
-          {/* Animated avatar icon */}
-          <div className="text-6xl animate-bounce">🤖</div>
-
-          {/* Call to action */}
-          <div className="text-center">
-            <h1 className="text-3xl font-bold mb-2">مرحباً بك في Cogni</h1>
-            <p className="text-gray-300 text-sm max-w-xs">
-              اضغط الزر أدناه لبدء الجلسة التعليمية مع أفاتارك الشخصي
-            </p>
-          </div>
-
-          {/* Start button */}
-          <button
-            onClick={initializeAudio}
-            className="px-8 py-3 bg-gradient-to-r from-violet-600 to-cyan-600
-              text-white font-bold rounded-full text-lg
-              hover:from-violet-500 hover:to-cyan-500
-              active:scale-95 transition-all duration-200
-              shadow-lg shadow-violet-500/50"
-          >
-            ▶️ ابدأ الجلسة
-          </button>
-
-          {/* Permissions info */}
-          <div className="text-xs text-gray-400 text-center max-w-xs">
-            <p>📍 سيطلب منك الوصول إلى الميكروفون</p>
-            <p className="mt-1">الصوت والصورة مشفرة ومحمية</p>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   // ── Conversation state indicators (if needed for debugging) ────────────────
   return (

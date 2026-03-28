@@ -8,6 +8,9 @@ import type { VRM } from '@pixiv/three-vrm';
 import { PHYSICS_CONFIG } from '@/config/avatar';
 import { ROOM_BOUNDS } from '../scene/RoomShell';
 
+/** Single init promise — avoids duplicate `RAPIER.init` + wasm work if VRMScene remounts. */
+let _rapierWorldInitPromise: Promise<RAPIER.World | null> | null = null;
+
 let _staticsRegistered = false;
 let _charController: ReturnType<RAPIER.World['createCharacterController']> | null = null;
 let _avatarBody: ReturnType<RAPIER.World['createRigidBody']> | null = null;
@@ -24,6 +27,33 @@ function buildFloor(world: RAPIER.World): void {
     .setFriction(PHYSICS_CONFIG.environment.friction)
     .setRestitution(PHYSICS_CONFIG.environment.restitution);
   world.createCollider(desc, body);
+}
+
+/** Thin perimeter walls so the character controller cannot slide through room edges before JS clamps. */
+function buildRoomWalls(world: RAPIER.World): void {
+  const t = 0.12;
+  const r = ROOM_BOUNDS;
+  const hx = (r.maxX - r.minX) / 2;
+  const hz = (r.maxZ - r.minZ) / 2;
+  const cx = (r.minX + r.maxX) / 2;
+  const cz = (r.minZ + r.maxZ) / 2;
+  const wallH = Math.max(1.5, Math.min(4, r.ceilY - r.floorY));
+  const y = r.floorY + wallH / 2;
+  const friction = PHYSICS_CONFIG.environment.friction;
+  const rest = PHYSICS_CONFIG.environment.restitution;
+
+  const mk = (tx: number, ty: number, tz: number, hhx: number, hhy: number, hhz: number) => {
+    const body = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(tx, ty, tz));
+    const desc = RAPIER.ColliderDesc.cuboid(hhx, hhy, hhz)
+      .setFriction(friction)
+      .setRestitution(rest);
+    world.createCollider(desc, body);
+  };
+
+  mk(r.minX - t / 2, y, cz, t / 2, wallH / 2, hz);
+  mk(r.maxX + t / 2, y, cz, t / 2, wallH / 2, hz);
+  mk(cx, y, r.minZ - t / 2, hx, wallH / 2, t / 2);
+  mk(cx, y, r.maxZ + t / 2, hx, wallH / 2, t / 2);
 }
 
 function buildDesk(world: RAPIER.World, box: THREE.Box3): void {
@@ -62,6 +92,7 @@ export function ensureRapierStatics(
 ): void {
   if (_staticsRegistered) return;
   buildFloor(world);
+  buildRoomWalls(world);
   if (!deskBox.isEmpty()) {
     buildDesk(world, deskBox);
   }
@@ -72,13 +103,18 @@ export function ensureRapierStatics(
 }
 
 export async function initRapierWorld(): Promise<RAPIER.World | null> {
-  try {
-    await RAPIER.init();
-    const g = PHYSICS_CONFIG.gravity;
-    return new RAPIER.World({ x: g[0], y: g[1], z: g[2] });
-  } catch {
-    return null;
+  if (!_rapierWorldInitPromise) {
+    _rapierWorldInitPromise = (async (): Promise<RAPIER.World | null> => {
+      try {
+        await RAPIER.init({});
+        const g = PHYSICS_CONFIG.gravity;
+        return new RAPIER.World({ x: g[0], y: g[1], z: g[2] });
+      } catch {
+        return null;
+      }
+    })();
   }
+  return _rapierWorldInitPromise;
 }
 
 /**

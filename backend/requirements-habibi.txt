@@ -1,0 +1,2 @@
+# Sovereign Jordanian TTS (Habibi-TTS) — heavy (PyTorch); optional build ARG in Dockerfile
+habibi-tts>=0.1.1

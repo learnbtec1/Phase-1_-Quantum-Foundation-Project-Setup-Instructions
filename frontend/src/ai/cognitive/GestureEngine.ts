@@ -246,6 +246,7 @@ export class GestureEngine {
           intensity: g.intensity ?? 0.8,
           duration:  g.duration  ?? 2.0,
           speed:     g.speed    ?? 1.0,
+          fromAI:    true,
         },
       }),
     );

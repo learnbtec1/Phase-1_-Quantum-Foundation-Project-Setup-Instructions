@@ -29,7 +29,9 @@ export type GestureToken =
   | 'tilt'
   | 'hands_up'
   | 'lean_back'
-  | 'celebration';
+  | 'celebration'
+  | 'thumbUp'
+  | 'beckon';
 
 /**
  * BehaviorRulesEngine + legacy aliases → canonical rig token.
@@ -79,6 +81,11 @@ const BEHAVIOR_TO_RIG: Record<string, GestureToken> = {
   clap: 'clap',
   cheer: 'cheer',
   look: 'look',
+  thumbUp: 'thumbUp',
+  thumbup: 'thumbUp',
+  thumbs_up: 'thumbUp',
+  beckon: 'beckon',
+  Beckon: 'beckon',
 };
 
 function canonicalGestureToken(raw: string | undefined): GestureToken {
@@ -108,6 +115,9 @@ export interface GestureEventInput {
   intensity?: number;
   variance?: number;
   preroll?: number;
+  /** V50 — preserved on normalised detail for Canvas / cooldown semantics */
+  fromAI?: boolean;
+  fromPerformance?: boolean;
 }
 
 export interface EmotionEventInput {
@@ -132,6 +142,8 @@ export interface GestureEventDetail {
   intensity: number;
   variance: number;
   preroll: number;
+  fromAI?: boolean;
+  fromPerformance?: boolean;
 }
 
 export interface EmotionEventDetail {
@@ -156,7 +168,7 @@ export function normalizeAvatarEvent(
   if ('type' in detail || 'name' in detail) {
     const g = detail as GestureEventInput;
     const rawToken = g.type ?? g.name;
-    return {
+    const out: GestureEventDetail = {
       type:      canonicalGestureToken(rawToken),
       side:      (g.side ?? 'right') as 'left' | 'right' | 'both',
       duration:  g.duration  ?? 2.0,
@@ -164,6 +176,9 @@ export function normalizeAvatarEvent(
       variance:  g.variance  ?? Math.random(),
       preroll:   g.preroll   ?? 0,
     };
+    if (g.fromAI === true) out.fromAI = true;
+    if (g.fromPerformance === true) out.fromPerformance = true;
+    return out;
   }
 
   if ('emotion' in detail || 'tag' in detail) {

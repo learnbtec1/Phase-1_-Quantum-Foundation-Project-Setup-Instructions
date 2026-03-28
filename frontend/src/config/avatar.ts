@@ -5,23 +5,28 @@
  * Set NEXT_PUBLIC_AVATAR_VRM_URL in .env.local to override the primary model
  * without touching source code.
  *
+ * Primary on-disk model: `public/models/cogni-avatar.vrm` (Linux case-sensitive). Aliases below for other exports.
+ *
  * Feature flags — all default OFF so experimental code is never active in prod.
  */
 
+/** Env override or null — single source for URL chain + pickVrmUrl. */
+function primaryVrmUrlFromEnv(): string | null {
+  if (typeof process === 'undefined') return null;
+  const v = process.env.NEXT_PUBLIC_AVATAR_VRM_URL?.trim();
+  return v || null;
+}
+
 // ── VRM URL chain ─────────────────────────────────────────────────────────────
 export const VRM_FALLBACKS: readonly string[] = [
-  ...(
-    typeof process !== 'undefined' &&
-    process.env.NEXT_PUBLIC_AVATAR_VRM_URL?.trim()
-      ? [process.env.NEXT_PUBLIC_AVATAR_VRM_URL.trim()]
-      : []
-  ),
-  '/models/teach.vrm?v=hips-fix', // PRIMARY — VRM 0.x, hips quaternion reset
+  ...(primaryVrmUrlFromEnv() ? [primaryVrmUrlFromEnv()!] : []),
+  '/models/cogni-avatar.vrm', // PRIMARY — actual filename on disk (Docker/Linux)
+  '/models/Cogni-AVatar.vrm', // alias if asset shipped with this casing
 ];
 
-/** Returns the primary VRM URL. All components must call this — never hardcode paths. */
+/** Returns the primary VRM URL (must match first non-env entry in `VRM_FALLBACKS`). */
 export function pickVrmUrl(): string {
-  return '/models/teach.vrm?v=hips-fix';
+  return primaryVrmUrlFromEnv() ?? '/models/cogni-avatar.vrm';
 }
 
 // ── Feature flags ─────────────────────────────────────────────────────────────
@@ -45,8 +50,59 @@ export const USE_VISEME_PREDICT =
  * MIME mode — bypass all browser/API TTS; simulate speaking duration from text length
  * (~65 ms/char) for gesture/expression testing without audio latency or failures.
  * Set `true` locally when debugging motion; keep `false` in production builds.
+ *
+ * ── Production lock (V110.1) ──────────────────────────────────────────────
+ * • PRODUCTION: always false, regardless of any localStorage override.
+ * • DEVELOPMENT: false by default; auto-enabled only after /health/tts fails
+ *   (see tts.ts → _tryEnableMimeFallback).
+ *   Manual kill-switch: localStorage.setItem('MIME_MODE','0') → stays off.
+ *   Manual force-on:    localStorage.setItem('MIME_MODE','1') → stays on (dev only).
+ * Call getMimeMode() at runtime — do NOT read ENABLE_MIME_MODE as a static bool.
  */
-export const ENABLE_MIME_MODE = false;
+export const ENABLE_MIME_MODE = false;  // static default — always false at module init
+
+/** Whether the dev health-check has determined Azure is unreachable this session. */
+let _mimeModeDynamic = false;
+
+/**
+ * Set MIME_MODE on (dev only) after health check determines Azure TTS is unreachable.
+ * No-op in production.
+ */
+export function enableMimeFallback(): void {
+  if (typeof process !== 'undefined' && process.env.NODE_ENV === 'production') return;
+  _mimeModeDynamic = true;
+}
+
+/**
+ * Runtime MIME_MODE gate — call this in handlers instead of reading ENABLE_MIME_MODE.
+ *
+ * Returns true ONLY when:
+ *   1. NODE_ENV === 'development'           (never true in production)
+ *   2. Dynamic flag is on (health check failed) OR localStorage 'MIME_MODE' === '1'
+ *   3. localStorage 'MIME_MODE' !== '0'    (user kill-switch respected)
+ */
+export function getMimeMode(): boolean {
+  if (typeof process !== 'undefined' && process.env.NODE_ENV === 'production') return false;
+  if (typeof window !== 'undefined') {
+    const stored = window.localStorage?.getItem('MIME_MODE');
+    if (stored === '0') return false;   // explicit user kill-switch
+    if (stored === '1') return true;    // explicit user force-on (dev only)
+  }
+  return _mimeModeDynamic;
+}
+
+// ── TTS Endpoint URLs (V110.1) ────────────────────────────────────────────────
+// NEXT_PUBLIC_API_BASE must be set in Compose/env for cross-origin setups.
+// Falls back to '' (empty) → uses Next.js rewrites or direct relative paths.
+const _API_BASE: string = (() => {
+  if (typeof process === 'undefined') return '';
+  return (process.env.NEXT_PUBLIC_API_BASE || '').replace(/\/$/, '');
+})();
+
+/** Live Azure TTS health — GET → {ok, provider, voice, len, avg_latency_ms} */
+export const TTS_HEALTH_URL = `${_API_BASE}/health/tts`;
+/** Direct Azure WAV synthesis — POST {text, voice?, type?} → audio/wav */
+export const TTS_SPEAK_URL  = `${_API_BASE}/tts/speak`;
 
 // ── Humanization tuning ───────────────────────────────────────────────────────
 
@@ -152,6 +208,85 @@ export const PROACTIVE_GESTURE_MS = 20_000;
 
 /** Ms of user silence before avatar sends a proactive question via WS. */
 export const PROACTIVE_QUESTION_MS = 30_000;
+
+// ── V52 — Cogni-AVatar / multi-VRM calibration (AvatarCanvas runtime + env overrides) ─
+// NEXUS V100 / COGNI sub-floor: stand trim 0; rug extra default 0.10 m (override via NEXT_PUBLIC_RUG_WALK_SURFACE_Y_EXTRA).
+
+/**
+ * Extra Y offset (metres) added **after** automatic foot–floor calibration.
+ * Negative = sink slightly; positive = lift. Set in `.env.local` e.g. `-0.03`.
+ */
+export function readAvatarStandYOffsetEnv(): number {
+  if (typeof process === 'undefined') return 0;
+  const v = process.env.NEXT_PUBLIC_AVATAR_STAND_Y_OFFSET?.trim();
+  if (!v) return 0;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Added to carpet world AABB **max.y** when setting `ROOM_BOUNDS.floorY` (rug walk height).
+ * Keeps feet on the upper surface when the logical floor mesh sits below the visible pile, or after backdrop transforms.
+ *
+ * **Env:** `NEXT_PUBLIC_RUG_WALK_SURFACE_Y_EXTRA` (metres). If unset or empty → **default 0.10** (pile / walk surface).
+ * Typical tune: **0.06–0.15** after measuring foot–`floorY` gap in dev (see `AvatarCanvas` dev expose + console snippet).
+ */
+export function readRugWalkSurfaceYExtraEnv(): number {
+  const fallback = 0.1;
+  if (typeof process === 'undefined') return fallback;
+  const v = process.env.NEXT_PUBLIC_RUG_WALK_SURFACE_Y_EXTRA?.trim();
+  if (!v) return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/** Optional override for body yaw base (rad). `Math.PI` = legacy teach; `0` = typical VRM 1.0 forward. Unset = auto from meta. */
+export function readAvatarFacingYawBaseEnv(): number | null {
+  if (typeof process === 'undefined') return null;
+  const v = process.env.NEXT_PUBLIC_AVATAR_FACING_YAW_BASE?.trim();
+  if (!v) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Multiply spine/chest breathing amplitude when VRM 1.0 meta is detected (subtle boost if motion reads flat). */
+export const AVATAR_BREATHE_SCALE_VRM1 = 1.12;
+
+/** Seated upper-leg local X (rad) — VRM 1.0 / A-pose rigs sometimes need slightly less than 1.57. */
+export const SIT_UPPER_LEG_X_VRM0 = 1.57;
+export const SIT_UPPER_LEG_X_VRM1 = 1.48;
+export const SIT_LOWER_LEG_X_SEATED = -1.57;
+
+/** Added to world sit Y when VRM 1.0 meta — tune if hips sit too high/low vs chair. */
+export const SIT_WORLD_Y_TRIM_VRM1 = 0;
+
+/**
+ * Optional env trim (metres) on seated avatar group Y (after foot calibration).
+ * Negative = lower into seat. Composes with `SIT_WORLD_Y_TRIM_VRM1` for VRM1.
+ */
+export function readAvatarSitWorldYOffsetEnv(): number {
+  if (typeof process === 'undefined') return 0;
+  const v = process.env.NEXT_PUBLIC_AVATAR_SIT_Y_OFFSET?.trim();
+  if (!v) return 0;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** V52 — slightly stronger chest motion on newer rigs (composes with `AVATAR_BREATHE_SCALE_VRM1` in canvas). */
+export const BREATHE_AMP_STANDING_VRM1 = 0.0135;
+export const BREATHE_AMP_SITTING_VRM1 = 0.007;
+
+// ── V53 — placement / visibility diagnostics (opt-in) ─────────────────────────
+
+/**
+ * When `NEXT_PUBLIC_AVATAR_DEBUG_FORCE_STAND` is `1` or `true`, seated state is ignored
+ * and the avatar stays in standing locomotion (helps verify visibility vs chair offset).
+ */
+export function readAvatarDebugForceStandEnv(): boolean {
+  if (typeof process === 'undefined') return false;
+  const v = process.env.NEXT_PUBLIC_AVATAR_DEBUG_FORCE_STAND?.trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
 
 // ── Locomotion (Checkpoint #40 — AvatarCanvas `onWalk` + §8 + clap separation) ─
 export const WALK_SPEED_MPS = 1.2;

@@ -1,6 +1,9 @@
 #requires -Version 5.1
 
 $ErrorActionPreference = "Stop"
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 $ProjectRoot      = "E:\Phase 1_ Quantum Foundation Project Setup Instructions"
 $DockerDesktopExe = "C:\Program Files\Docker\Docker\Docker Desktop.exe"

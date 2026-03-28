@@ -11,7 +11,7 @@
  */
 import { useEffect } from 'react';
 import { Box3, DoubleSide, Group, Mesh, MeshStandardMaterial, Object3D, Vector3 } from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { useThree } from '@react-three/fiber';
 import { ROOM_BOUNDS } from './RoomShell';
 
@@ -24,13 +24,16 @@ const CARPET_W = 8.1;   // target width  in X (metres)  — 5.4 × 1.5
 const CARPET_D = 9.9;   // target depth  in Z (metres)  — 6.6 × 1.5
 
 type CarpetLoaderProps = {
-  url?:   string;
-  debug?: boolean;
+  url?:      string;
+  debug?:    boolean;
+  /** Called once the carpet root is placed in the scene (after world matrices settle). */
+  onReady?:  (carpetRoot: Group) => void;
 };
 
 export function CarpetLoader({
   url   = '/assets/iranian_wool_carpet.glb',
   debug = false,
+  onReady,
 }: CarpetLoaderProps) {
   const { scene } = useThree();
 
@@ -92,6 +95,22 @@ export function CarpetLoader({
 
         scene.add(root);
 
+        // V100 — double-rAF so world matrices settle before measuring AABB + firing events.
+        let raf1 = 0, raf2 = 0;
+        raf1 = requestAnimationFrame(() => {
+          raf2 = requestAnimationFrame(() => {
+            if (cancelled) return;
+            root.updateMatrixWorld(true);
+            const worldBox = new Box3().setFromObject(root);
+            onReady?.(root);
+            // Fire carpet:changed (bare signal) + carpetBounds (with AABB box).
+            window.dispatchEvent(new CustomEvent('room:carpet:changed'));
+            window.dispatchEvent(new CustomEvent('room:carpetBounds', { detail: { box: worldBox.clone() } }));
+          });
+        });
+        // Store rAF ids so cleanup can cancel them.
+        void raf1; void raf2;
+
         if (debug) {
           const b  = new Box3().setFromObject(root);
           const sz = new Vector3();
@@ -117,6 +136,7 @@ export function CarpetLoader({
       const existing = scene.getObjectByName('IranianWoolCarpet');
       if (existing) scene.remove(existing);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene, url, debug]);
 

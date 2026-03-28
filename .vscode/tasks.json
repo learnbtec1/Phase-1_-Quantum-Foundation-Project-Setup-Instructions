@@ -16,6 +16,12 @@
       "type": "shell",
       "command": "docker compose -f \"${workspaceFolder}/docker-compose.yml\" up -d --build",
       "options": { "cwd": "${workspaceFolder}" },
+      "windows": {
+        "options": {
+          "cwd": "${workspaceFolder}",
+          "shell": { "executable": "cmd.exe", "args": ["/d", "/c"] }
+        }
+      },
       "problemMatcher": []
     },
     {
@@ -23,6 +29,12 @@
       "type": "shell",
       "command": "docker compose -f \"${workspaceFolder}/docker-compose.yml\" down",
       "options": { "cwd": "${workspaceFolder}" },
+      "windows": {
+        "options": {
+          "cwd": "${workspaceFolder}",
+          "shell": { "executable": "cmd.exe", "args": ["/d", "/c"] }
+        }
+      },
       "problemMatcher": []
     },
     {
@@ -30,6 +42,12 @@
       "type": "shell",
       "command": "docker compose -f \"${workspaceFolder}/docker-compose.yml\" restart backend frontend",
       "options": { "cwd": "${workspaceFolder}" },
+      "windows": {
+        "options": {
+          "cwd": "${workspaceFolder}",
+          "shell": { "executable": "cmd.exe", "args": ["/d", "/c"] }
+        }
+      },
       "problemMatcher": []
     },
     {
@@ -37,6 +55,12 @@
       "type": "shell",
       "command": "docker compose -f \"${workspaceFolder}/docker-compose.yml\" logs -f backend",
       "options": { "cwd": "${workspaceFolder}" },
+      "windows": {
+        "options": {
+          "cwd": "${workspaceFolder}",
+          "shell": { "executable": "cmd.exe", "args": ["/d", "/c"] }
+        }
+      },
       "problemMatcher": []
     },
     {
@@ -72,4 +96,3 @@
     }
   ]
 }
-``

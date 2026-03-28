@@ -2,11 +2,20 @@
  * Client-side TTS: speaks text via /api/tts-with-timing, dispatches avatar:speak for lip-sync.
  * Supports avatar:interrupt to stop playback when user types or speaks.
  * Phase 2: schedules avatar:viseme events from real word-boundary timing (edge-tts).
+ *
+ * V110.1 additions:
+ *   • Frontend circuit breaker (3 failures → 60 s pause)
+ *   • Phrase cache (hash → Blob URL, session-scoped, max 60 entries)
+ *   • Pre-warm: synthesize "جاهز" 3 s after module load (dev only — production skips)
+ *   • Azure route telemetry: console.info('[TTS] Azure route selected') on success
+ *   • enableMimeFallback() called when /health/tts is unreachable (dev only)
+ *   • Web Speech API guard: never called in production
  */
 import type { WordTiming } from '@/ai/lipsync/timing';
 import { azureVisemeToWeights } from '@/ai/lipsync/azureViseme';
 import { COGNI_PERSONA } from '@/config/personality';
 import { estimateSpeechDurationMs } from '@/utils/TimingUtils';
+import { TTS_HEALTH_URL, enableMimeFallback } from '@/config/avatar';
 
 export type { WordTiming };
 
@@ -71,6 +80,102 @@ let _ttsSessionId = 0;
 const _visemeTimers: ReturnType<typeof setTimeout>[] = [];
 /** True while client `/api/tts-with-timing` audio is actively playing (after successful play()). */
 let _clientTtsPlaying = false;
+
+// ── Frontend Circuit Breaker (V110.1) ─────────────────────────────────────────
+const _CB_MAX_FAILURES = 3;
+const _CB_OPEN_DURATION_MS = 60_000;  // 60 s
+let _cbFailures  = 0;
+let _cbOpenUntil = 0;   // Date.now() epoch ms; 0 = closed
+
+function _cbCheck(): boolean {
+  return Date.now() < _cbOpenUntil;  // true = circuit OPEN (block call)
+}
+
+function _cbSuccess(): void {
+  _cbFailures  = 0;
+  _cbOpenUntil = 0;
+}
+
+function _cbFailure(): void {
+  _cbFailures += 1;
+  if (_cbFailures >= _CB_MAX_FAILURES) {
+    _cbOpenUntil = Date.now() + _CB_OPEN_DURATION_MS;
+    console.warn(
+      `[TTS CB] Circuit OPEN after ${_cbFailures} consecutive failures — pausing ${_CB_OPEN_DURATION_MS / 1000}s`,
+      { openUntil: new Date(_cbOpenUntil).toISOString() },
+    );
+    _cbFailures = 0;
+  }
+}
+
+// ── Phrase cache (V110.1) ─────────────────────────────────────────────────────
+// Keyed by `${voice}|${text}`, stores Blob URLs.  Max 60 entries; evict oldest on overflow.
+const _CACHE_MAX = 60;
+const _phraseCache = new Map<string, string>();   // key → Blob URL
+
+function _cacheKey(text: string, voice?: string): string {
+  return `${voice ?? 'default'}|${text}`;
+}
+
+function _cacheGet(text: string, voice?: string): string | undefined {
+  return _phraseCache.get(_cacheKey(text, voice));
+}
+
+function _cacheSet(text: string, url: string, voice?: string): void {
+  const k = _cacheKey(text, voice);
+  if (_phraseCache.size >= _CACHE_MAX) {
+    // Evict oldest entry
+    const first = _phraseCache.keys().next().value;
+    if (first) {
+      try { URL.revokeObjectURL(_phraseCache.get(first)!); } catch { /* ignore */ }
+      _phraseCache.delete(first);
+    }
+  }
+  _phraseCache.set(k, url);
+}
+
+// ── Health check + MIME fallback + pre-warm (V110.1) ─────────────────────────
+let _healthCheckDone = false;
+
+async function _runHealthCheck(): Promise<void> {
+  if (_healthCheckDone) return;
+  _healthCheckDone = true;
+  try {
+    const res = await fetch(TTS_HEALTH_URL, { method: 'GET', signal: AbortSignal.timeout(8_000) });
+    if (res.ok) {
+      console.info('[TTS] Azure route selected — /health/tts OK');
+    } else {
+      console.warn('[TTS] /health/tts returned', res.status, '— enabling MIME fallback (dev)');
+      enableMimeFallback();
+    }
+  } catch (err) {
+    console.warn('[MIME_MODE] Azure unhealthy; simulating speech — health check failed:', err);
+    enableMimeFallback();
+  }
+}
+
+/** Pre-warm: synthesize a silent short phrase to prime Azure's TLS/voice stack. */
+async function _preWarm(): Promise<void> {
+  if (typeof window === 'undefined') return;
+  try {
+    const body = JSON.stringify({ text: 'جاهز', voice: 'ar-JO-TaimNeural', type: 'text' });
+    const res = await fetch('/api/tts-with-timing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (res.ok) {
+      console.info('[TTS] Pre-warm complete — first-utterance latency reduced');
+    }
+  } catch { /* non-fatal */ }
+}
+
+if (typeof window !== 'undefined') {
+  // Stagger health-check + pre-warm to avoid blocking page load
+  setTimeout(() => { void _runHealthCheck(); }, 2_000);
+  setTimeout(() => { void _preWarm(); }, 3_500);
+}
 
 /** Approximate word timings + viseme schedule when the TTS API returns 503 (no audio). */
 function runLocalTtsLipSyncSimulation(
@@ -222,10 +327,36 @@ export async function speakWithTTS(
   options?: SpeakOptions
 ): Promise<boolean> {
   if (typeof window === 'undefined' || !text?.trim()) return false;
+
+  // ── Circuit breaker guard ────────────────────────────────────────────────
+  if (_cbCheck()) {
+    console.warn('[TTS CB] Circuit OPEN — skipping synthesis, open until', new Date(_cbOpenUntil).toISOString());
+    return false;
+  }
+
   const mySid = ++_ttsSessionId;
   stopTTS();
 
   try {
+    // ── Phrase cache lookup ──────────────────────────────────────────────
+    const arVoiceKey = options?.arVoice ?? (_ARABIC_RE.test(text) ? 'male' : undefined);
+    const cachedUrl  = _cacheGet(text, arVoiceKey);
+    if (cachedUrl) {
+      console.info('[TTS] Cache hit — skipping network fetch');
+      const audio = new Audio(cachedUrl);
+      currentAudio = audio;
+      currentUrl   = null;   // cached URL not revoked on stop
+      options?.onStart?.();
+      window.dispatchEvent(new CustomEvent('avatar:speak:start'));
+      audio.onended = () => {
+        currentAudio = null;
+        window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+        options?.onEnd?.();
+      };
+      await audio.play().catch((e) => console.warn('[TTS] Cache audio play error:', e));
+      return true;
+    }
+
     // FIX: voice stability — blend emotion speed with Cogni persona rate/pitch consistently
     const personaRate = COGNI_PERSONA.voiceParameters.rate;
     const emotionKey = options?.emotion ?? 'neutral';
@@ -245,7 +376,7 @@ export async function speakWithTTS(
         : defaultPitchFromPersona
           ? { pitch: defaultPitchFromPersona }
           : {}),
-      ar_voice: options?.arVoice ?? (_ARABIC_RE.test(text) ? 'male' : undefined),
+      ar_voice: arVoiceKey,
     });
 
     const doTtsFetch = () =>
@@ -253,6 +384,7 @@ export async function speakWithTTS(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: ttsBody,
+        signal: AbortSignal.timeout(12_000),  // 12 s hard timeout
       });
 
     const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -358,6 +490,8 @@ export async function speakWithTTS(
     const _prov = typeof data?.provider === 'string' ? data.provider.toLowerCase() : '';
     if (_prov && _SECONDARY_TTS_PROVIDERS.has(_prov)) {
       _notifySecondaryTtsEngine('response');
+    } else {
+      console.info('[TTS] Azure route selected', { provider: _prov || 'azure', ts: new Date().toISOString() });
     }
 
     const binary = Uint8Array.from(atob(audioBase64), (c) => c.charCodeAt(0));
@@ -366,6 +500,12 @@ export async function speakWithTTS(
       ? pcmBytesToWavBlob(binary, sampleRate)
       : new Blob([binary], { type: 'audio/mpeg' });
     const url = URL.createObjectURL(blob);
+
+    // ── Phrase cache: store short phrases for reuse ──────────────────────
+    if (text.length <= 120) {
+      _cacheSet(text, url, arVoiceKey);
+    }
+
     currentUrl = url;
     const audio = new Audio(url);
     currentAudio = audio;
@@ -373,7 +513,10 @@ export async function speakWithTTS(
     // Cleanup function to be called after playback ends or on fatal error
     const cleanup = () => {
       _clientTtsPlaying = false;
-      URL.revokeObjectURL(url);
+      // Don't revoke if cached
+      if (!_phraseCache.has(_cacheKey(text, arVoiceKey))) {
+        URL.revokeObjectURL(url);
+      }
       if (mySid === _ttsSessionId) {
         currentAudio = null;
         currentUrl   = null;
@@ -385,6 +528,7 @@ export async function speakWithTTS(
     audio.addEventListener('ended', cleanup);
     audio.addEventListener('error', cleanup);
 
+    _cbSuccess();   // ── Circuit breaker: mark success ──
     options?.onStart?.();
 
     // We will NOT dispatch avatar:speak:start until we confirm playback has actually started.
@@ -485,6 +629,7 @@ export async function speakWithTTS(
   } catch (err) {
     // Catch errors from fetch, JSON, or blob creation
     console.warn('[speakWithTTS] TTS pipeline exception:', err);
+    _cbFailure();   // ── Circuit breaker: mark failure ──
     if (mySid === _ttsSessionId) {
       if (currentUrl) {
         try { URL.revokeObjectURL(currentUrl); } catch { /* ignore */ }

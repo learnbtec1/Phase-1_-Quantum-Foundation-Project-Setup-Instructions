@@ -1,16 +1,18 @@
 # ── Stage 1: dependency build ────────────────────────────────────────────────
-# bullseye = Debian 11 with OpenSSL 1.1.x — required by Azure Speech SDK 1.38
-# (Debian 12/13 ships OpenSSL 3.x which triggers Error 27 in the SDK's HTTP singleton)
+# bullseye = Debian 11 مع OpenSSL 1.1.x — مطلوب لدعم Azure Speech SDK
 FROM python:3.10-slim-bullseye AS builder
 
 WORKDIR /install
 
-# System libs needed to compile psycopg2 + audio libs
+# تثبيت الأدوات اللازمة لبناء المكتبات (psycopg2، audio libs، و pysqlite3)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         libpq-dev \
+        gcc \
+        python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# إضافة pysqlite3-binary لضمان وجود نسخة SQLite حديثة لـ ChromaDB
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install/pkgs -r requirements.txt
 
@@ -20,8 +22,8 @@ FROM python:3.10-slim-bullseye
 
 WORKDIR /app
 
-# Only runtime system libs — no compiler, no headers
-# libssl1.1 provides OpenSSL 1.1.x needed by Azure Speech SDK on Debian 11
+# تثبيت مكتبات التشغيل فقط لتقليل حجم الصورة
+# libssl1.1 ضروري لـ Azure SDK، و ffmpeg ضروري لمعالجة صوت Habibi-TTS
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
         ffmpeg \
@@ -30,24 +32,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl1.1 \
         libasound2 \
         libgomp1 \
+        sqlite3 \
     && update-ca-certificates --fresh \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy compiled packages from builder
+# نسخ الحزم المثبتة من مرحلة البناء
 COPY --from=builder /install/pkgs /usr/local
 
-# Force UTF-8 stdout/stderr — prevents 'charmap' UnicodeEncodeError on Arabic text
-# SSL_CERT_FILE/DIR: required so Azure Speech SDK (libMicrosoft.CognitiveServices.Speech.core.so)
-# can locate CA certificates when initialising its HTTP singleton (fixes Error 27).
+# Chroma: يستخدم app/sqlite_chroma_compat.py لربط pysqlite3 كـ sqlite3 (LD_PRELOAD كان مساراً خاطئاً)
+
+# إعدادات اللغة والتشفير لضمان عدم حدوث UnicodeEncodeError مع النصوص العربية
+# SSL_CERT_DIR: ضروري لـ Azure SDK للتحقق من الشهادات (Fix Error 27)
 ENV PYTHONIOENCODING=utf-8 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     SSL_CERT_DIR=/etc/ssl/certs \
-    OPENSSL_CONF=/etc/ssl/openssl.cnf
+    OPENSSL_CONF=/etc/ssl/openssl.cnf \
+    PYTHONUTF8=1
 
-# Copy application source
+# نسخ سورس الكود بالكامل
 COPY . .
 
+# التأكد من وجود مجلدات البيانات والصوت وصلاحياتها
+RUN mkdir -p /app/data/audio /app/data/store /app/btec_corpus
+
 EXPOSE 8000
+
+# تشغيل السيرفر باستخدام Uvicorn
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

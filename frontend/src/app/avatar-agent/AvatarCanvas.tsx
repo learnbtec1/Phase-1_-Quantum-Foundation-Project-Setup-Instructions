@@ -15,9 +15,9 @@
 import React, { Suspense, useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import * as THREE from 'three';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { Environment, SpotLight, SoftShadows, ContactShadows, OrbitControls, PerspectiveCamera, useTexture, useGLTF } from '@react-three/drei';
+import { Environment, SpotLight, SoftShadows, ContactShadows, OrbitControls, PerspectiveCamera, TransformControls, useTexture, useGLTF } from '@react-three/drei';
 
-import { useControls, Leva } from 'leva';
+import { useControls, Leva, button } from 'leva';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import type { GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { VRM, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
@@ -920,10 +920,36 @@ const OFFICE_DESK_GLB_PATH = '/assets/office_desk.glb' as const;
 const OFFICE_DESK_TARGET_LENGTH_M = 2.95;
 /** تكبير إضافي موحّد بعد ضبط الطول (عرض/عمق/ارتفاع) */
 const OFFICE_DESK_SIZE_BOOST = 1.15;
-/** دوران المكتب حول Y — 0 = وضع افتراضي متمركز؛ غيّر لاحقاً إن رغبت */
-const OFFICE_DESK_ROTATION: [number, number, number] = [0, 0, 0];
-/** إزاحة المكتب فقط نحو الزجاج (الخلف، −Z) بالمتر — لا تُغيّر الأفاتار ولا الكاميرا */
-const OFFICE_DESK_TOWARD_GLASS_M = 1.0;
+/** Desk transform defaults (can be overridden + persisted via Leva controls). */
+const OFFICE_DESK_ROTATION_Y_DEFAULT = -Math.PI / 8;
+const OFFICE_DESK_OFFSET_X_M_DEFAULT = 2.5;
+const OFFICE_DESK_TOWARD_GLASS_M_DEFAULT = 1.0;
+const DESK_TRANSFORM_STORAGE_KEY = 'nexus-desk-transform';
+
+function readDeskTransformFromStorage(): {
+  offsetX: number;
+  towardGlass: number;
+  rotationY: number;
+} {
+  const fallback = {
+    offsetX: OFFICE_DESK_OFFSET_X_M_DEFAULT,
+    towardGlass: OFFICE_DESK_TOWARD_GLASS_M_DEFAULT,
+    rotationY: OFFICE_DESK_ROTATION_Y_DEFAULT,
+  };
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const raw = window.localStorage.getItem(DESK_TRANSFORM_STORAGE_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<typeof fallback>;
+    return {
+      offsetX: Number.isFinite(parsed.offsetX) ? parsed.offsetX : fallback.offsetX,
+      towardGlass: Number.isFinite(parsed.towardGlass) ? parsed.towardGlass : fallback.towardGlass,
+      rotationY: Number.isFinite(parsed.rotationY) ? parsed.rotationY : fallback.rotationY,
+    };
+  } catch {
+    return fallback;
+  }
+}
 /** قياسات تحجيم GLB — أطول بُعد أفقي يُكمَّل إلى `OFFICE_DESK_TARGET_LENGTH_M` بعد قياس الـ bbox */
 const OFFICE_DESK_SCALE_X = (2.0 / 3.5) * 0.25 * 0.25 * 0.5;
 const OFFICE_DESK_SCALE_Y = 1.2 * 0.25 * 0.25 * 0.5;
@@ -946,14 +972,93 @@ function OfficeDeskFromGltf({
   groundLockedRef?: React.MutableRefObject<boolean>;
 }) {
   const { scene } = useGLTF(OFFICE_DESK_GLB_PATH) as { scene: THREE.Group };
+  const deskSaved = useMemo(() => readDeskTransformFromStorage(), []);
+  const [deskOffsetXState, setDeskOffsetXState] = useState(deskSaved.offsetX);
+  const [deskTowardGlassState, setDeskTowardGlassState] = useState(deskSaved.towardGlass);
+  const [deskRotationYState, setDeskRotationYState] = useState(deskSaved.rotationY);
+  const deskGroupRef = useRef<THREE.Group | null>(null);
+  const [deskGroupObj, setDeskGroupObj] = useState<THREE.Group | null>(null);
+  const deskDragReentryRef = useRef(false);
+  const {
+    deskOffsetX,
+    deskTowardGlass,
+    deskRotationY,
+  } = useControls('Desk Transform', {
+    deskOffsetX: {
+      value: deskOffsetXState,
+      min: -6,
+      max: 6,
+      step: 0.05,
+      label: 'Desk X',
+      onChange: (v: number) => {
+        if (deskDragReentryRef.current) return;
+        setDeskOffsetXState(v);
+      },
+    },
+    deskTowardGlass: {
+      value: deskTowardGlassState,
+      min: -4,
+      max: 4,
+      step: 0.05,
+      label: 'Desk Z Offset',
+      onChange: (v: number) => {
+        if (deskDragReentryRef.current) return;
+        setDeskTowardGlassState(v);
+      },
+    },
+    deskRotationY: {
+      value: deskRotationYState,
+      min: -Math.PI,
+      max: Math.PI,
+      step: 0.01,
+      label: 'Desk Rot Y',
+      onChange: (v: number) => {
+        if (deskDragReentryRef.current) return;
+        setDeskRotationYState(v);
+      },
+    },
+  });
+
+  const { deskMouseEnabled, deskMouseMode } = useControls('Desk Transform Mouse', {
+    deskMouseEnabled: {
+      value: true,
+      label: 'Mouse Gizmo',
+    },
+    deskMouseMode: {
+      value: 'translate',
+      options: ['translate', 'rotate'],
+      label: 'Mouse Mode',
+    },
+  });
+
+  useControls('Desk Transform Actions', {
+    saveDeskTransform: button(() => {
+      if (typeof window === 'undefined') return;
+      const payload = {
+        offsetX: deskOffsetXState,
+        towardGlass: deskTowardGlassState,
+        rotationY: deskRotationYState,
+      };
+      window.localStorage.setItem(DESK_TRANSFORM_STORAGE_KEY, JSON.stringify(payload));
+      console.info('[DeskTransform] saved', payload);
+    }),
+    resetDeskTransform: button(() => {
+      if (typeof window === 'undefined') return;
+      window.localStorage.removeItem(DESK_TRANSFORM_STORAGE_KEY);
+      setDeskOffsetXState(OFFICE_DESK_OFFSET_X_M_DEFAULT);
+      setDeskTowardGlassState(OFFICE_DESK_TOWARD_GLASS_M_DEFAULT);
+      setDeskRotationYState(OFFICE_DESK_ROTATION_Y_DEFAULT);
+      console.info('[DeskTransform] reset to defaults');
+    }),
+  });
   /**
    * V57 — layout deps: `scene` + `zCenter` only. Using a fixed reference Y for bbox math avoids
    * rebuilding the cloned GLB whenever `floorY` ticks (carpet settle), which was re-registering colliders every frame.
    */
-  const { deskRoot, px, pz } = useMemo((): {
+  const { deskRoot, pxBase, pzBase } = useMemo((): {
     deskRoot: THREE.Group;
-    px: number;
-    pz: number;
+    pxBase: number;
+    pzBase: number;
   } => {
     const root = scene.clone(true);
     root.name = 'OfficeDeskGltfRoot';
@@ -988,27 +1093,27 @@ function OfficeDeskFromGltf({
      * توسيط المكتب: مركز الـ AABB عند (0، ROOM_Z_CENTER) على مستوى الأرض.
      */
     const refFloorY = ROOM_BOUNDS_DEFAULT.floorY;
-    root.rotation.set(OFFICE_DESK_ROTATION[0], OFFICE_DESK_ROTATION[1], OFFICE_DESK_ROTATION[2]);
+    root.rotation.set(0, 0, 0);
     root.position.set(0, refFloorY, 0);
     root.updateMatrixWorld(true);
     const boxW = new THREE.Box3().setFromObject(root);
     const boxCenter = new THREE.Vector3();
     boxW.getCenter(boxCenter);
     const pxOut = -boxCenter.x;
-    const pzOut = zCenter - boxCenter.z - OFFICE_DESK_TOWARD_GLASS_M;
+    const pzOut = zCenter - boxCenter.z;
     root.rotation.set(0, 0, 0);
     root.position.set(0, 0, 0);
 
     return {
       deskRoot: root,
-      px: pxOut,
-      pz: pzOut,
+      pxBase: pxOut,
+      pzBase: pzOut,
     };
   }, [scene, zCenter]);
 
   const deskPosition = useMemo(
-    (): [number, number, number] => [px, floorY, pz],
-    [px, pz, floorY],
+    (): [number, number, number] => [pxBase + deskOffsetXState, floorY, pzBase - deskTowardGlassState],
+    [pxBase, pzBase, deskOffsetXState, deskTowardGlassState, floorY],
   );
 
   useEffect(() => {
@@ -1018,12 +1123,21 @@ function OfficeDeskFromGltf({
         deskRoot.scale.x,
         deskRoot.scale.y,
         deskRoot.scale.z,
-        'px,pz',
-        px,
-        pz,
+        'pxBase,pzBase',
+        pxBase,
+        pzBase,
       );
     }
-  }, [deskRoot, px, pz]);
+  }, [deskRoot, pxBase, pzBase]);
+
+  useEffect(() => {
+    // Keep local desk state synchronized with Leva slider state.
+    deskDragReentryRef.current = true;
+    setDeskOffsetXState(deskOffsetX);
+    setDeskTowardGlassState(deskTowardGlass);
+    setDeskRotationYState(deskRotationY);
+    deskDragReentryRef.current = false;
+  }, [deskOffsetX, deskTowardGlass, deskRotationY]);
 
   useEffect(() => {
     // GROUND LOCK V2 — skip only if already locked before first registration (edge/HMR).
@@ -1042,8 +1156,49 @@ function OfficeDeskFromGltf({
     // groundLockedRef intentionally omitted — ref flip must not re-run cleanup (would clear desk colliders).
   }, [deskRoot]);
 
+  const onDeskObjectChange = useCallback(() => {
+    const g = deskGroupRef.current;
+    if (!g) return;
+    // Keep desk on floor plane while dragging.
+    g.position.y = floorY;
+    deskDragReentryRef.current = true;
+    setDeskOffsetXState(g.position.x - pxBase);
+    setDeskTowardGlassState(pzBase - g.position.z);
+    setDeskRotationYState(g.rotation.y);
+    deskDragReentryRef.current = false;
+  }, [floorY, pxBase, pzBase]);
+
   return (
-    <primitive object={deskRoot} position={deskPosition} rotation={OFFICE_DESK_ROTATION} />
+    <>
+      <group
+        ref={(node) => {
+          deskGroupRef.current = node;
+          setDeskGroupObj(node);
+          if (node && process.env.NODE_ENV === 'development') {
+            console.info('[OfficeDeskFromGltf] group mounted', {
+              position: node.position.toArray(),
+              scale: node.scale.toArray(),
+              visible: node.visible,
+              children: node.children.length,
+            });
+          }
+        }}
+        position={deskPosition}
+        rotation={[0, deskRotationYState, 0]}
+        visible={true}
+      >
+        {deskRoot && <primitive object={deskRoot} />}
+      </group>
+      {deskMouseEnabled && deskGroupObj && (
+        <TransformControls
+          object={deskGroupObj}
+          mode={deskMouseMode as 'translate' | 'rotate'}
+          onObjectChange={onDeskObjectChange}
+          makeDefault={false}
+          size={0.75}
+        />
+      )}
+    </>
   );
 }
 
@@ -1511,6 +1666,7 @@ function VRMScene({
   const lastRecalibTsRef = useRef(0);
   const RECALIB_MIN_MS = 1000;
   const LOWER_BONES = ['leftUpperLeg', 'leftLowerLeg', 'leftFoot', 'rightUpperLeg', 'rightLowerLeg', 'rightFoot'] as const;
+  const lowerBodyBones = LOWER_BONES;
   const footAxisFixedRef = useRef(false);
   /** Traffic light: dynamic Cogni VRMA clip from `animationMap` is actively playing. */
   const vrmaGestureNowRef = useRef(false);
@@ -1573,10 +1729,12 @@ function VRMScene({
   }, []);
 
   // ── Phase 2: single source of truth for standing / seat height (Leva in dev) ─
-  const { yOffset, sitHeightOffset } = useControls('Avatar Position', {
+  const { yOffset, sitHeightOffset, footPaddingOffset } = useControls('Avatar Position', {
     /** V55: offset from `ROOM_BOUNDS.floorY` (updates when carpet AABB is applied) */
     yOffset:         { value: 0, min: -2, max: 2, step: 0.01, label: 'ΔY from floor (stand)' },
     sitHeightOffset: { value: 0.45, min: 0.15, max: 0.9, step: 0.01 },
+    /** V122: lift feet above carpet surface (debug: tune if feet sink into floor) */
+    footPaddingOffset: { value: 0, min: -0.3, max: 0.3, step: 0.01, label: 'Foot padding Y' },
   });
   const { walkForwardDistance, autoPatrol } = useControls('Avatar Locomotion', {
     walkForwardDistance: { value: 1.2, min: 0.3, max: 4, step: 0.1 },
@@ -1796,11 +1954,11 @@ function VRMScene({
     recalibrateFeet();
   }, [recalibrateFeet]);
 
-  // V120 — reset lower body to T-pose bind-pose quaternions (replaces hard-coded angles)
-  const resetLowerBodyToIdle = useCallback(() => {
+  // V120 — reset lower body to captured bind-pose quaternions (mask lower-body drift from clips/IK)
+  const resetLowerBodyToBind = useCallback(() => {
     const vrm = vrmRef.current; if (!vrm) return;
     const get = (n: string) => (vrm.humanoid as any)?.getRawBoneNode(n);
-    LOWER_BONES.forEach(name => {
+    lowerBodyBones.forEach(name => {
       const b = get(name) as THREE.Object3D | undefined;
       const q = bindLowerBodyRotationsRef.current.get(name);
       if (b && q) {
@@ -1809,7 +1967,10 @@ function VRMScene({
       }
     });
     vrm.scene?.updateMatrixWorld(true);
-  }, []);
+  }, [lowerBodyBones]);
+
+  // Backward-compatible alias for older call-sites in this module.
+  const resetLowerBodyToIdle = resetLowerBodyToBind;
 
   // V120 — one-shot foot-axis correction: if foot→toes vector is pitched too far up, apply −15° fix
   const fixFootAxisIfNeeded = useCallback(() => {
@@ -2095,16 +2256,6 @@ function VRMScene({
       const mixer = mixerRef.current;
       if (!model?.humanoid || !mixer) {
         console.warn('[VRMA Cogni] VRM or mixer not ready —', url);
-        return;
-      }
-
-      const nowMs = Date.now();
-      if (nowMs < walkUntilRef.current) {
-        console.warn('Gesture blocked: Avatar is currently walking.');
-        return;
-      }
-      if (isSittingRef.current) {
-        console.warn('Gesture blocked: Avatar is seated; standing intent VRMA skipped.');
         return;
       }
 
@@ -2553,7 +2704,8 @@ function VRMScene({
         return dur; // fallback to gesture_duration_ms if clip not loaded yet
       };
 
-      if (isSittingRef.current) {
+      const allowVrmaGesturesWhenSeated = true;
+      if (isSittingRef.current && !allowVrmaGesturesWhenSeated) {
         if (gType === 'look') {
           headYawRef.current = 0.12 * (Math.random() > 0.5 ? 1 : -1);
           headPitchRef.current = -0.05;
@@ -2677,7 +2829,7 @@ function VRMScene({
         }
         console.log(`[BRAIN] Gesture received (co-speech): ${gType}`);
       } else if (gType === 'relax') {
-        if (vrmaReadyRef.current && !isSittingRef.current) {
+        if (vrmaReadyRef.current) {
           const clipMsR = getClipDurMs('relax');
           vrmaClipDoneRef.current = false;
           playVRMA('relax', false, 0.3);
@@ -2686,13 +2838,13 @@ function VRMScene({
         }
         console.log('[BRAIN] Gesture received: relax');
       } else if (gType === 'look') {
-        if (vrmaReadyRef.current && !isSittingRef.current) {
+        if (vrmaReadyRef.current) {
           const clipMsL = getClipDurMs('look');
           vrmaClipDoneRef.current = false;
           playVRMA('look', false, 0.3);
           vrmaGestureUntilRef.current = Date.now() + dur + 500;
           setTimeout(restoreAfterGesture, Math.max(clipMsL, dur) + 400);
-        } else if (!isSittingRef.current) {
+        } else {
           headYawRef.current = 0.1 * (Math.random() > 0.5 ? 1 : -1);
           headUntilRef.current = Date.now() + Math.min(dur, 2000);
         }
@@ -2717,7 +2869,7 @@ function VRMScene({
         headUntilRef.current = Date.now() + 720;
         console.log('[BRAIN] Gesture received: lean_back → head lean');
       } else if (gType === 'celebration') {
-        if (vrmaReadyRef.current && !isSittingRef.current) {
+        if (vrmaReadyRef.current) {
           pulseHandSeparationWindow(HAND_SEPARATION_PULSE_MS);
           const clipMsC = getClipDurMs('cheer');
           vrmaClipDoneRef.current = false;
@@ -2727,7 +2879,7 @@ function VRMScene({
         }
         console.log('[BRAIN] Gesture received: celebration → cheer');
       } else if (gType === 'idle') {
-        if (vrmaReadyRef.current && !isSittingRef.current) {
+        if (vrmaReadyRef.current) {
           idleIdxRef.current = (idleIdxRef.current + 1) % 4;
           playVRMA(`idle${idleIdxRef.current}`, true, 0.55);
           idleNextRef.current = Date.now()
@@ -3139,6 +3291,9 @@ function VRMScene({
     window.addEventListener('avatar:play',          onPlay);
     window.addEventListener('avatar:speech:emphasis', onSpeechEmphasis);
 
+    // Ensure we always boot in standing mode; avoids sticky seated state across HMR/reloads.
+    onStand();
+
     return () => {
       window.removeEventListener('avatar:transcribing', onTranscribing);
       window.removeEventListener('avatar:listening',    onListening);
@@ -3392,7 +3547,7 @@ function VRMScene({
 
     // V52 — one-shot foot–floor alignment (world AABB vs room floor), then persistent additive Y
     if (v && !footCalibDoneRef.current) {
-      const preFootY = standTargetY + yMicro + breathBounceY;
+      const preFootY = standTargetY + yMicro + breathBounceY + footPaddingOffset;
       if (!isSittingNow) {
         group.position.x = currentAvatarXRef.current;
         group.position.z = currentAvatarZRef.current;
@@ -3459,11 +3614,11 @@ function VRMScene({
       }
       group.position.x = currentAvatarXRef.current;
       group.position.z = currentAvatarZRef.current;
-      group.position.y = standTargetY + footY + yMicro + breathBounceY;
+      group.position.y = standTargetY + footY + yMicro + breathBounceY + footPaddingOffset;
     } else {
       group.position.set(
         permaChairXRef.current,
-        standTargetY + footY + yMicro + breathBounceY,
+        standTargetY + footY + yMicro + breathBounceY + footPaddingOffset,
         permaChairZRef.current,
       );
     }
@@ -3543,6 +3698,8 @@ function VRMScene({
       }
       mixerRef.current.update(safeDelta);
     }
+    // Enforce lower-body bind mask every frame immediately after animation update.
+    resetLowerBodyToBind();
     // V56 FeetFixer — after VRMA: baseline-relative delta clamp (inv(base)*qRelNow → Euler clip → blend)
     if (fixFeet && feetFixerRef.current) {
       feetFixerRef.current.apply({
@@ -4142,7 +4299,6 @@ function VRMScene({
       const sitLowerLegX = SIT_LOWER_LEG_X_SEATED;
       // Micro pelvic roll (local Z) — weight shift without translating hips.position (feet stay planted)
       const pelvicRollStand = Math.sin(t * 0.5) * 0.005 * skelMul;
-
       const isWaving   = now < waveUntilRef.current;
       const gs         = gestureRef.current;
       if (gs && now > gs.startMs + gs.durationMs) gestureRef.current = null;
@@ -4222,11 +4378,19 @@ function VRMScene({
           const lul = rawBone8(humanoid, 'leftUpperLeg');
           const rll = rawBone8(humanoid, 'rightLowerLeg');
           const lll = rawBone8(humanoid, 'leftLowerLeg');
+          const rf  = rawBone8(humanoid, 'rightFoot');
+          const lf  = rawBone8(humanoid, 'leftFoot');
+          const rto = rawBone8(humanoid, 'rightToes');
+          const lto = rawBone8(humanoid, 'leftToes');
           if (isSittingEffective) {
             if (rul) rul.rotation.set( sitUpperLegX, 0,  0.04, 'XYZ');
             if (lul) lul.rotation.set( sitUpperLegX, 0, -0.04, 'XYZ');
             if (rll) rll.rotation.set( sitLowerLegX, 0,  0,    'XYZ');
             if (lll) lll.rotation.set( sitLowerLegX, 0,  0,    'XYZ');
+            if (rf)  rf.rotation.set(0.12, 0, 0, 'XYZ');
+            if (lf)  lf.rotation.set(0.12, 0, 0, 'XYZ');
+            if (rto) rto.rotation.set(0,    0, 0, 'XYZ');
+            if (lto) lto.rotation.set(0,    0, 0, 'XYZ');
           } else {
             resetLowerBodyToIdle();
             // Full hips reset — restore T-pose bind position + clear pelvic tilt
@@ -4306,11 +4470,19 @@ function VRMScene({
           const lul = rawBone8(humanoid, 'leftUpperLeg');
           const rll = rawBone8(humanoid, 'rightLowerLeg');
           const lll = rawBone8(humanoid, 'leftLowerLeg');
+          const rf  = rawBone8(humanoid, 'rightFoot');
+          const lf  = rawBone8(humanoid, 'leftFoot');
+          const rto = rawBone8(humanoid, 'rightToes');
+          const lto = rawBone8(humanoid, 'leftToes');
           if (isSittingEffective) {
             if (rul) rul.rotation.set( sitUpperLegX, 0,  0.04, 'XYZ');
             if (lul) lul.rotation.set( sitUpperLegX, 0, -0.04, 'XYZ');
             if (rll) rll.rotation.set( sitLowerLegX, 0,  0,    'XYZ');
             if (lll) lll.rotation.set( sitLowerLegX, 0,  0,    'XYZ');
+            if (rf)  rf.rotation.set(0.12, 0, 0, 'XYZ');
+            if (lf)  lf.rotation.set(0.12, 0, 0, 'XYZ');
+            if (rto) rto.rotation.set(0,    0, 0, 'XYZ');
+            if (lto) lto.rotation.set(0,    0, 0, 'XYZ');
           } else {
             resetLowerBodyToIdle();
           }
@@ -4359,14 +4531,13 @@ function VRMScene({
           if (lul) lul.rotation.set( sitUpperLegX, 0, -0.04, 'XYZ');
           if (rll) rll.rotation.set( sitLowerLegX, 0,  0,    'XYZ');
           if (lll) lll.rotation.set( sitLowerLegX, 0,  0,    'XYZ');
-          // Feet: with lower leg vertical, ankle should be neutral (0) so sole faces floor.
-          // Slight plantar flexion (0.12) looks natural in resting seated pose.
+          // Feet: keep the same angle magnitude but tilt backward in seated pose.
           const rf  = rawBone8(humanoid, 'rightFoot');
           const lf  = rawBone8(humanoid, 'leftFoot');
           const rto = rawBone8(humanoid, 'rightToes');
           const lto = rawBone8(humanoid, 'leftToes');
-          if (rf)  rf.rotation.set( 0.12, 0, 0, 'XYZ');
-          if (lf)  lf.rotation.set( 0.12, 0, 0, 'XYZ');
+          if (rf)  rf.rotation.set(0.12, 0, 0, 'XYZ');
+          if (lf)  lf.rotation.set(0.12, 0, 0, 'XYZ');
           if (rto) rto.rotation.set(0,    0, 0, 'XYZ');
           if (lto) lto.rotation.set(0,    0, 0, 'XYZ');
           if (!vrmaGestureNow) {
@@ -4745,7 +4916,14 @@ function VRMScene({
       {/* Stable wrapper: scale ~1.35; rotation.y default π (legacy teach) — useFrame sets group.rotation.y from avatarFacingRef (base VRM0≈π, VRM1≈0). */}
       {/* Fix 6: Initial position matches currentAvatarXRef/ZRef to prevent one-frame flicker. */}
       {/* V121: Render liftNode (contains vrm.scene) instead of vrm.scene directly. */}
-      <group ref={groupRef} position={[AVATAR_DEFAULT_STAND_X, AVATAR_BASE_Y, AVATAR_DEFAULT_STAND_Z]} rotation={[0, Math.PI, 0]} scale={[1.35, 1.35, 1.35]}>
+      {/* IMPORTANT: Set raycast={handleRaycast} to prevent avatar from being picked by TransformControls */}
+      <group 
+        ref={groupRef} 
+        position={[AVATAR_DEFAULT_STAND_X, AVATAR_BASE_Y, AVATAR_DEFAULT_STAND_Z]} 
+        rotation={[0, Math.PI, 0]} 
+        scale={[1.35, 1.35, 1.35]}
+        raycast={() => []}
+      >
         {liftNodeRef.current && <primitive object={liftNodeRef.current} />}
       </group>
     </>
@@ -4868,7 +5046,7 @@ function ExposureSync({ exposure }: { exposure: number }) {
 // This component only renders the R3F canvas and reacts to window avatar:* events.
 
 export default function AvatarCanvas({
-  vrmUrl = '/models/teach.vrm',
+  vrmUrl = '/models/cogni-avatar.vrm',
   fallbackVrmUrl: _fallbackVrmUrl,
 }: {
   vrmUrl?: string;
@@ -5131,8 +5309,8 @@ export default function AvatarCanvas({
 
   return (
     <div className="relative w-full h-full bg-[#0a0a12]">
-      <div className="absolute top-2 left-2 z-20 rounded bg-red-900/80 px-2 py-1 text-[10px] text-yellow-200">
-        EMERGENCY_REVERT v9
+      <div className="absolute top-2 left-2 z-20 rounded bg-slate-900/80 px-2 py-1 text-[10px] text-cyan-200">
+        AVATAR_RUNTIME v10
       </div>
       <div className="absolute top-8 left-2 z-20 rounded bg-black/70 px-2 py-1 text-[10px] text-cyan-300">
         VRM: {vrmUrl}

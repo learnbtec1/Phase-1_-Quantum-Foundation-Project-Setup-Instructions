@@ -17,7 +17,27 @@ from app.core.redis_client import get_redis
 logger = logging.getLogger(__name__)
 
 OPENAI_TOKEN_LIMIT_PER_MINUTE = int(os.getenv("OPENAI_TOKEN_LIMIT_PER_MINUTE", "5000"))
-TTS_CALL_LIMIT_PER_HOUR = int(os.getenv("TTS_CALL_LIMIT_PER_HOUR", "30"))
+
+
+def _load_tts_call_limit_per_hour() -> int:
+    """Redis hourly budget for POST /api/v1/tts* per client IP. Env: TTS_CALL_LIMIT_PER_HOUR."""
+    # os.getenv only accepts str default; semantic default is 500 calls/hour
+    raw = os.getenv("TTS_CALL_LIMIT_PER_HOUR", "500")
+    try:
+        n = int(str(raw).strip())
+    except ValueError:
+        logger.warning(
+            "Invalid TTS_CALL_LIMIT_PER_HOUR=%r — using default 500",
+            raw,
+        )
+        return 500
+    if n < 1:
+        logger.warning("TTS_CALL_LIMIT_PER_HOUR=%s < 1 — clamping to 1", n)
+        return 1
+    return n
+
+
+TTS_CALL_LIMIT_PER_HOUR = _load_tts_call_limit_per_hour()
 
 
 def _rl_key(prefix: str, ident: str, window: str) -> str:

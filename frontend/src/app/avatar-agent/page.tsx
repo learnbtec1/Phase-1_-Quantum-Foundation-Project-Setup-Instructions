@@ -27,13 +27,7 @@ function AvatarAgentSearchParamsBridge() {
 
 export default function AvatarAgentPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="flex min-h-screen items-center justify-center bg-[#0a0a12] text-sm text-white">
-          جاري التحميل...
-        </div>
-      }
-    >
+    <Suspense fallback={null}>
       <AvatarAgentSearchParamsBridge />
     </Suspense>
   );
