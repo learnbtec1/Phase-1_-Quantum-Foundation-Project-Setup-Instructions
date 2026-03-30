@@ -98,17 +98,15 @@ export default function ConversationManager({
     };
   }, []);
 
-  // ── Listen for VAD/user speaking events ──────────────────────────────────
+  // ── Turn-taking: real speech from VAD (not merely "mic on") ───────────────
   useEffect(() => {
     const onUserStart = () => {
       setIsUserSpeaking(true);
-      
-      // Temporarily disable stopTTS to prevent interruptions
       if (isAvatarSpeaking) {
-        console.log('[ConversationManager] User is speaking, but avatar will not be interrupted.');
-        // stopTTS(); // Disabled
+        stopTTS();
+        window.dispatchEvent(new CustomEvent('cogni:avatar:interrupt'));
+        console.log('[ConversationManager] User speaking — avatar TTS interrupted');
       }
-
       onUserSpeaking?.();
     };
 
@@ -119,22 +117,10 @@ export default function ConversationManager({
 
     if (typeof window === 'undefined') return;
 
-    // Listen for VAD or mic button events
-    window.addEventListener('avatar:listening', (e: Event) => {
-      const evt = e as CustomEvent;
-      if (evt.detail?.active) {
-        onUserStart();
-      } else {
-        onUserStop();
-      }
-    });
-
-    // Also listen for explicit user:speaking events (if custom VAD fires them)
     window.addEventListener('cogni:user:speaking', onUserStart);
     window.addEventListener('cogni:user:silent', onUserStop);
 
     return () => {
-      window.removeEventListener('avatar:listening', onUserStart);
       window.removeEventListener('cogni:user:speaking', onUserStart);
       window.removeEventListener('cogni:user:silent', onUserStop);
     };

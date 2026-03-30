@@ -1,34 +1,107 @@
 'use client';
 /**
  * ComfortLightingRig — Professional anime three-point lighting.
+ * V2: Mood-reactive lighting — key light and ambient lerp to emotion-matched
+ * color palettes without re-rendering the scene.  Uses THREE.Color lerp
+ * driven by useFrame (R3F context required).
  *
- * Tuned for MToon 1.0 (VRM 1.0 standard) which computes:
- *   - Toon-shaded diffuse from directional lights
- *   - Rim-highlight layer on top of each directional source
- *   - Specular gloss from the PBR environment map
- *
- * Three-point setup:
- *   Key  — warm, upper-left-front, high intensity → defines face + rim glow
- *   Fill — cool lavender, right side, 45 % key    → prevents flat/chalky look
- *   Rim  — bright white-blue, behind avatar        → silhouette separation
- *
- * Still comfortable for long Arabic-learning sessions:
- *   hemisphere sky is very soft, ambient is kept below 0.2.
+ * Emotion presets:
+ *   celebrate / excited  → warm golden (#ffd880) — celebration glow
+ *   encouraging / happy  → warm amber  (#ffb563) — praise warmth
+ *   neutral / attentive  → soft white  (#fff5e0) — default
+ *   thinking / curious   → cool blue   (#d0e8ff) — analytical focus
+ *   sad / concerned      → cool grey   (#d8e0f0) — empathetic calm
+ *   angry / strict       → deep red    (#ffcfc0) — authoritative heat
  */
-import React from 'react';
+import React, { useRef, useEffect } from 'react';
+import * as THREE from 'three';
+import { useFrame } from '@react-three/fiber';
 import { Environment } from '@react-three/drei';
 
-export default function ComfortLightingRig() {
+// ── Emotion → key-light colour map ────────────────────────────────────────────
+const EMOTION_KEY_COLOR: Record<string, string> = {
+  celebrate:   '#ffd880',
+  excited:     '#ffc44d',
+  happy:       '#ffb563',
+  encouraging: '#ffb563',
+  proud:       '#ffc070',
+  neutral:     '#fff5e0',
+  attentive:   '#fff5e0',
+  friendly:    '#ffe8c0',
+  calm:        '#e8f0ff',
+  thinking:    '#d0e8ff',
+  curious:     '#c8e0ff',
+  sad:         '#d8e0f0',
+  concerned:   '#d8e0f0',
+  anxious:     '#e0d8f0',
+  angry:       '#ffcfc0',
+  strict:      '#ffd8c8',
+  surprised:   '#fff0a0',
+};
+
+const EMOTION_AMBIENT_COLOR: Record<string, string> = {
+  celebrate:   '#ffedd0',
+  excited:     '#ffe4b0',
+  encouraging: '#ffe4b0',
+  thinking:    '#c8d8f8',
+  curious:     '#c0d4f8',
+  sad:         '#c8d0e8',
+  angry:       '#f8d0c8',
+  neutral:     '#ffe8d6',
+};
+
+const EMOTION_AMBIENT_INTENSITY: Record<string, number> = {
+  celebrate:   0.22,
+  excited:     0.20,
+  thinking:    0.10,
+  sad:         0.10,
+  neutral:     0.12,
+};
+
+interface ComfortLightingRigProps {
+  emotion?: string;
+}
+
+export default function ComfortLightingRig({ emotion = 'neutral' }: ComfortLightingRigProps) {
+  const keyLightRef  = useRef<THREE.DirectionalLight>(null);
+  const ambientRef   = useRef<THREE.AmbientLight>(null);
+  const targetKeyClr = useRef(new THREE.Color('#fff5e0'));
+  const targetAmbClr = useRef(new THREE.Color('#ffe8d6'));
+  const targetAmbInt = useRef(0.12);
+
+  // Update target colours when emotion changes
+  useEffect(() => {
+    const kc = EMOTION_KEY_COLOR[emotion]    ?? '#fff5e0';
+    const ac = EMOTION_AMBIENT_COLOR[emotion] ?? '#ffe8d6';
+    const ai = EMOTION_AMBIENT_INTENSITY[emotion] ?? 0.12;
+    targetKeyClr.current.set(kc);
+    targetAmbClr.current.set(ac);
+    targetAmbInt.current = ai;
+  }, [emotion]);
+
+  // Smoothly lerp lights toward target each frame (no re-render, pure ref mutation)
+  useFrame((_, delta) => {
+    const t = Math.min(1, delta * 2.5);   // ~400 ms transition at 60fps
+    if (keyLightRef.current) {
+      (keyLightRef.current.color as THREE.Color).lerp(targetKeyClr.current, t);
+    }
+    if (ambientRef.current) {
+      (ambientRef.current.color as THREE.Color).lerp(targetAmbClr.current, t);
+      ambientRef.current.intensity += (targetAmbInt.current - ambientRef.current.intensity) * t;
+    }
+  });
+
   return (
     <>
-      {/* ── Very soft ambient — prevents pure-black shadows ────────────────── */}
-      <ambientLight intensity={0.12} color="#ffe8d6" />
+      {/* ── Ambient — mood-reactive warm base */}
+      <ambientLight ref={ambientRef} intensity={0.12} color="#ffe8d6" />
 
-      {/* ── Hemisphere — sky lavender / dark ground bounce ──────────────────── */}
+      {/* ── Hemisphere — sky lavender / dark ground bounce */}
       <hemisphereLight args={['#c8d8ff', '#0a0d14', 0.45]} />
 
-      {/* ── Key light: warm, upper-left-front — main MToon toon shading ──────── */}
+      {/* ── Key light: mood-reactive warm, upper-left-front */}
       <directionalLight
+        ref={keyLightRef}
         position={[-2.5, 5.5, 3.0]}
         intensity={2.4}
         color="#fff5e0"
@@ -45,7 +118,7 @@ export default function ComfortLightingRig() {
         shadow-normalBias={0.04}
       />
 
-      {/* ── Fill light: cool lavender, right side — softens key shadows ──────── */}
+      {/* ── Fill light: cool lavender, right side */}
       <directionalLight
         position={[3.5, 3.0, 2.5]}
         intensity={1.0}
@@ -53,7 +126,7 @@ export default function ComfortLightingRig() {
         castShadow={false}
       />
 
-      {/* ── Rim light: bright white-blue, behind avatar — silhouette pop ──────── */}
+      {/* ── Rim light: bright white-blue, behind avatar */}
       <directionalLight
         position={[0.5, 4.0, -5.0]}
         intensity={1.5}
@@ -61,7 +134,7 @@ export default function ComfortLightingRig() {
         castShadow={false}
       />
 
-      {/* ── Face-level point: warm desk bounce — MToon inner glow effect ──────── */}
+      {/* ── Face-level point: warm desk bounce */}
       <pointLight
         position={[0, 0.3, -1.2]}
         intensity={0.55}
@@ -70,7 +143,7 @@ export default function ComfortLightingRig() {
         decay={2}
       />
 
-      {/* ── PBR env: city preset — gives specular gloss to MToon surfaces ──────── */}
+      {/* ── PBR env map */}
       <Environment preset="city" background={false} environmentIntensity={0.50} />
     </>
   );

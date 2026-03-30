@@ -16,12 +16,18 @@ export const VRM_FALLBACKS: readonly string[] = [
       ? [process.env.NEXT_PUBLIC_AVATAR_VRM_URL.trim()]
       : []
   ),
-  '/models/teach.vrm?v=hips-fix', // PRIMARY — VRM 0.x, hips quaternion reset
+  '/models/cogni_final.vrm',   // T-pose rig — physical filename avoids stale cogni.vrm cache
 ];
 
 /** Returns the primary VRM URL. All components must call this — never hardcode paths. */
 export function pickVrmUrl(): string {
-  return '/models/teach.vrm?v=hips-fix';
+  if (
+    typeof process !== 'undefined' &&
+    process.env.NEXT_PUBLIC_AVATAR_VRM_URL?.trim()
+  ) {
+    return process.env.NEXT_PUBLIC_AVATAR_VRM_URL.trim();
+  }
+  return '/models/cogni_final.vrm';
 }
 
 // ── Feature flags ─────────────────────────────────────────────────────────────
@@ -44,9 +50,11 @@ export const USE_VISEME_PREDICT =
 /**
  * MIME mode — bypass all browser/API TTS; simulate speaking duration from text length
  * (~65 ms/char) for gesture/expression testing without audio latency or failures.
- * Set `true` locally when debugging motion; keep `false` in production builds.
+ * Enable via env: NEXT_PUBLIC_MIME_MODE=true  (or keep false for production).
  */
-export const ENABLE_MIME_MODE = false;
+export const ENABLE_MIME_MODE: boolean =
+  typeof process !== 'undefined' &&
+  process.env.NEXT_PUBLIC_MIME_MODE === 'true';
 
 // ── Humanization tuning ───────────────────────────────────────────────────────
 
@@ -184,3 +192,111 @@ export const PHYSICS_CONFIG = {
     FLOOR: 0b1000,
   },
 } as const;
+
+// ── Env-driven avatar / floor tuning (AvatarCanvas, RoomShell) ───────────────
+
+export function readAvatarStandYOffsetEnv(): number {
+  if (typeof process === 'undefined') return 0;
+  const v = parseFloat(process.env.NEXT_PUBLIC_AVATAR_STAND_Y_OFFSET ?? '0');
+  return Number.isFinite(v) ? v : 0;
+}
+
+/** Radians added to body yaw for VRM 0.x vs 1.0 rigs; null = auto from meta. */
+export function readAvatarFacingYawBaseEnv(): number | null {
+  if (typeof process === 'undefined') return null;
+  const raw = process.env.NEXT_PUBLIC_AVATAR_FACING_YAW_BASE?.trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+export const AVATAR_BREATHE_SCALE_VRM1 = 0.78;
+
+export const SIT_UPPER_LEG_X_VRM0 = -1.22;
+export const SIT_UPPER_LEG_X_VRM1 = -1.05;
+export const SIT_LOWER_LEG_X_SEATED = 1.42;
+
+export function readAvatarSitWorldYOffsetEnv(): number {
+  if (typeof process === 'undefined') return 0;
+  const v = parseFloat(process.env.NEXT_PUBLIC_AVATAR_SIT_WORLD_Y_OFFSET ?? '0');
+  return Number.isFinite(v) ? v : 0;
+}
+
+export function readAvatarDebugForceStandEnv(): boolean {
+  return (
+    typeof process !== 'undefined' &&
+    process.env.NEXT_PUBLIC_AVATAR_DEBUG_FORCE_STAND === 'true'
+  );
+}
+
+/** Extra metres above rug AABB top for foot / walk surface (default 1.5 cm). */
+export function readRugWalkSurfaceYExtraEnv(): number {
+  if (typeof process === 'undefined') return 0.015;
+  const v = parseFloat(process.env.NEXT_PUBLIC_RUG_WALK_SURFACE_Y_EXTRA ?? '0.015');
+  return Number.isFinite(v) ? v : 0.015;
+}
+
+// ── 3D scene environment (carpet vs office GLB) — AvatarCanvas `NEXT_PUBLIC_ACTIVE_ENV` ─
+
+export type ActiveEnvKey = 'DEFAULT' | 'OFFICE';
+
+/**
+ * Registry for floor GLB + physics alignment. DEFAULT keeps legacy `/assets/carpet.glb` + AABB-driven floorY.
+ * OFFICE uses fixed `physicsY` + `rugExtra` (no carpet AABB) so Rapier/V121 match the configured walk plane.
+ */
+export const ENV_MODELS: Record<
+  ActiveEnvKey,
+  {
+    path: string;
+    /** World Y of the rigid floor before rug/walk extra (OFFICE). DEFAULT mirrors initial ROOM_BOUNDS_DEFAULT.floorY for docs only — floor still comes from carpet AABB + env rug extra. */
+    physicsY: number;
+    /** Metres above physics base for the walk surface (soles target). OFFICE uses this; DEFAULT uses `readRugWalkSurfaceYExtraEnv()` on top of carpet AABB max.y. */
+    rugExtra: number;
+  }
+> = {
+  DEFAULT: {
+    path: '/assets/carpet.glb',
+    physicsY: -2.95,
+    rugExtra: 0,
+  },
+  OFFICE: {
+    path: '/models/office/office.glb',
+    physicsY: 0,
+    rugExtra: 0.05,
+  },
+};
+
+/**
+ * FORCED office scene — does not read `process.env` (exorcist patch).
+ * Restore env-driven selection: `ACTIVE_ENV_RAW` from `NEXT_PUBLIC_ACTIVE_ENV`, then `ACTIVE_ENV` from that.
+ */
+export const ACTIVE_ENV_RAW = 'OFFICE' as const;
+
+export const ACTIVE_ENV: ActiveEnvKey = 'OFFICE';
+
+export function getActiveEnvKey(): ActiveEnvKey {
+  return ACTIVE_ENV;
+}
+
+export function getActiveEnvModel(): (typeof ENV_MODELS)[ActiveEnvKey] {
+  return ENV_MODELS[getActiveEnvKey()];
+}
+
+/** Rug layer: DEFAULT = env-driven (same as legacy carpet); OFFICE = `ENV_MODELS.OFFICE.rugExtra`. */
+export function getEffectiveRugExtraForActiveEnv(): number {
+  return getActiveEnvKey() === 'OFFICE' ? ENV_MODELS.OFFICE.rugExtra : readRugWalkSurfaceYExtraEnv();
+}
+
+/** Walk-plane Y when not using carpet AABB (OFFICE): `physicsY + rugExtra`. */
+export function getFixedWalkPlaneYFromEnvConfig(): number {
+  const m = ENV_MODELS.OFFICE;
+  return m.physicsY + getEffectiveRugExtraForActiveEnv();
+}
+
+export const SIT_WORLD_Y_TRIM_VRM1 = 0.02;
+export const BREATHE_AMP_STANDING_VRM1 = 0.01;
+export const BREATHE_AMP_SITTING_VRM1 = 0.0055;
+
+export function getMimeMode(): boolean {
+  return ENABLE_MIME_MODE;
+}

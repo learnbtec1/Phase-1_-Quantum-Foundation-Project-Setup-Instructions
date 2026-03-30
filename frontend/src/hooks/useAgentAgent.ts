@@ -55,6 +55,7 @@ import { dispatchAvatar } from '@/utils/events/normalizeAvatarEvents';
 import {
   normalizePerformanceList,
   schedulePerformanceCues,
+  type PerformanceCue,
 } from '@/ai/avatar/performanceTags';
 
 /**
@@ -196,6 +197,57 @@ function toEmotionLabel(raw: string): EmotionLabel {
  * Wrap raw 16-bit mono PCM bytes in a minimal WAV container for playback.
  * The Kokoro TTS backend returns int16 PCM with no RIFF header.
  */
+/**
+ * Client-side fallback: scan dialogue text for inline `[gesture]` tokens
+ * (e.g. "[wave] أهلاً"). Converts them to PerformanceCue objects that are
+ * merged into the performance[] array before scheduling.
+ * Mirrors the backend `extract_inline_gestures()` in cogni_output_format.py.
+ */
+const _INLINE_GESTURE_KEYS = [
+  'wave','waving','think','thinking','point','pointing','beckon','beckoning',
+  'agree','agreeing','nod','clap','clapping','cheer','celebrate',
+  'relax','look','goodbye','bye','explain','encourage','question',
+  'greet','salute','shrug','peace','sad','angry','surprise','surprised',
+  'blush','sleepy',
+];
+const _INLINE_GESTURE_RE_CLIENT = new RegExp(
+  '\\[(' + _INLINE_GESTURE_KEYS.join('|') + ')\\]',
+  'gi',
+);
+const _GESTURE_TOKEN_MAP: Record<string, string> = {
+  wave:'wave', waving:'wave', think:'think', thinking:'think',
+  point:'point', pointing:'point', beckon:'beckon', beckoning:'beckon',
+  agree:'agree', agreeing:'agree', nod:'ack', clap:'clap', clapping:'clap',
+  cheer:'cheer', celebrate:'cheer', relax:'relax', look:'look',
+  goodbye:'goodbye', bye:'goodbye', explain:'think', encourage:'ack',
+  question:'think', greet:'wave', salute:'wave', shrug:'relax', peace:'peace',
+  sad:'sad', angry:'angry', surprise:'surprise', surprised:'surprise',
+  blush:'blush', sleepy:'sleepy',
+};
+
+function _parseClientInlineGestures(text: string): PerformanceCue[] {
+  if (!text) return [];
+  const cues: PerformanceCue[] = [];
+  let wordCursor = 0;
+  let lastIndex = 0;
+  _INLINE_GESTURE_RE_CLIENT.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = _INLINE_GESTURE_RE_CLIENT.exec(text)) !== null) {
+    const segment = text.slice(lastIndex, m.index);
+    if (segment) wordCursor += segment.trim().split(/\s+/).filter(Boolean).length;
+    lastIndex = m.index + m[0].length;
+    const tokenKey = m[1].toLowerCase();
+    const animKey  = _GESTURE_TOKEN_MAP[tokenKey] ?? 'ack';
+    cues.push({
+      tag:        `[GESTURE_${tokenKey.toUpperCase()}]`,
+      start_word: wordCursor,
+      animation:  animKey,
+      intensity:  0.60,
+    });
+  }
+  return cues;
+}
+
 function pcmToWavBlob(pcm: Uint8Array, sampleRate: number): Blob {
   const nCh = 1, bps = 16;
   const byteRate = sampleRate * nCh * (bps / 8);
@@ -462,6 +514,14 @@ export function useAgentAgent({
     }
   }, [clearCoSpeechTimers, clearPerformanceTimers]);
 
+  const onVadSpeechStart = useCallback((): void => {
+    if (isSpeakingRef.current) {
+      stopAllAudio();
+    }
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('cogni:user:speaking'));
+  }, [stopAllAudio]);
+
   /**
    * Play server TTS from WS `speech` frames. Azure returns **MP3** (`audio_format: mp3`);
    * wrapping MP3 bytes as PCM WAV corrupts playback and can sound like a “second voice”
@@ -710,10 +770,16 @@ export function useAgentAgent({
         }
         useBrainStore.getState().applyStreamingEmbodiment(emotionLabel);
 
+        // Client-side fallback: parse inline [gesture] tokens from dialogue in case
+        // the backend didn't strip them (e.g. tts_unavailable frame, tutor endpoint).
+        const _clientInlineCues = _parseClientInlineGestures(dialogue);
+
         const perf = normalizePerformanceList(
           (frame as Record<string, unknown>).performance,
         );
-        const structuredPerformanceTurn = perf.length > 0;
+        // Merge: inline cues first (start_word=0 = immediate), then structured perf
+        const perfMerged = [..._clientInlineCues, ...perf];
+        const structuredPerformanceTurn = perfMerged.length > 0;
 
         // 1. Update BrainStore via processFrame — drives AgentDirector subscriptions
         const agentFrame: AgentFrame = {
@@ -740,7 +806,7 @@ export function useAgentAgent({
 
         // 3b. Performance Tag System — word-synced cues (optional; replaces co-speech when present)
         clearPerformanceTimers();
-        if (perf.length && typeof window !== 'undefined') {
+        if (perfMerged.length && typeof window !== 'undefined') {
           const wcRaw = (frame as { word_cues?: unknown }).word_cues;
           const wc = Array.isArray(wcRaw)
             ? wcRaw.filter(
@@ -751,7 +817,7 @@ export function useAgentAgent({
           const est = estimateDialogueDurationMs(dialogue);
           performanceTimersRef.current = schedulePerformanceCues(
             dialogue,
-            perf,
+            perfMerged,
             wc,
             est,
             (cue) => {
@@ -966,6 +1032,7 @@ export function useAgentAgent({
     lang,
     silenceThreshold: 0.03,
     silenceGapMs:     700,
+    onSpeechStart: onVadSpeechStart,
     onSpeechEnd: async (blob: Blob) => {
       console.log(
         '[useAgentAgent] VAD onSpeechEnd — blob',
@@ -1063,6 +1130,9 @@ export function useAgentAgent({
     vadStop();
     useBrainStore.getState().setPhysical({ isListening: false });
     emitListeningEvent(false);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('cogni:user:silent'));
+    }
     console.log('[useAgentAgent] Listening stopped');
   }, [vadStop]);
 
@@ -1199,6 +1269,40 @@ export function useAgentAgent({
   //   Start: pause the microphone the instant TTS begins — prevents the avatar
   //          from hearing its own voice through the speakers (echo-interruption loop).
   //   End:   restore the microphone 250 ms after TTS finishes so any residual
+  // ── Cognitive Wait-Time — "Hmm…" filler after 2s of LLM silence ────────────
+  // When the backend is thinking for > 2 s without a reply, Cogni says a short
+  // Jordanian filler phrase + plays the thinking animation to fill dead air.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    let waitTimer: ReturnType<typeof setTimeout> | null = null;
+    const WAIT_MS = 2000;
+    const JO_FILLERS = [
+      '[think] يمم... خلّيني أفكر بهالسؤال.',
+      '[think] لحظة كمان، بجمع أفكاري.',
+      '[think] هممم، هاد سؤال منيح، بحتاج أفكر شوي.',
+      '[think] يمم، تعطيني ثانية كمان.',
+    ];
+    const onThinkingStart = (): void => {
+      waitTimer = setTimeout(() => {
+        if (!mountedRef.current || isSpeakingRef.current) return;
+        const filler = JO_FILLERS[Math.floor(Math.random() * JO_FILLERS.length)];
+        window.dispatchEvent(new CustomEvent('avatar:speak:text', { detail: { text: filler } }));
+      }, WAIT_MS);
+    };
+    const onThinkingEnd = (): void => {
+      if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
+    };
+    window.addEventListener('avatar:thinking',    onThinkingStart);
+    window.addEventListener('avatar:speak:start', onThinkingEnd);
+    window.addEventListener('avatar:speak:end',   onThinkingEnd);
+    return () => {
+      if (waitTimer) clearTimeout(waitTimer);
+      window.removeEventListener('avatar:thinking',    onThinkingStart);
+      window.removeEventListener('avatar:speak:start', onThinkingEnd);
+      window.removeEventListener('avatar:speak:end',   onThinkingEnd);
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   //          speaker echo has decayed before the next VAD analysis window opens.
   useEffect(() => {
     if (typeof window === 'undefined') return;

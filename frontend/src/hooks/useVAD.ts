@@ -380,6 +380,7 @@ export function useVAD({
             silenceTimerRef.current = null;
             if (!activeRef.current) return;
             console.log(`[VAD] Silence Detected — ending segment (gap=${silenceGapMs}ms) → stop → onstop → WAV`);
+            window.dispatchEvent(new CustomEvent('cogni:user:silent'));
             const rec = recorderRef.current;
             if (rec && rec.state === 'recording') {
               rec.stop();

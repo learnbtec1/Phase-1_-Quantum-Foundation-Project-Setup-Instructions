@@ -214,6 +214,12 @@ export function stopTTS(): void {
   }
 }
 
+if (typeof window !== 'undefined') {
+  window.addEventListener('cogni:avatar:interrupt', () => {
+    stopTTS();
+  });
+}
+
 /**
  * Speak text using TTS API (`/api/tts-with-timing`). Returns false if upstream failed (caller may use AgentDirector timing-only fallback).
  */

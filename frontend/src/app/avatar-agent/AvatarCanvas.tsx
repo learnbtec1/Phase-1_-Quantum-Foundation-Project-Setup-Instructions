@@ -15,9 +15,9 @@
 import React, { Suspense, useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import * as THREE from 'three';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { Environment, SpotLight, SoftShadows, ContactShadows, OrbitControls, PerspectiveCamera, useTexture, useGLTF } from '@react-three/drei';
+import { Environment, SpotLight, SoftShadows, OrbitControls, PerspectiveCamera, useTexture, useGLTF } from '@react-three/drei';
 
-import { useControls, Leva } from 'leva';
+import { useControls } from 'leva';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import type { GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { VRM, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
@@ -28,11 +28,11 @@ import {
 } from '@pixiv/three-vrm-animation';
 import type { VRMAnimation } from '@pixiv/three-vrm-animation';
 import styles from './AvatarCanvas.module.css';
-import { CameraUpLock } from './CameraUpLock';
 import { createNoise3D } from 'simplex-noise';
 import { Easing, lerp } from './utils';
 import {
   VRM_FALLBACKS,
+  pickVrmUrl,
   BREATHE_BASE_HZ,
   PHYSICS_CONFIG,
   BLINK_MIN_SEC,
@@ -63,17 +63,19 @@ import {
   SIT_LOWER_LEG_X_SEATED,
   readAvatarSitWorldYOffsetEnv,
   readAvatarDebugForceStandEnv,
-  readRugWalkSurfaceYExtraEnv,
   SIT_WORLD_Y_TRIM_VRM1,
   BREATHE_AMP_STANDING_VRM1,
   BREATHE_AMP_SITTING_VRM1,
   BREATHE_AMP_STANDING,
   BREATHE_AMP_SITTING,
   getMimeMode,
+  ACTIVE_ENV,
+  getEffectiveRugExtraForActiveEnv,
+  getFixedWalkPlaneYFromEnvConfig,
+  ENV_MODELS,
 } from '@/config/avatar';
 import { breathSpineAmount, breathGroupBounce } from './proceduralLife';
 import {
-  RoomShell,
   ROOM_BOUNDS,
   ROOM_BOUNDS_DEFAULT,
   type RoomBounds,
@@ -83,24 +85,44 @@ import {
   buildPatrolWaypoints,
 } from './scene/RoomShell';
 import { createGroundLock } from '@/engine/ground/GroundLock';
-import { FeetFixer, pruneFootTracksFromClip } from '@/engine/rig/FeetFixer';
+import {
+  FeetFixer,
+  pruneFootTracksFromClip,
+  pruneArmTracksFromClip,
+  pruneLegTracksFromClip,
+} from '@/engine/rig/FeetFixer';
 import { computeRugSurfaceWorld, readRugExtraEnv } from './utils/carpetFloor';
+import BtecMarkingHUD, { type BtecCriterion } from './hud/BtecMarkingHUD';
+
+/** Must match `ACTIVE_ENV` from config — build-inlined `NEXT_PUBLIC_ACTIVE_ENV`. */
+const activeEnv = ACTIVE_ENV;
+if (typeof window !== 'undefined') {
+  console.log(
+    '🚨 [ENV_CHECK] Active Environment is:',
+    process.env.NEXT_PUBLIC_ACTIVE_ENV || 'DEFAULT',
+    '→ normalized:',
+    activeEnv,
+  );
+}
 
 /** V54/V55 — وقوف افتراضي من حدود السجادة/الغرفة (يُحدَّث عند استيراد AABB السجادة) */
-const _initStand = getDefaultStandXZ();
-const AVATAR_DEFAULT_STAND_X = _initStand.x;
-const AVATAR_DEFAULT_STAND_Z = _initStand.z;
+
+/** Tiny finite-number guard — returns `v` when finite, `fb` otherwise. */
+const numOr = (v: unknown, fb: number): number =>
+  (Number.isFinite(v as number) ? (v as number) : fb);
+
+const _initStand = getDefaultStandXZ() ?? { x: 0, z: 0 };
+const AVATAR_DEFAULT_STAND_X = numOr(_initStand.x, 0);
+const AVATAR_DEFAULT_STAND_Z = numOr(_initStand.z, 0);
 
 /** كاميرا ثابتة: نفس البُعد بين الكاميرا وهدف المدار (الأفاتار) لـ OrbitControls */
 const CAMERA_OFFSET_Y = 2.78;
 const CAMERA_TARGET_OFFSET_Y = 1.55;
 
 function getCameraOrbitDistance(bounds: RoomBounds = ROOM_BOUNDS): number {
-  const stand = getDefaultStandXZ(bounds);
-  return Math.hypot(
-    CAMERA_OFFSET_Y - CAMERA_TARGET_OFFSET_Y,
-    getCameraPosZ(bounds) - stand.z,
-  );
+  const stand = getDefaultStandXZ(bounds) ?? { x: 0, z: 0 };
+  const dz = numOr(getCameraPosZ(bounds), 3.5) - numOr(stand.z, 0);
+  return Math.hypot(CAMERA_OFFSET_Y - CAMERA_TARGET_OFFSET_Y, dz);
 }
 
 /** V54 — هدف OrbitControls (يُحدَّث كل إطار من VRMScene؛ يُتبع بـ lerp في OrbitTargetFollower) */
@@ -125,9 +147,34 @@ function clampOrbitLookAtToRoomXZ(v: THREE.Vector3): void {
 /** V56 — small settle after `room:carpetBounds` before applying floor (transient AABB / matrix settle). */
 const CARPET_FLOOR_SETTLE_MS = 150;
 
-/** Snapshot of rug walk extra at module load (matches RoomShell `applyCarpetFloorYFromWorldBox` semantics). */
-const RUG_WALK_SURFACE_Y_EXTRA =
-  typeof readRugWalkSurfaceYExtraEnv === 'function' ? readRugWalkSurfaceYExtraEnv() : 0.1;
+/** Sole contact offset above the walk plane (metres). `ROOM_BOUNDS.floorY` already includes rug extra once carpet/GroundLock applied — do not add `readRugExtraEnv()` again here. */
+const FOOT_SOLE_GAP_M = 0.015;
+
+/** Idle-like VRMA keys — arm tracks pruned so procedural §8 can own the upper body. */
+const isIdleLike = (name?: string) => {
+  if (!name) return false;
+  const s = String(name).toLowerCase();
+  return (
+    s.startsWith('idle')
+    || s === 'relax'
+    || s === 'look'
+    || s === 'look2'
+    || s === 'sleepy'
+    || s === 'untitled'
+    || s === 'showbody'
+    || s === 'pace'
+    || s === 'stopwalk'
+    || s === 'stand'
+  );
+};
+
+/** Full-body clips that must retain hips/legs/feet VRMA tracks. All other keys get `pruneLegTracksFromClip`. */
+function vrmaKeyKeepsLegTracks(key: string): boolean {
+  const k = key.toLowerCase();
+  if (k === 'walk' || k === 'run' || k === 'sit' || k === 'stopwalk') return true;
+  if (k.startsWith('sit')) return true;
+  return false;
+}
 
 /** V57 — throttle heavy dev diagnostics in `useFrame` (was 1 Hz; lower main-thread pressure). */
 const V54_DEV_LOG_INTERVAL_SEC = 5;
@@ -169,12 +216,11 @@ import { getRoomMaterial } from './scene/BackdropTheme';
 // import { CarpetLoader }      from './scene/CarpetLoader';
 // import { CabinetLoader }     from './scene/CabinetLoader';
 // import { GlobeLoader }       from './scene/GlobeLoader';
-import { EffectComposer, SSAO } from '@react-three/postprocessing';
-import ComfortLightingRig    from '@/components/ComfortLightingRig';
 // import RoyalDecoProps         from '@/components/RoyalDecoProps';
 // import RoyalMaterialsOverride from '@/components/RoyalMaterialsOverride';
 import {
   resolveIfEnabled,
+  setEnabled as setPhysicsResolveEnabled,
   clearDeskScene,
   setDeskScene,
   computeChairAnchor,
@@ -189,9 +235,10 @@ import {
 import { getRandomAnimationPath } from '@/ai/avatar/animationMap';
 import { motionLogger, type BlendshapeSnapshot, type BoneSnapshot, type QuatTuple } from '@/utils/MotionLogger';
 import { getStableWebSpeechVoice, ensureWebSpeechVoicesChangeHook } from '@/ai/io/webSpeechVoice';
+import { speakWithTTS } from '@/ai/io/tts';
 import { createAvatarPerformanceHandler } from './avatarPerformanceBridge';
 
-// ── V52 — multi-VRM diagnostics & bone probe (Cogni-AVatar vs teach.vrm) ─────
+// ── V52 — multi-VRM diagnostics & bone probe (Cogni avatar / cogni.vrm) ─────
 function getHumanoidBoneOrNull(vrm: VRM, boneName: string): THREE.Object3D | null {
   const h = vrm.humanoid;
   if (!h) return null;
@@ -221,9 +268,13 @@ function rawBone8(humanoid: NonNullable<VRM['humanoid']>, boneName: string): THR
 
 /** Returns true when metaVersion indicates VRM 1.0; logs skeleton summary once per load. */
 function detectAndLogV52Vrm(model: VRM, url: string): boolean {
-  const meta = (model as unknown as { meta?: { metaVersion?: string | number } }).meta;
-  const mv = meta?.metaVersion;
-  const isVRM1 = mv === '1' || mv === 1 || String(mv) === '1';
+  const meta = (model as unknown as { meta?: { metaVersion?: string | number; specVersion?: string | number } }).meta;
+  // Accept metaVersion (VRM 0.x field) or specVersion (VRM 1.0 field).
+  // VRM 0.x: metaVersion = '0.0' | undefined; VRM 1.0: specVersion = '1.0' | '1'.
+  const mv = meta?.metaVersion ?? meta?.specVersion;
+  const mvStr = String(mv ?? '');
+  // Match '1', 1, '1.0', '1.X' — but not '0.X' or undefined.
+  const isVRM1 = mv === 1 || /^1(\.\d+)?$/.test(mvStr);
   console.log('%c[V52][VRM diagnostic]', 'color:#a78bfa;font-weight:bold', {
     url,
     metaVersion: mv ?? '(unknown)',
@@ -360,23 +411,6 @@ function strictPurgeDeskLikeMeshes(root: THREE.Object3D): number {
   return removed;
 }
 
-/**
- * V120 — Strip UpperLeg/LowerLeg/Foot/Toes tracks from an animation clip.
- * Apply to idle clips only — walk/gesture/locomotion clips must keep full lower-body control.
- */
-function filterLowerBodyTracks(clip: THREE.AnimationClip): THREE.AnimationClip {
-  const tracks = clip.tracks.filter(t => {
-    const n = t.name || '';
-    return !(
-      n.includes('UpperLeg') ||
-      n.includes('LowerLeg') ||
-      n.includes('Foot')     ||
-      n.includes('Toes')
-    );
-  });
-  return new THREE.AnimationClip(clip.name, clip.duration, tracks);
-}
-
 /*
  * ═══════════════════════════════════════════════════════════════════════════
  * EDUVERSE_SCENE_CHECKPOINT_v1 — نقطة استعادة لهذا الإعداد
@@ -441,8 +475,10 @@ type EduverseFloorMode = 'neutral' | 'panorama_slice' | 'dedicated_file' | 'carp
 
 const EDUVERSE_FLOOR_MODE: EduverseFloorMode = 'carpet_glb';
 
-/** مسار سجادة GLB — يُقيَّس لملء أرضية الغرفة (roomW × zLen) */
-const EDUVERSE_CARPET_GLB_PATH = '/assets/carpet.glb' as const;
+/**
+ * مسار أرضية GLB — من `ENV_MODELS` حسب `NEXT_PUBLIC_ACTIVE_ENV` (DEFAULT = سجادة حالية `/assets/carpet.glb`).
+ * @see ENV_MODELS
+ */
 
 /**
  * إن كانت السجادة مُصدَّرة مستوية على XY بدل XZ، جرّب `[ -Math.PI / 2, 0, 0 ]`.
@@ -637,22 +673,33 @@ function enhanceCarpetMaterialsForClarity(root: THREE.Object3D): void {
   });
 }
 
-/** سجادة GLB — تُقيَّس لتغطية نفس مساحة أرضية الغرفة (roomW × zLen) */
+/** سجادة / بيئة GLB — تُقيَّس لتغطية نفس مساحة أرضية الغرفة (roomW × zLen). DEFAULT يُطلق `room:carpetBounds`; OFFICE يعتمد `getFixedWalkPlaneYFromEnvConfig` في الأب. */
 function EduverseCarpetGlbFloor({
+  glbPath,
   roomW,
   zLen,
   zCenter,
   localY,
+  dispatchCarpetBounds = true,
+  enhanceCarpetMaterials = true,
+  rootName = 'EduverseCarpetGlbFloor',
 }: {
+  glbPath: string;
   roomW: number;
   zLen: number;
   zCenter: number;
   localY: number;
+  /** OFFICE: false — floor Y من الـ config فقط (لا AABB). */
+  dispatchCarpetBounds?: boolean;
+  /** OFFICE: false — بدون تعتيم «سجادة». */
+  enhanceCarpetMaterials?: boolean;
+  /** OFFICE environment uses `ActiveEnvironmentGlb` for scene lookup. */
+  rootName?: string;
 }) {
-  const { scene } = useGLTF(EDUVERSE_CARPET_GLB_PATH) as { scene: THREE.Group };
+  const { scene } = useGLTF(glbPath) as { scene: THREE.Group };
   const object = useMemo(() => {
     const root = scene.clone(true);
-    root.name = 'EduverseCarpetGlbFloor';
+    root.name = rootName;
     const [rx, ry, rz] = EDUVERSE_CARPET_EULER_EXTRA;
     root.rotation.set(rx, ry, rz);
     root.updateMatrixWorld(true);
@@ -675,10 +722,10 @@ function EduverseCarpetGlbFloor({
         mesh.receiveShadow = true;
       }
     });
-    enhanceCarpetMaterialsForClarity(root);
+    if (enhanceCarpetMaterials) enhanceCarpetMaterialsForClarity(root);
     root.renderOrder = -2005;
     return root;
-  }, [scene, roomW, zLen, zCenter, localY]);
+  }, [scene, roomW, zLen, zCenter, localY, enhanceCarpetMaterials, rootName]);
 
   useEffect(() => {
     return () => {
@@ -699,6 +746,7 @@ function EduverseCarpetGlbFloor({
   const carpetBoundsDispatchedRef = useRef(false);
 
   useEffect(() => {
+    if (!dispatchCarpetBounds) return;
     if (carpetBoundsDispatchedRef.current) return;
     /** Double rAF (V55/V100): carpet under EduverseRoomBackdrop — world matrices before `setFromObject` AABB. */
     let cancelled = false;
@@ -724,9 +772,42 @@ function EduverseCarpetGlbFloor({
       cancelAnimationFrame(outerRaf);
       cancelAnimationFrame(innerRaf);
     };
-  }, [object]);
+  }, [object, dispatchCarpetBounds]);
 
   return <primitive object={object} />;
+}
+
+/** Confirms `office.glb` loads (shared drei cache with `ActiveEnvironment`). */
+function OfficeGlbLoadProbe() {
+  const { scene } = useGLTF('/models/office/office.glb') as { scene: THREE.Group };
+  useEffect(() => {
+    console.log('[OFFICE] GLB load result:', scene ? 'OK' : 'FAIL');
+  }, [scene]);
+  return null;
+}
+
+/**
+ * OFFICE world — full `office.glb` only (no Eduverse backdrop, no legacy desk).
+ * Placed at scene root (no `EduverseRoomBackdrop` Y lift) — `localY` matches world floor.
+ */
+function ActiveEnvironment({ glbPath, bounds }: { glbPath: string; bounds: RoomBounds }) {
+  const roomW = bounds.maxX - bounds.minX;
+  const zLen = Math.abs(bounds.maxZ - bounds.minZ);
+  const zCenter = (bounds.maxZ + bounds.minZ) / 2;
+  const localY = bounds.floorY + EDUVERSE_FLOOR_EPSILON_Y;
+  return (
+    <EduverseCarpetGlbFloor
+      key={glbPath}
+      glbPath={glbPath}
+      roomW={roomW}
+      zLen={zLen}
+      zCenter={zCenter}
+      localY={localY}
+      dispatchCarpetBounds={false}
+      enhanceCarpetMaterials={false}
+      rootName="ActiveEnvironmentGlb"
+    />
+  );
 }
 
 /**
@@ -882,10 +963,14 @@ function EduverseRoomBackdrop({
       {/* أرضية: سجادة GLB | باركيه صورة | لون صلب — تعويض Y مع الأب = أقدام الأفاتار */}
       {EDUVERSE_FLOOR_MODE === 'carpet_glb' ? (
         <EduverseCarpetGlbFloor
+          key={ENV_MODELS.DEFAULT.path}
+          glbPath={ENV_MODELS.DEFAULT.path}
           roomW={roomW}
           zLen={zLen}
           zCenter={zCenter}
           localY={bounds.floorY + EDUVERSE_FLOOR_EPSILON_Y - EDUVERSE_FULL_IMAGE_Y_LIFT_M}
+          dispatchCarpetBounds
+          enhanceCarpetMaterials
         />
       ) : EDUVERSE_FLOOR_MODE === 'dedicated_file' ? (
         <EduverseParquetFloorPlane
@@ -1047,9 +1132,6 @@ function OfficeDeskFromGltf({
   );
 }
 
-useGLTF.preload(OFFICE_DESK_GLB_PATH);
-useGLTF.preload(EDUVERSE_CARPET_GLB_PATH);
-
 // ── Reusable math temps (avoid per-frame new Euler/Quaternion in useFrame) ───
 const _scratchEuler = new THREE.Euler();
 const _scratchEuler2 = new THREE.Euler();
@@ -1064,6 +1146,7 @@ const _wristSepWpB = new THREE.Vector3();
 const _eyeDesireScratch = new THREE.Vector3();
 /** Local X axis for chest breathing (axis-angle) — forward/back pitch only */
 const _V_AXIS_X = new THREE.Vector3(1, 0, 0);
+const _V_AXIS_Z = new THREE.Vector3(0, 0, 1);
 /** Throttle [WALK] procedural debug logs (seconds, elapsedTime) */
 let _lastWalkProcLogT = -1;
 
@@ -1075,10 +1158,12 @@ const _v53Forward = new THREE.Vector3();
 const _v53ToAvatar = new THREE.Vector3();
 const _v53HeadWorld = new THREE.Vector3();
 const _v54RawToAvatar = new THREE.Vector3();
+/** Dev — Ground Truth Y audit (carpet vs physics vs feet) */
+const _gtAvatarWorld = new THREE.Vector3();
+const _gtFootWorld = new THREE.Vector3();
+const _gtCarpetWorld = new THREE.Vector3();
 
 // ── Constants ────────────────────────────────────────────────────────────────
-/** ارتفاع وقوف الأفاتار على الأرض المنطقية (يتبع ROOM_BOUNDS.floorY) */
-const AVATAR_BASE_Y = ROOM_BOUNDS.floorY;
 const WAVE_DURATION = 3.5;   // seconds — greeting wave on load
 /** Tab background → rAF throttling: unclamped delta can be seconds (neck/gaze lerp explodes). */
 const TAB_SAFE_MAX_DELTA = 0.1;
@@ -1089,45 +1174,52 @@ const TAB_SAFE_MAX_DELTA = 0.1;
 const _noise3D = createNoise3D();
 
 // ── VRMA animation file map ───────────────────────────────────────────────────
-const VRMA_IDLE  = ['Idle1', 'Idle2', 'Idle3', 'Idle4'].map(n => `/models/animations/${n}.vrma`);
+// All filenames are lowercase + hyphenated (sanitized via scripts/sanitize-vrma.ps1).
+const VRMA_IDLE  = ['idle1', 'idle2', 'idle3', 'idle4'].map(n => `/models/animations/${n}.vrma`);
 const VRMA_PATHS: Record<string, string> = {
-  sit:     '/models/animations/sitting.vrma',
-  sitTalk: '/models/animations/SittingTalking.vrma',
-  wave:    '/models/animations/Waving.vrma',
-  think:   '/models/animations/Thinking.vrma',
-  type:    '/models/animations/Typing.vrma',
-  cheer:   '/models/animations/Standing%20Cheering.vrma',
-  clap:    '/models/animations/Clapping.vrma',
-  sad:     '/models/animations/Sad.vrma',
-  angry:   '/models/animations/Angry.vrma',
-  surprise:'/models/animations/Surprised.vrma',
-  relax:   '/models/animations/Relax.vrma',
-  goodbye: '/models/animations/Goodbye.vrma',
-  beckon:  '/models/animations/Beckoning.vrma',
-  point:   '/models/animations/Pointing.vrma',
-  ack:     '/models/animations/Acknowledging.vrma',
-  agree:   '/models/animations/Agreeing.vrma',
-  blush:   '/models/animations/Blush.vrma',
-  look:    '/models/animations/LookAround.vrma',
-  look2:   '/models/animations/LookAround2.vrma',
-  sleepy:      '/models/animations/Sleepy.vrma',
-  jump:        '/models/animations/Jump.vrma',
-  jumpHigh:    '/models/animations/JumpHigh.vrma',
-  sitPoint:    '/models/animations/Sitting%20and%20pointing.vrma',
-  sitDisappr:  '/models/animations/Sitting%20Disapproval.vrma',
-  sitTalk2:    '/models/animations/Sitting%20%20and%20talking.vrma',
-  walk:        '/models/animations/Walking.vrma',
-  stopWalk:    '/models/animations/stop%20walking.vrma',
-  pace:        '/models/animations/Pacing%20And%20Talking%20On%20A%20Phone.vrma',
-  untitled:    '/models/animations/Untitled.vrma',
-  // ── MotionPack (pixiv VRoid Project) ─────────────────────────────────────
-  showBody:    '/models/animations/VRMA_MotionPack/vrma/VRMA_01.vrma',  // Show full body
-  greet:       '/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma',  // Greeting
-  peace:       '/models/animations/VRMA_MotionPack/vrma/VRMA_03.vrma',  // Peace sign
-  shoot:       '/models/animations/VRMA_MotionPack/vrma/VRMA_04.vrma',  // Shoot
-  spin:        '/models/animations/VRMA_MotionPack/vrma/VRMA_05.vrma',  // Spin
-  pose:        '/models/animations/VRMA_MotionPack/vrma/VRMA_06.vrma',  // Model pose
-  squat:       '/models/animations/VRMA_MotionPack/vrma/VRMA_07.vrma',  // Squat
+  // ── Procedural-only aliases (no VRMA — handled by §8 bone overrides) ─────
+  // openHand, beat, thumbUp → resolved by gestureRef procedural path (no file needed)
+  // ── Core poses ────────────────────────────────────────────────────────────
+  sit:         '/models/animations/sitting.vrma',
+  sitTalk:     '/models/animations/sitting-talking.vrma',
+  sitTalk2:    '/models/animations/sitting-and-talking.vrma',
+  sitPoint:    '/models/animations/sitting-and-pointing.vrma',
+  sitDisappr:  '/models/animations/sitting-disapproval.vrma',
+  // ── Gestures ──────────────────────────────────────────────────────────────
+  wave:        '/models/animations/waving.vrma',
+  think:       '/models/animations/thinking.vrma',
+  point:       '/models/animations/pointing.vrma',
+  beckon:      '/models/animations/beckoning.vrma',
+  ack:         '/models/animations/acknowledging.vrma',
+  agree:       '/models/animations/agreeing.vrma',
+  clap:        '/models/animations/clapping.vrma',
+  cheer:       '/models/animations/standing-cheering.vrma',
+  relax:       '/models/animations/relax.vrma',
+  look:        '/models/animations/look-around.vrma',
+  look2:       '/models/animations/look-around2.vrma',
+  goodbye:     '/models/animations/goodbye.vrma',
+  type:        '/models/animations/typing.vrma',
+  pace:        '/models/animations/pacing-and-talking-on-a-phone.vrma',
+  untitled:    '/models/animations/untitled.vrma',
+  // ── Emotions ──────────────────────────────────────────────────────────────
+  sad:         '/models/animations/sad.vrma',
+  angry:       '/models/animations/angry.vrma',
+  surprise:    '/models/animations/surprised.vrma',
+  blush:       '/models/animations/blush.vrma',
+  sleepy:      '/models/animations/sleepy.vrma',
+  // ── Locomotion ────────────────────────────────────────────────────────────
+  walk:        '/models/animations/walking.vrma',
+  stopWalk:    '/models/animations/stop-walking.vrma',
+  jump:        '/models/animations/jump.vrma',
+  jumpHigh:    '/models/animations/jump-high.vrma',
+  // ── MotionPack (pixiv VRoid Project) ──────────────────────────────────────
+  showBody:    '/models/animations/VRMA_MotionPack/vrma/VRMA_01.vrma',
+  greet:       '/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma',
+  peace:       '/models/animations/VRMA_MotionPack/vrma/VRMA_03.vrma',
+  shoot:       '/models/animations/VRMA_MotionPack/vrma/VRMA_04.vrma',
+  spin:        '/models/animations/VRMA_MotionPack/vrma/VRMA_05.vrma',
+  pose:        '/models/animations/VRMA_MotionPack/vrma/VRMA_06.vrma',
+  squat:       '/models/animations/VRMA_MotionPack/vrma/VRMA_07.vrma',
 };
 
 // ── Azure Viseme ID → VRM morph-target weight map ───────────────────────────
@@ -1224,7 +1316,7 @@ function applyFootFloorCalib({
   liftNode,
   group,
   carpetName = 'EduverseCarpetGlbFloor',
-  gap = 0.015,
+  gap = FOOT_SOLE_GAP_M,
 }: {
   vrm: VRM;
   liftNode: THREE.Group;
@@ -1253,9 +1345,9 @@ function applyFootFloorCalib({
   rightFoot.getWorldPosition(rfWorld);
   const avgFeetY = (lfWorld.y + rfWorld.y) * 0.5;
   
-  // Target floor = room floor + extra (from env or constant) + gap
-  const extra = readRugExtraEnv() ?? RUG_WALK_SURFACE_Y_EXTRA;
-  const targetFloorY = ROOM_BOUNDS.floorY + extra + gap;
+  // Walk plane Y: `ROOM_BOUNDS.floorY` already includes rug walk extra after `tryApplyFloorY(carpetMax + RUG_EXTRA)`.
+  // Adding `readRugExtraEnv()` again caused ~1.5cm double-count and foot drift vs Rapier/visual carpet.
+  const targetFloorY = ROOM_BOUNDS.floorY + gap;
   
   // Correction: how much to raise liftNode.y
   const correction = targetFloorY - avgFeetY;
@@ -1319,8 +1411,7 @@ function armCalibWatchdog(
     rightFoot.getWorldPosition(rfWorld);
     const avgFeetY = (lfWorld.y + rfWorld.y) * 0.5;
     
-    const extra = readRugExtraEnv() ?? RUG_WALK_SURFACE_Y_EXTRA;
-    const targetFloorY = ROOM_BOUNDS.floorY + extra + 0.015;
+    const targetFloorY = ROOM_BOUNDS.floorY + FOOT_SOLE_GAP_M;
     const drift = Math.abs(avgFeetY - targetFloorY);
     
     if (drift > MAX_DRIFT_M) {
@@ -1355,6 +1446,7 @@ function VRMScene({
   groundLockedRef,
   fixFeet,
   pruneFeetTracks,
+  avatarBaseY,
 }: {
   vrmUrl: string;
   onLoad: () => void;
@@ -1365,6 +1457,8 @@ function VRMScene({
   fixFeet?: boolean;
   /** `?pruneFeet=1` — strip foot/toe tracks from VRMA clips at load (diagnostic). */
   pruneFeetTracks?: boolean;
+  /** World Y for avatar root — mirrors `playableBounds.floorY` (carpet AABB or OFFICE config). */
+  avatarBaseY?: number;
 }) {
   // 🔥 TRACER BULLET — confirms this file/version is the one being executed
   if (typeof window !== 'undefined' && !(window as typeof window & { __TRACER_LOGGED__?: boolean }).__TRACER_LOGGED__) {
@@ -1380,8 +1474,14 @@ function VRMScene({
   const ROOM_BOUNDSRef    = useRef(ROOM_BOUNDS);
   /** V56 FeetFixer — after VRMA mixer; see `?fixFeet=1`. */
   const feetFixerRef      = useRef<FeetFixer | null>(null);
+  /** Gesture / walk / non-idle VRMA — physics must not fight the mixer (mirrored for priority 9999). */
+  const isActivelyMovingRef = useRef(false);
+  const isSittingEffectiveRef = useRef(false);
+  const isActivelyMovingPrevRef = useRef(false);
   const groupRef          = useRef<THREE.Group>(null);
   const physicsWorldRef   = useRef<Awaited<ReturnType<typeof initRapierWorld>>>(null);
+  /** Dev — throttle `console.table` Ground Truth Y audit */
+  const groundTruthFrameRef = useRef(0);
 
   const isTalkingRef      = useRef(false);
   const talkElapsedRef    = useRef(0);
@@ -1508,9 +1608,16 @@ function VRMScene({
   const vrmaPromiseCacheRef = useRef<Map<string, Promise<GLTF>>>(new Map());
   // V120 — lower-body bind-pose store + recalib throttle + one-shot foot-axis fix
   const bindLowerBodyRotationsRef = useRef<Map<string, THREE.Quaternion>>(new Map());
+  /** T-pose / rest quaternions for upper limbs — same `getBone` path as bind capture + `applyArmDelta`. */
+  const bindUpperBodyRotationsRef = useRef<Map<string, THREE.Quaternion>>(new Map());
+  /** After switching to an idle VRMA, hard-settle arms toward rest pose (~1.1s). */
+  const armIdleLatchUntilRef = useRef(0);
   const lastRecalibTsRef = useRef(0);
   const RECALIB_MIN_MS = 1000;
-  const LOWER_BONES = ['leftUpperLeg', 'leftLowerLeg', 'leftFoot', 'rightUpperLeg', 'rightLowerLeg', 'rightFoot'] as const;
+  const LOWER_BONES = [
+    'leftUpperLeg', 'leftLowerLeg', 'leftFoot', 'leftToes',
+    'rightUpperLeg', 'rightLowerLeg', 'rightFoot', 'rightToes',
+  ] as const;
   const footAxisFixedRef = useRef(false);
   /** Traffic light: dynamic Cogni VRMA clip from `animationMap` is actively playing. */
   const vrmaGestureNowRef = useRef(false);
@@ -1524,8 +1631,12 @@ function VRMScene({
   const pointFingerBlendRef = useRef(0);
   // T-pose bind position of the hips bone — captured once after VRM loads (before any VRMA).
   // Used in §8 to restore hips to correct standing height when !isSittingEffective.
-  // Setting hips.y = 0 is WRONG: T-pose hips.y ≈ 0.9m in teach.vrm, not 0.
-  const hipsBindPosRef = useRef<THREE.Vector3 | null>(null);
+  // Setting hips.y = 0 is WRONG: T-pose hips.y ≈ 0.9m in cogni.vrm, not 0.
+  const hipsBindPosRef  = useRef<THREE.Vector3    | null>(null);
+  /** Hips bone LOCAL quaternion in T-pose (captured once at VRM load, before any VRMA plays).
+   *  Used in §8 to restore the correct pelvic orientation without discarding the VRM 0.x
+   *  normalisation rest-offset that lives inside the raw bone's quaternion. */
+  const hipsBindQuatRef = useRef<THREE.Quaternion | null>(null);
   // ── Behavioral phase state machine ───────────────────────────────────────
   // Drives all physical-layer modulations: Idle / Listening / Thinking / Speaking.
   // Derived every frame from the combination of external flags; stored so JSX/events
@@ -1622,10 +1733,85 @@ function VRMScene({
   const v54DebugCamRef = useRef<THREE.PerspectiveCamera | null>(null);
   const v54DebugOrbitTargetRef = useRef<THREE.Vector3 | null>(null);
 
+  const [btecCriteria, setBtecCriteria] = useState<BtecCriterion[] | null>(null);
+
+  const resolveAssignmentId = () => {
+    if (typeof window === 'undefined') return '';
+    const wid = (window as unknown as { __btecAssignmentId?: unknown }).__btecAssignmentId;
+    if (typeof wid === 'string') {
+      const t = wid.trim();
+      if (t) return t;
+    }
+    try {
+      const u = new URL(window.location.href);
+      const q = u.searchParams.get('assignmentId');
+      if (q) {
+        const t = q.trim();
+        if (t) return t;
+      }
+    } catch {
+      /* ignore */
+    }
+    return '';
+  };
+
   const { pointer, camera, gl, controls, scene } = useThree();
 
   /** Skip redundant work when `room:bounds:applied` fires multiple times with the same floorY (V57). */
   const lastRoomBoundsFloorYRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (process.env.NEXT_PUBLIC_BTEC_HUD !== '1') return;
+    if (typeof window === 'undefined') return;
+
+    const HUD_API = process.env.NEXT_PUBLIC_BTEC_HUD_API ?? '/api/btec/criteria';
+    let stop = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const fetchOnce = async () => {
+      const assignmentId = String(resolveAssignmentId() ?? '').trim();
+      if (!assignmentId) {
+        if (!stop) setBtecCriteria(null);
+        return;
+      }
+      const url = `${HUD_API}?assignmentId=${encodeURIComponent(assignmentId)}`;
+      const ctrl = new AbortController();
+      const to = setTimeout(() => ctrl.abort(), 3000);
+      try {
+        const res = await fetch(url, { signal: ctrl.signal, headers: { accept: 'application/json' } });
+        if (stop) return;
+        if (!res.ok) return;
+        const data = await res.json().catch(() => null);
+        const ok = Array.isArray(data)
+          ? data.filter(
+              (c: unknown) =>
+                c
+                && typeof (c as { id?: unknown }).id === 'string'
+                && ((c as { status?: string }).status === 'done'
+                  || (c as { status?: string }).status === 'pending'
+                  || (c as { status?: string }).status === 'missing'),
+            ) as BtecCriterion[]
+          : [];
+        if (!stop) setBtecCriteria(ok);
+      } catch {
+        /* silent */
+      } finally {
+        clearTimeout(to);
+      }
+    };
+
+    const loop = async () => {
+      await fetchOnce();
+      if (stop) return;
+      timer = window.setTimeout(loop, 10000);
+    };
+
+    void loop();
+    return () => {
+      stop = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, []);
 
   /** V55 — carpet AABB applied: re-run foot–floor, Rapier statics, patrol loop, default stand XZ */
   useEffect(() => {
@@ -1679,6 +1865,7 @@ function VRMScene({
     // 3. Named lookup
     const byName =
       scene.getObjectByName('EduverseCarpetGlbFloor') ||
+      scene.getObjectByName('ActiveEnvironmentGlb') ||
       scene.getObjectByName('carpet') ||
       null;
     if (byName) { w.CARPET_MESH = byName; return byName; }
@@ -2066,15 +2253,29 @@ function VRMScene({
       activeVrmaRef.current && activeVrmaRef.current !== '__cogni__'
         ? actions.get(activeVrmaRef.current)
         : null;
-    if (prev) prev.fadeOut(fadeTime);
     const action = actions.get(name)!;
     action.reset();
     action.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
     action.clampWhenFinished = !loop;
-    action.fadeIn(fadeTime);
+    if (prev) {
+      // FIX-5: crossFadeTo keeps weight sum = 1 throughout the transition,
+      // preventing the avatar from "deflating" (dropping to T-pose) mid-gesture.
+      // warps=false: no time-scale warp; both clips play at their natural speed.
+      prev.crossFadeTo(action, fadeTime, false);
+    } else {
+      action.fadeIn(fadeTime);
+    }
     action.play();
     activeVrmaRef.current = name;
-    console.log(`[VRMA] ▶ ${name} (loop=${loop})`);
+    if (typeof window !== 'undefined') {
+      (window as unknown as { activeVrmaKey?: string }).activeVrmaKey = activeVrmaRef.current;
+    }
+    if (name.startsWith('idle')) {
+      armIdleLatchUntilRef.current = (typeof performance !== 'undefined' ? performance.now() : Date.now()) + 1100;
+    }
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`[VRMA] ▶ ${name} (loop=${loop})`);
+    }
   }, []);
 
   /** Neutral traffic-light state when no Cogni VRMA gesture is active (procedural layers fully on). */
@@ -2098,16 +2299,6 @@ function VRMScene({
         return;
       }
 
-      const nowMs = Date.now();
-      if (nowMs < walkUntilRef.current) {
-        console.warn('Gesture blocked: Avatar is currently walking.');
-        return;
-      }
-      if (isSittingRef.current) {
-        console.warn('Gesture blocked: Avatar is seated; standing intent VRMA skipped.');
-        return;
-      }
-
       const loadGen = ++cogniLoadGenerationRef.current;
       const cache = vrmaPromiseCacheRef.current;
       
@@ -2125,9 +2316,13 @@ function VRMScene({
               return;
             }
             let clip = createVRMAnimationClip(anims[0], model);
+            if (isIdleLike(clip?.name)) {
+              clip = pruneArmTracksFromClip(clip);
+            }
             if (pruneFeetTracks) {
               clip = pruneFootTracksFromClip(clip);
             }
+            clip = pruneLegTracksFromClip(clip) ?? clip;
             const action = mixer.clipAction(clip);
             // ... apply action (see below merged code)
             if (cogniDynamicActionRef.current && cogniDynamicActionRef.current !== action) {
@@ -2140,6 +2335,9 @@ function VRMScene({
             action.fadeIn(0.5);
             action.play();
             activeVrmaRef.current = '__cogni__';
+            if (typeof window !== 'undefined') {
+              (window as unknown as { activeVrmaKey?: string }).activeVrmaKey = activeVrmaRef.current;
+            }
             vrmaGestureNowRef.current = true;
             vrmaClipDoneRef.current = false;
             procLifeDampRef.current = 0.2;
@@ -2182,9 +2380,13 @@ function VRMScene({
           }
 
           let clip = createVRMAnimationClip(anims[0], model);
+          if (isIdleLike(clip?.name)) {
+            clip = pruneArmTracksFromClip(clip);
+          }
           if (pruneFeetTracks) {
             clip = pruneFootTracksFromClip(clip);
           }
+          clip = pruneLegTracksFromClip(clip) ?? clip;
           const action = mixer.clipAction(clip);
           const prevKey = activeVrmaRef.current;
           const prevFromMap = prevKey && prevKey !== '__cogni__' ? vrmaActions.current.get(prevKey) : null;
@@ -2199,6 +2401,9 @@ function VRMScene({
           action.fadeIn(0.5);
           action.play();
           activeVrmaRef.current = '__cogni__';
+          if (typeof window !== 'undefined') {
+            (window as unknown as { activeVrmaKey?: string }).activeVrmaKey = activeVrmaRef.current;
+          }
           vrmaGestureNowRef.current = true;
           vrmaClipDoneRef.current = false;
           procLifeDampRef.current = 0.2;
@@ -2221,6 +2426,7 @@ function VRMScene({
   // ── Load VRM ────────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
+    const rigDebugHelpers: THREE.Object3D[] = [];
     /** Same `mixer` instance that owns `onMixerGestureClipFinished` — removed on effect cleanup. */
     let pendingMixerForFinished: THREE.AnimationMixer | null = null;
     let onMixerGestureClipFinished: ((ev: Event) => void) | null = null;
@@ -2278,13 +2484,18 @@ function VRMScene({
         const isVRM1Meta = detectAndLogV52Vrm(model, urlToTry);
         vrmMetaIsV1Ref.current = isVRM1Meta;
         const yawOverride = readAvatarFacingYawBaseEnv();
-        avatarFacingBaseRef.current =
-          yawOverride !== null ? yawOverride : (isVRM1Meta ? 0 : Math.PI);
+        // Both VRM 0.x and VRM 1.0 in @pixiv/three-vrm use glTF -Z-forward convention and
+        // need a Math.PI Y-rotation to face the camera (which is at +Z looking toward -Z).
+        // @pixiv/three-vrm does NOT auto-rotate VRM 1.0 to face the camera.
+        // The only exception is an explicit NEXT_PUBLIC_AVATAR_FACING_YAW_BASE env override.
+        // cogni.vrm (teach.vrm) is VRM 1.0 — already faces the camera natively at 0 rotation.
+        // Math.PI would flip it 180° to face away. Use 0 unless env override is set.
+        avatarFacingBaseRef.current = yawOverride !== null ? yawOverride : Math.PI;
         avatarFacingRef.current = avatarFacingBaseRef.current;
         footCalibDoneRef.current = false;
         footToFloorYOffsetRef.current = 0;
 
-        // teach.vrm is VRM 0.x and already faces the camera (native -Z, flipped by Math.PI group rotation).
+        // cogni.vrm (VRM 0.x) already faces the camera (native -Z, flipped by Math.PI group rotation).
         // rotateVRM0 is NOT called — it would double-flip the model to invisible.
 
         let meshCount = 0;
@@ -2294,7 +2505,7 @@ function VRMScene({
             const mesh = o as THREE.Mesh;
             mesh.visible = true;
             mesh.renderOrder = 0;
-            // teach.vrm (VRM 0.x) uses standard Three.js materials — safe to override.
+            // cogni.vrm (VRM 0.x) uses standard Three.js materials — safe to override.
             const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
             mats.forEach((m: THREE.Material) => {
               m.depthWrite  = true;
@@ -2316,6 +2527,9 @@ function VRMScene({
         // and updated every frame by useFrame — do NOT set them on vrm.scene here.
 
         vrmRef.current = model;
+        if (typeof window !== 'undefined') {
+          (window as unknown as { __vrmRef?: () => VRM | null }).__vrmRef = () => vrmRef.current;
+        }
         ensureVRMLookAtQuaternionProxyForVrm(model);
         
         // V121 FLOOR LOCK — create LIFT_NODE for isolated foot-floor calibration
@@ -2327,18 +2541,92 @@ function VRMScene({
         
         setVrm(model);   // triggers re-render → <primitive> appears
         onLoad();
-        // Capture T-pose hips bind position BEFORE any VRMA plays.
-        // This is the ground truth for "standing hip height" — used in §8
-        // to restore correct standing posture without sinking the skeleton.
+
+        // V120 FRESH BIND — wipe any stale quaternions from a previous model load
+        // before re-capturing from the NEW VRM skeleton. Without this, the old
+        // foot orientations persist and corrupt the new avatar's standing pose.
+        bindLowerBodyRotationsRef.current = new Map<string, THREE.Quaternion>();
+        bindUpperBodyRotationsRef.current = new Map<string, THREE.Quaternion>();
+        hipsBindPosRef.current  = null;
+        hipsBindQuatRef.current = null;
+        footCalibDoneRef.current = false;
+        footToFloorYOffsetRef.current = 0;
+        footAxisFixedRef.current = false;
+
+        // FIX-4: Force full matrix propagation through the VRM scene graph so
+        // that all raw bone quaternions reflect the true T-pose BEFORE we snapshot
+        // them as the bind-pose baseline. Without this call, bones that have not
+        // yet been rendered carry unresolved local-to-world transforms.
+        model.scene.updateMatrixWorld(true);
+
+        bindUpperBodyRotationsRef.current = new Map();
+        if (model.humanoid) {
+          const getBone = (n: string) =>
+            (model.humanoid as any)?.getRawBoneNode?.(n) ??
+            (model.humanoid as any)?.getNormalizedBoneNode?.(n) ?? null;
+          for (const name of [
+            'leftUpperArm',
+            'rightUpperArm',
+            'leftLowerArm',
+            'rightLowerArm',
+            'leftHand',
+            'rightHand',
+          ] as const) {
+            const b = getBone(name);
+            if (b) bindUpperBodyRotationsRef.current.set(name, b.quaternion.clone());
+          }
+        }
+
+        // Capture T-pose hips bind position AND quaternion BEFORE any VRMA plays.
+        // Both are the ground truth for "standing hip pose" used in §8 to restore
+        // correct pelvic orientation without discarding the VRM normalisation rest-offset.
         if (model.humanoid) {
           const hB = model.humanoid.getRawBoneNode('hips' as never);
-          if (hB) hipsBindPosRef.current = hB.position.clone();
+          if (hB) {
+            hipsBindPosRef.current  = (hB as THREE.Object3D).position.clone();
+            hipsBindQuatRef.current = (hB as THREE.Object3D).quaternion.clone();
+          }
         }
         captureLowerBodyBindPose();  // V120 — store lower-body bind-pose for resetLowerBodyToIdle
+        resetLowerBodyToIdle();      // immediately apply fresh bind pose
+
         if (process.env.NODE_ENV === 'development') {
           console.info('[V53] VRM loaded — default stand XZ', AVATAR_DEFAULT_STAND_X, AVATAR_DEFAULT_STAND_Z, 'hipsBind(local)', hipsBindPosRef.current?.toArray?.() ?? null);
         }
-
+        // ── Diagnostic rig visuals (dev): skeleton + hip/foot AABBs ───────────
+        if (process.env.NODE_ENV === 'development' && !cancelled) {
+          try {
+            let firstSkin: THREE.SkinnedMesh | null = null;
+            model.scene.traverse((o) => {
+              if (!firstSkin && (o as THREE.SkinnedMesh).isSkinnedMesh) firstSkin = o as THREE.SkinnedMesh;
+            });
+            if (firstSkin) {
+              const skelHelp = new THREE.SkeletonHelper(firstSkin);
+              (skelHelp.material as THREE.LineBasicMaterial).depthTest = false;
+              scene.add(skelHelp);
+              rigDebugHelpers.push(skelHelp);
+            } else {
+              console.warn('[RigDebug] no SkinnedMesh found — SkeletonHelper skipped');
+            }
+            const hHips = model.humanoid?.getRawBoneNode?.('hips' as never)
+              ?? model.humanoid?.getNormalizedBoneNode?.('hips' as never);
+            const hFoot = model.humanoid?.getRawBoneNode?.('leftFoot' as never)
+              ?? model.humanoid?.getNormalizedBoneNode?.('leftFoot' as never);
+            if (hHips) {
+              const bh = new THREE.BoxHelper(hHips as THREE.Object3D, 0xff00ff);
+              scene.add(bh);
+              rigDebugHelpers.push(bh);
+            }
+            if (hFoot) {
+              const bf = new THREE.BoxHelper(hFoot as THREE.Object3D, 0x00ffff);
+              scene.add(bf);
+              rigDebugHelpers.push(bf);
+            }
+            console.info('[RigDebug] SkeletonHelper + BoxHelper(hips, leftFoot) attached to R3F scene');
+          } catch (e) {
+            console.warn('[RigDebug] helper attach failed:', e);
+          }
+        }
         // ── VRMA animation system setup ────────────────────────────────────
         const mixer = new THREE.AnimationMixer(model.scene);
         mixerRef.current = mixer;
@@ -2363,12 +2651,14 @@ function VRMScene({
                 const anims: VRMAnimation[] = gltf.userData.vrmAnimations ?? [];
                 if (anims[0]) {
                   let clip = createVRMAnimationClip(anims[0], model);
+                  if (isIdleLike(clip?.name)) {
+                    clip = pruneArmTracksFromClip(clip);
+                  }
                   if (pruneFeetTracks) {
                     clip = pruneFootTracksFromClip(clip);
                   }
-                  // V120 — strip lower-body tracks from idle clips to let bind-pose hold
-                  if (key.startsWith('idle')) {
-                    clip = filterLowerBodyTracks(clip);
+                  if (!vrmaKeyKeepsLegTracks(key)) {
+                    clip = pruneLegTracksFromClip(clip) ?? clip;
                   }
                   const action = mixer.clipAction(clip);
                   vrmaActions.current.set(key, action);
@@ -2427,8 +2717,16 @@ function VRMScene({
             pendingMixerForFinished.removeEventListener('finished', onMixerGestureClipFinished);
           }
           onMixerGestureClipFinished = (ev: Event) => {
-            // Clip ended — allow §8 procedural arms again. Do NOT shrink
-            // vrmaGestureUntilRef (that aborted the standing gesture tail early).
+            const wasEmpty = !activeVrmaRef.current || activeVrmaRef.current === '';
+            vrmaGestureNowRef.current = false;
+            if (vrmaGestureUntilRef?.current) vrmaGestureUntilRef.current = 0;
+            if (!activeVrmaRef.current || activeVrmaRef.current === '') {
+              activeVrmaRef.current = `idle${idleIdxRef.current ?? 0}`;
+            }
+            if (typeof window !== 'undefined') {
+              (window as any).activeVrmaKey = activeVrmaRef.current;
+            }
+            // Clip ended — allow §8 procedural arms again.
             // Fix 1: Reset hips position after VRMA to prevent root-motion drift.
             const _vrmFin = vrmRef.current;
             if (_vrmFin?.humanoid) {
@@ -2442,7 +2740,6 @@ function VRMScene({
             _vrmFin?.scene?.updateMatrixWorld(true);
             resetLowerBodyToIdle();   // V120 — restore bind-pose after gesture clip ends
             vrmaClipDoneRef.current = true;
-            vrmaGestureNowRef.current = false;
             procLifeDampRef.current = 1.0;
             const fin = ev as unknown as { action?: THREE.AnimationAction };
             if (fin.action && fin.action === cogniDynamicActionRef.current) {
@@ -2458,6 +2755,22 @@ function VRMScene({
               } else {
                 activeVrmaRef.current = '';
               }
+            }
+            if (wasEmpty) {
+              const idleKey = `idle${idleIdxRef.current}`;
+              const idleAct = vrmaActions.current.get(idleKey);
+              if (idleAct) {
+                idleAct.reset();
+                idleAct.setLoop(THREE.LoopRepeat, Infinity);
+                idleAct.fadeIn(0.45);
+                idleAct.play();
+                activeVrmaRef.current = idleKey;
+                armIdleLatchUntilRef.current =
+                  (typeof performance !== 'undefined' ? performance.now() : Date.now()) + 1100;
+              }
+            }
+            if (typeof window !== 'undefined') {
+              (window as unknown as { activeVrmaKey?: string }).activeVrmaKey = activeVrmaRef.current;
             }
           };
           mixer.addEventListener('finished', onMixerGestureClipFinished);
@@ -2479,6 +2792,15 @@ function VRMScene({
 
     return () => {
       cancelled = true;
+      rigDebugHelpers.forEach((obj) => {
+        scene.remove(obj);
+        const ls = obj as THREE.LineSegments;
+        ls.geometry?.dispose?.();
+        const mat = ls.material;
+        if (Array.isArray(mat)) mat.forEach((m) => m.dispose?.());
+        else (mat as THREE.Material | undefined)?.dispose?.();
+      });
+      rigDebugHelpers.length = 0;
       if (pendingMixerForFinished && onMixerGestureClipFinished) {
         pendingMixerForFinished.removeEventListener('finished', onMixerGestureClipFinished);
       }
@@ -2553,36 +2875,15 @@ function VRMScene({
         return dur; // fallback to gesture_duration_ms if clip not loaded yet
       };
 
-      if (isSittingRef.current) {
-        if (gType === 'look') {
-          headYawRef.current = 0.12 * (Math.random() > 0.5 ? 1 : -1);
-          headPitchRef.current = -0.05;
-          headUntilRef.current = Date.now() + Math.min(dur, 2200);
-          console.log('[BRAIN] Seated look → head pose');
-          return;
-        }
-        // Perma-sit: do not play standing VRMA gestures while seated.
-        // Use procedural upper-body gestures only, keeping legs clamped to seated pose.
-        const seatedType =
-          gType === 'point' || gType === 'openHand' || gType === 'beat'
-            ? gType
-            : gType === 'thumbUp'
-              ? 'point'
-              : gType === 'beckon' || gType === 'think' || gType === 'peace'
-                ? 'openHand'
-                : 'openHand';
-        gestureRef.current = {
-          type: seatedType as 'point' | 'openHand' | 'beat',
-          side: (d.side ?? 'right') as 'left' | 'right' | 'both',
-          startMs: Date.now(),
-          durationMs: dur,
-        };
-        setTimeout(() => {
-          // Fix 2: Keep idle VRMA; manual pose handles seated posture.
-          if (isSittingRef.current) playVRMA(`idle${idleIdxRef.current}`, true, 0.35);
-        }, dur + 250);
-        console.log(`[BRAIN] Seated gesture override: ${gType} → ${seatedType}`);
-      } else if (gType === 'wave') {
+      if (isSittingRef.current && gType === 'look') {
+        headYawRef.current = 0.12 * (Math.random() > 0.5 ? 1 : -1);
+        headPitchRef.current = -0.05;
+        headUntilRef.current = Date.now() + Math.min(dur, 2200);
+        console.log('[BRAIN] Seated look → head pose');
+        return;
+      }
+
+      if (gType === 'wave') {
         if (vrmaReadyRef.current) {
           pulseHandSeparationWindow(HAND_SEPARATION_PULSE_MS);
           const clipMs = getClipDurMs('wave');
@@ -2677,7 +2978,7 @@ function VRMScene({
         }
         console.log(`[BRAIN] Gesture received (co-speech): ${gType}`);
       } else if (gType === 'relax') {
-        if (vrmaReadyRef.current && !isSittingRef.current) {
+        if (vrmaReadyRef.current) {
           const clipMsR = getClipDurMs('relax');
           vrmaClipDoneRef.current = false;
           playVRMA('relax', false, 0.3);
@@ -2686,13 +2987,13 @@ function VRMScene({
         }
         console.log('[BRAIN] Gesture received: relax');
       } else if (gType === 'look') {
-        if (vrmaReadyRef.current && !isSittingRef.current) {
+        if (vrmaReadyRef.current) {
           const clipMsL = getClipDurMs('look');
           vrmaClipDoneRef.current = false;
           playVRMA('look', false, 0.3);
           vrmaGestureUntilRef.current = Date.now() + dur + 500;
           setTimeout(restoreAfterGesture, Math.max(clipMsL, dur) + 400);
-        } else if (!isSittingRef.current) {
+        } else {
           headYawRef.current = 0.1 * (Math.random() > 0.5 ? 1 : -1);
           headUntilRef.current = Date.now() + Math.min(dur, 2000);
         }
@@ -2717,7 +3018,7 @@ function VRMScene({
         headUntilRef.current = Date.now() + 720;
         console.log('[BRAIN] Gesture received: lean_back → head lean');
       } else if (gType === 'celebration') {
-        if (vrmaReadyRef.current && !isSittingRef.current) {
+        if (vrmaReadyRef.current) {
           pulseHandSeparationWindow(HAND_SEPARATION_PULSE_MS);
           const clipMsC = getClipDurMs('cheer');
           vrmaClipDoneRef.current = false;
@@ -2727,7 +3028,7 @@ function VRMScene({
         }
         console.log('[BRAIN] Gesture received: celebration → cheer');
       } else if (gType === 'idle') {
-        if (vrmaReadyRef.current && !isSittingRef.current) {
+        if (vrmaReadyRef.current) {
           idleIdxRef.current = (idleIdxRef.current + 1) % 4;
           playVRMA(`idle${idleIdxRef.current}`, true, 0.55);
           idleNextRef.current = Date.now()
@@ -3048,16 +3349,26 @@ function VRMScene({
       isSittingRef.current = false;
       headPitchRef.current = 0;
       spineBreathRef.current = 0;
-      // Fix 1 + 5: Reset hips bind position and force matrix update on stand-up.
+      // Restore hips to T-pose bind position + bind quaternion on stand-up.
+      // sit.vrma applies a forward pelvis tilt that makes legs splay outward
+      // after standing.  Restoring the captured bind QUATERNION (not identity!)
+      // ensures §8 takes over from the correct base pose next frame.
       const _vrmSit = vrmRef.current;
       if (_vrmSit?.humanoid) {
         const _h = _vrmSit.humanoid.getRawBoneNode('hips' as never);
-        if (_h && hipsBindPosRef.current) { _h.position.copy(hipsBindPosRef.current); _h.updateMatrix(); }
+        if (_h) {
+          if (hipsBindPosRef.current)  (_h as THREE.Object3D).position.copy(hipsBindPosRef.current);
+          if (hipsBindQuatRef.current) (_h as THREE.Object3D).quaternion.copy(hipsBindQuatRef.current);
+          else                         (_h as THREE.Object3D).quaternion.set(0, 0, 0, 1);
+          (_h as THREE.Object3D).updateMatrix();
+        }
       }
       groupRef.current?.updateMatrixWorld(true);
       _vrmSit?.scene?.updateMatrixWorld(true);
       if (vrmaReadyRef.current) playVRMA('idle0', true, 0.8);
-      console.log('[BRAIN] avatar:stand — idle0 (standing default)');
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[BRAIN] avatar:stand — idle0 (standing default)');
+      }
     };
     const onStand = () => {
       window.dispatchEvent(new CustomEvent('avatar:sit', { detail: { sitting: false } }));
@@ -3070,46 +3381,48 @@ function VRMScene({
         console.log(`[BRAIN] avatar:play → ${clip}`);
       }
     };
-    // avatar:speak:text — dev-only Web Speech fallback (no-op in production)
+    // avatar:speak:text — MIME mode: Web Speech only; otherwise Habibi/backend TTS + visemes
     const onSpeakText = (e: Event) => {
-      if (!getMimeMode()) return;   // production always returns false; dev needs health-check failure
       const text = (e as CustomEvent<{ text?: string }>).detail?.text ?? '';
-      if (!text) return;
-      ensureWebSpeechVoicesChangeHook();
-      window.dispatchEvent(new CustomEvent('avatar:speak:start'));
-      try {
-        const isAr = /[\u0600-\u06FF]/.test(text);
-        const u = new SpeechSynthesisUtterance(text);
-        u.lang  = isAr ? 'ar-JO' : 'en-US';
-        u.rate  = Math.min(1.0, voiceRateRef.current);
-        const synth = window.speechSynthesis;
-        const v =
-          synth &&
-          getStableWebSpeechVoice(synth, {
-            langHint: u.lang,
-            preferMale: isAr,
-          });
-        const allVoices = synth?.getVoices() ?? [];
-        // Guard: if no Arabic voice is available but other voices are loaded,
-        // skip speaking to prevent the browser using the wrong language.
-        if (!v && allVoices.length > 0 && isAr) {
-          setTimeout(() => window.dispatchEvent(new CustomEvent('avatar:speak:end')), 500);
-          return;
+      if (!text.trim()) return;
+      if (getMimeMode()) {
+        ensureWebSpeechVoicesChangeHook();
+        window.dispatchEvent(new CustomEvent('avatar:speak:start'));
+        try {
+          const isAr = /[\u0600-\u06FF]/.test(text);
+          const u = new SpeechSynthesisUtterance(text);
+          u.lang  = isAr ? 'ar-JO' : 'en-US';
+          u.rate  = Math.min(1.0, voiceRateRef.current);
+          const synth = window.speechSynthesis;
+          const v =
+            synth &&
+            getStableWebSpeechVoice(synth, {
+              langHint: u.lang,
+              preferMale: isAr,
+            });
+          const allVoices = synth?.getVoices() ?? [];
+          if (!v && allVoices.length > 0 && isAr) {
+            setTimeout(() => window.dispatchEvent(new CustomEvent('avatar:speak:end')), 500);
+            return;
+          }
+          if (v) u.voice = v;
+          u.onend = () => window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+          window.speechSynthesis?.speak(u);
+        } catch {
+          setTimeout(() => window.dispatchEvent(new CustomEvent('avatar:speak:end')), 3000);
         }
-        if (v) u.voice = v;
-        u.onend = () => window.dispatchEvent(new CustomEvent('avatar:speak:end'));
-        window.speechSynthesis?.speak(u);
-      } catch {
-        setTimeout(() => window.dispatchEvent(new CustomEvent('avatar:speak:end')), 3000);
+        const sentences = text.split(/[.!?؟،\n]+/).filter(s => s.trim().length > 3);
+        const nodDelay  = Math.max(600, (text.length / 20) * 100);
+        sentences.slice(1).forEach((_, idx) => {
+          setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('avatar:nod', { detail: { duration: 1.2 } }));
+            console.log(`[BRAIN] Sentence-boundary nod ${idx + 1}`);
+          }, nodDelay * (idx + 1));
+        });
+        return;
       }
-      // Sentence boundary nods: count sentences and schedule nods
-      const sentences = text.split(/[.!?؟،\n]+/).filter(s => s.trim().length > 3);
-      const nodDelay  = Math.max(600, (text.length / 20) * 100); // rough timing
-      sentences.slice(1).forEach((_, idx) => {
-        setTimeout(() => {
-          window.dispatchEvent(new CustomEvent('avatar:nod', { detail: { duration: 1.2 } }));
-          console.log(`[BRAIN] Sentence-boundary nod ${idx + 1}`);
-        }, nodDelay * (idx + 1));
+      void speakWithTTS(text, { arVoice: 'male' }).then((ok) => {
+        if (!ok) console.warn('[BRAIN] avatar:speak:text — speakWithTTS returned false');
       });
     };
 
@@ -3227,9 +3540,9 @@ function VRMScene({
     };
   }, []);
 
-  // V56 FeetFixer — init when VRM is ready (?fixFeet=1); does not interact with GroundLock.
+  // V56 FeetFixer — always bound to current VRM (sovereign hook applies every frame; ?fixFeet=1 only adds dev markers).
   useEffect(() => {
-    if (!fixFeet || !vrm) {
+    if (!vrm) {
       feetFixerRef.current = null;
       if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
         delete (window as Window & { __feetFix?: unknown }).__feetFix;
@@ -3252,7 +3565,7 @@ function VRMScene({
         delete (window as Window & { __feetFix?: unknown }).__feetFix;
       }
     };
-  }, [vrm, fixFeet]);
+  }, [vrm]);
 
   // V56 dev — tiny spheres on foot bones when ?fixFeet=1 (confirms bone space; not in prod)
   useEffect(() => {
@@ -3289,6 +3602,16 @@ function VRMScene({
     const v     = vrmRef.current;
     const group = groupRef.current;
     if (!group) return;
+
+    // Group-position NaN recovery — repair any leftover NaN from before the
+    // GroundLock fix so the avatar becomes visible without a hard page reload.
+    if (!Number.isFinite(group.position.x) || !Number.isFinite(group.position.z)) {
+      group.position.x = numOr(currentAvatarXRef.current, AVATAR_DEFAULT_STAND_X);
+      group.position.z = numOr(currentAvatarZRef.current, AVATAR_DEFAULT_STAND_Z);
+    }
+    if (!Number.isFinite(group.position.y)) {
+      group.position.y = numOr(ROOM_BOUNDS.floorY, ROOM_BOUNDS_DEFAULT.floorY);
+    }
 
     v54DebugCamRef.current = state.camera as THREE.PerspectiveCamera;
     const ctrDbg = state.controls as { target?: THREE.Vector3 } | undefined;
@@ -3343,6 +3666,29 @@ function VRMScene({
 
     const isSittingNow = readAvatarDebugForceStandEnv() ? false : isSittingRef.current;
     const isSittingEffective = isSittingNow;
+    const isGesture =
+      vrmaGestureNowRef.current
+      || !!(activeVrmaRef.current && !String(activeVrmaRef.current).startsWith('idle'));
+    const isSitting = isSittingEffective || isSittingRef.current;
+    const isPacingNow = !!(vrmaReadyRef.current && activeVrmaRef.current === 'pace');
+    const isMoving = isWalkingNow || isPacingNow;
+    const isActiveAction = isGesture || isSitting || isMoving;
+    const disableStabilizers = isActiveAction;
+
+    const isActivelyMoving =
+      vrmaGestureNowRef.current
+      || !!(activeVrmaRef.current && !String(activeVrmaRef.current).startsWith('idle'))
+      || isWalkingNow;
+    isActivelyMovingRef.current = isActivelyMoving;
+    isSittingEffectiveRef.current = isSittingEffective;
+    if (process.env.NODE_ENV === 'development') {
+      if (isActivelyMovingPrevRef.current !== isActivelyMoving) {
+        isActivelyMovingPrevRef.current = isActivelyMoving;
+        console.info(isActivelyMoving
+          ? '[Physics] DISABLED — gesture / non-idle VRMA / walk (resolve + capsule bypass)'
+          : '[Physics] ENABLED — idle standing/listening resolve path');
+      }
+    }
 
     // V30 — procedural life continues during VRMA gestures (reduced amplitude)
     const vrmaGPlaying =
@@ -3386,7 +3732,9 @@ function VRMScene({
     // Phase 2 — Y axis: standing uses Leva `yOffset`; sitting uses floor + seat height
     const sitWorldExtra =
       readAvatarSitWorldYOffsetEnv() + (vrmMetaIsV1Ref.current ? SIT_WORLD_Y_TRIM_VRM1 : 0);
-    const standTargetY = isSittingNow ? sitYWorld + sitWorldExtra : ROOM_BOUNDS.floorY + yOffset;
+    const standTargetY = isSittingNow
+      ? numOr(sitYWorld + sitWorldExtra, 0.45)
+      : numOr(ROOM_BOUNDS.floorY, ROOM_BOUNDS_DEFAULT.floorY) + yOffset;
     const yMicro = walkBounce + laughShake + idleBodyOffsetRef.current;
     const breathBounceY = breathGroupBounce(t, isSittingNow) * procLifeDamp;
 
@@ -3394,8 +3742,8 @@ function VRMScene({
     if (v && !footCalibDoneRef.current) {
       const preFootY = standTargetY + yMicro + breathBounceY;
       if (!isSittingNow) {
-        group.position.x = currentAvatarXRef.current;
-        group.position.z = currentAvatarZRef.current;
+        group.position.x = numOr(currentAvatarXRef.current, 0);
+        group.position.z = numOr(currentAvatarZRef.current, 0);
         group.position.y = preFootY;
       } else {
 
@@ -3457,8 +3805,8 @@ function VRMScene({
         currentAvatarXRef.current = lerp(currentAvatarXRef.current, targetAvatarXRef.current, posLerp);
         currentAvatarZRef.current = lerp(currentAvatarZRef.current, targetAvatarZRef.current, posLerp);
       }
-      group.position.x = currentAvatarXRef.current;
-      group.position.z = currentAvatarZRef.current;
+      group.position.x = numOr(currentAvatarXRef.current, 0);
+      group.position.z = numOr(currentAvatarZRef.current, 0);
       group.position.y = standTargetY + footY + yMicro + breathBounceY;
     } else {
       group.position.set(
@@ -3469,10 +3817,18 @@ function VRMScene({
     }
 
     const pw = physicsWorldRef.current;
-    if (pw && v) {
-      resolveIfEnabled(pw, v, undefined, group, safeDelta);
-    } else if (!isSittingNow) {
-      resolveIfEnabled(group.position, PHYSICS_CONFIG.avatar.capsuleRadius);
+    const physOff =
+      typeof window !== 'undefined'
+      && (window as unknown as { __DISABLE_PHYSICS?: boolean }).__DISABLE_PHYSICS;
+    // Master override: freeze Rapier / Box3 resolve while mixer is non-idle or walking.
+    // Do NOT move the visible avatar group — only disable resolve so the capsule stops fighting bones.
+    setPhysicsResolveEnabled(!isActivelyMoving);
+    if (!isActivelyMoving && !physOff) {
+      if (pw && v) {
+        resolveIfEnabled(pw, v, undefined, group, safeDelta);
+      } else if (!isSittingNow) {
+        resolveIfEnabled(group.position, PHYSICS_CONFIG.avatar.capsuleRadius);
+      }
     }
 
     // ── Avatar facing rotation — body turns to face direction of travel ─────
@@ -3542,15 +3898,19 @@ function VRMScene({
         playVRMA('walk', true, 0.3);
       }
       mixerRef.current.update(safeDelta);
+      // Anatomical mask: VRMA cannot accumulate drift on legs; §8 also resets later.
+      if (!isSittingNow) {
+        resetLowerBodyToIdle();
+      }
     }
-    // V56 FeetFixer — after VRMA: baseline-relative delta clamp (inv(base)*qRelNow → Euler clip → blend)
-    if (fixFeet && feetFixerRef.current) {
+    if (!disableStabilizers && feetFixerRef.current) {
       feetFixerRef.current.apply({
         enabled: true,
         maxPitchDeg: 35,
         maxYawDeg: 12,
         maxRollDeg: 12,
-        blend: 0.75,
+        blend: 1.0,
+        deltaTime: safeDelta,
       });
     }
     // Walk ended → play stop-walk once, then return to idle after it finishes
@@ -3753,6 +4113,9 @@ function VRMScene({
                     || emo === 'calm' || emo === 'curious' || emo === 'empathetic')
                     ? (emo === 'relax' ? 0.6 : emo === 'calm' ? 0.25 : emo === 'empathetic' ? 0.35 : 0.3) : 0,
         surprised: (emo === 'surprised' || emo === 'anxious') ? (emo === 'anxious' ? 0.35 : 0.7) : 0,
+        thinking:  emo === 'thinking' ? 2.0 : 0,
+        frustrated: emo === 'frustrated' ? 2.5 : 0,
+        focused:   emo === 'focused' ? 1.5 : 0,
       };
 
       // Smooth blend with per-emotion speed
@@ -4139,9 +4502,32 @@ function VRMScene({
     const humanoid = v.humanoid;
     if (humanoid) {
       const sitUpperLegX = vrmMetaIsV1Ref.current ? SIT_UPPER_LEG_X_VRM1 : SIT_UPPER_LEG_X_VRM0;
-      const sitLowerLegX = SIT_LOWER_LEG_X_SEATED;
+      // Keep seated shins folding backward (not forward) across VRM rigs.
+      const sitLowerLegX = -Math.abs(SIT_LOWER_LEG_X_SEATED);
       // Micro pelvic roll (local Z) — weight shift without translating hips.position (feet stay planted)
       const pelvicRollStand = Math.sin(t * 0.5) * 0.005 * skelMul;
+
+      /**
+       * Apply sitting-pose rotation to an upper or lower leg bone RELATIVE to the T-pose
+       * bind quaternion (preserves the VRM normalisation rest-offset identical to applyLegDelta).
+       * Falls back to absolute rotation.set() when the bind pose has not been captured yet.
+       */
+      const applySitLegDelta = (
+        bone: THREE.Object3D | null,
+        bindKey: string,
+        xAngle: number,
+        zAngle: number,
+      ) => {
+        if (!bone) return;
+        const bq = bindLowerBodyRotationsRef.current.get(bindKey);
+        if (bq) {
+          _scratchEuler.set(xAngle, 0, zAngle, 'XYZ');
+          _scratchQuat2.setFromEuler(_scratchEuler);
+          (bone as THREE.Object3D).quaternion.copy(bq).multiply(_scratchQuat2);
+        } else {
+          (bone as THREE.Object3D & { rotation: THREE.Euler }).rotation.set(xAngle, 0, zAngle, 'XYZ');
+        }
+      };
 
       const isWaving   = now < waveUntilRef.current;
       const gs         = gestureRef.current;
@@ -4166,13 +4552,11 @@ function VRMScene({
         if (!isSittingEffective) {
           const hB  = rawBone8(humanoid, 'hips');
           resetLowerBodyToIdle();
-          // Full hips reset — restore T-pose bind position + clear pelvic tilt quaternion
           if (hB) {
             const bp = hipsBindPosRef.current;
-            if (bp) hB.position.copy(bp);
-            else
-              hB.position.set(0, hB.position.y, 0);
-            hB.rotation.set(0, 0, pelvicRollStand, 'XYZ');
+            if (bp) (hB as THREE.Object3D).position.copy(bp);
+            else    (hB as THREE.Object3D).position.setY((hB as THREE.Object3D).position.y);
+            (hB as THREE.Object3D & { rotation: THREE.Euler }).rotation.set(0, 0, pelvicRollStand, 'XYZ');
           }
         }
 
@@ -4223,19 +4607,18 @@ function VRMScene({
           const rll = rawBone8(humanoid, 'rightLowerLeg');
           const lll = rawBone8(humanoid, 'leftLowerLeg');
           if (isSittingEffective) {
-            if (rul) rul.rotation.set( sitUpperLegX, 0,  0.04, 'XYZ');
-            if (lul) lul.rotation.set( sitUpperLegX, 0, -0.04, 'XYZ');
-            if (rll) rll.rotation.set( sitLowerLegX, 0,  0,    'XYZ');
-            if (lll) lll.rotation.set( sitLowerLegX, 0,  0,    'XYZ');
+            applySitLegDelta(rul, 'rightUpperLeg', sitUpperLegX,  0.04);
+            applySitLegDelta(lul, 'leftUpperLeg',  sitUpperLegX, -0.04);
+            applySitLegDelta(rll, 'rightLowerLeg', sitLowerLegX,  0);
+            applySitLegDelta(lll, 'leftLowerLeg',  sitLowerLegX,  0);
           } else {
             resetLowerBodyToIdle();
-            // Full hips reset — restore T-pose bind position + clear pelvic tilt
             const hG = rawBone8(humanoid, 'hips');
             if (hG) {
               const bp = hipsBindPosRef.current;
-              if (bp) hG.position.copy(bp);
-              else hG.position.set(0, hG.position.y, 0);
-              hG.rotation.set(0, 0, pelvicRollStand, 'XYZ');
+              if (bp) (hG as THREE.Object3D).position.copy(bp);
+              else    (hG as THREE.Object3D).position.setY((hG as THREE.Object3D).position.y);
+              (hG as THREE.Object3D & { rotation: THREE.Euler }).rotation.set(0, 0, pelvicRollStand, 'XYZ');
             }
           }
         }
@@ -4260,14 +4643,31 @@ function VRMScene({
         if (rla) rla.rotation.set(0.12, 0, 0, 'XYZ');
         if (lla) lla.rotation.set(0.12, 0, 0, 'XYZ');
         if (!vrmaWalkLower) {
-          if (rul) rul.rotation.set(-legSwing, 0, 0, 'XYZ');
-          if (lul) lul.rotation.set( legSwing, 0, 0, 'XYZ');
-          if (rll) rll.rotation.set(-rightKnee, 0, 0, 'XYZ');
-          if (lll) lll.rotation.set(-leftKnee,  0, 0, 'XYZ');
-          const rf  = rawBone8(humanoid, 'rightFoot');
-          const lf  = rawBone8(humanoid, 'leftFoot');
-          if (rf) rf.rotation.set( rightKnee * 0.4, 0, 0, 'XYZ');
-          if (lf) lf.rotation.set( leftKnee  * 0.4, 0, 0, 'XYZ');
+          // Apply leg-swing RELATIVE to the captured T-pose bind quaternion so that
+          // the VRM 0.x normalisation rest-offset (non-zero in @pixiv/three-vrm 3.5+)
+          // is preserved.  Absolute rotation.set() previously discarded this offset,
+          // causing the pelvis-backward / legs-inverted artefact.
+          const applyLegDelta = (bone: THREE.Object3D | null, bindKey: string, xAngle: number) => {
+            if (!bone) return;
+            const bq = bindLowerBodyRotationsRef.current.get(bindKey);
+            if (bq) {
+              _scratchQuat2.setFromAxisAngle(_V_AXIS_X, xAngle);
+              (bone as THREE.Object3D).quaternion.copy(bq).multiply(_scratchQuat2);
+            } else {
+              (bone as THREE.Object3D & { rotation: THREE.Euler }).rotation.set(xAngle, 0, 0, 'XYZ');
+            }
+          };
+          applyLegDelta(rul, 'rightUpperLeg', -legSwing);
+          applyLegDelta(lul, 'leftUpperLeg',   legSwing);
+          // Negative X = knee flexes backward (anatomically correct in VRM 0.x / normalised frame).
+          // Positive would hyperextend — do NOT change these signs.
+          applyLegDelta(rll, 'rightLowerLeg', -rightKnee);
+          applyLegDelta(lll, 'leftLowerLeg',  -leftKnee);
+          const rf = rawBone8(humanoid, 'rightFoot');
+          const lf = rawBone8(humanoid, 'leftFoot');
+          // Positive X = ankle dorsiflexion compensates knee flex (foot stays flat).
+          applyLegDelta(rf, 'rightFoot',  rightKnee * 0.4);
+          applyLegDelta(lf, 'leftFoot',   leftKnee  * 0.4);
         }
 
         if (process.env.NODE_ENV === 'development' && t - _lastWalkProcLogT > 0.25) {
@@ -4307,10 +4707,10 @@ function VRMScene({
           const rll = rawBone8(humanoid, 'rightLowerLeg');
           const lll = rawBone8(humanoid, 'leftLowerLeg');
           if (isSittingEffective) {
-            if (rul) rul.rotation.set( sitUpperLegX, 0,  0.04, 'XYZ');
-            if (lul) lul.rotation.set( sitUpperLegX, 0, -0.04, 'XYZ');
-            if (rll) rll.rotation.set( sitLowerLegX, 0,  0,    'XYZ');
-            if (lll) lll.rotation.set( sitLowerLegX, 0,  0,    'XYZ');
+            applySitLegDelta(rul, 'rightUpperLeg', sitUpperLegX,  0.04);
+            applySitLegDelta(lul, 'leftUpperLeg',  sitUpperLegX, -0.04);
+            applySitLegDelta(rll, 'rightLowerLeg', sitLowerLegX,  0);
+            applySitLegDelta(lll, 'leftLowerLeg',  sitLowerLegX,  0);
           } else {
             resetLowerBodyToIdle();
           }
@@ -4353,22 +4753,22 @@ function VRMScene({
             const bp = hipsBindPosRef.current;
             hipsBoneS.position.set(bp.x, hipsBoneS.position.y, bp.z);
           }
-          // ── Sitting pose calibrated for teach.vrm (VRM 0.x, group.rotation.y = Math.PI) ──
-          // Legs/feet are always clamped in perma-sit mode (even during gestures).
-          if (rul) rul.rotation.set( sitUpperLegX, 0,  0.04, 'XYZ');
-          if (lul) lul.rotation.set( sitUpperLegX, 0, -0.04, 'XYZ');
-          if (rll) rll.rotation.set( sitLowerLegX, 0,  0,    'XYZ');
-          if (lll) lll.rotation.set( sitLowerLegX, 0,  0,    'XYZ');
-          // Feet: with lower leg vertical, ankle should be neutral (0) so sole faces floor.
-          // Slight plantar flexion (0.12) looks natural in resting seated pose.
+          // ── Sitting pose — bind-relative quaternion for all leg bones ──────────
+          // applySitLegDelta preserves the VRM normalisation rest-offset so this
+          // works correctly for both VRM 0.x (near-identity bind) and VRM 1.0.
+          applySitLegDelta(rul, 'rightUpperLeg', sitUpperLegX,  0.04);
+          applySitLegDelta(lul, 'leftUpperLeg',  sitUpperLegX, -0.04);
+          applySitLegDelta(rll, 'rightLowerLeg', sitLowerLegX,  0);
+          applySitLegDelta(lll, 'leftLowerLeg',  sitLowerLegX,  0);
+          // Feet: slight backward ankle pitch to avoid "feet-forward" seated look.
           const rf  = rawBone8(humanoid, 'rightFoot');
           const lf  = rawBone8(humanoid, 'leftFoot');
           const rto = rawBone8(humanoid, 'rightToes');
           const lto = rawBone8(humanoid, 'leftToes');
-          if (rf)  rf.rotation.set( 0.12, 0, 0, 'XYZ');
-          if (lf)  lf.rotation.set( 0.12, 0, 0, 'XYZ');
-          if (rto) rto.rotation.set(0,    0, 0, 'XYZ');
-          if (lto) lto.rotation.set(0,    0, 0, 'XYZ');
+          applySitLegDelta(rf,  'rightFoot',  -0.12, 0);
+          applySitLegDelta(lf,  'leftFoot',   -0.12, 0);
+          applySitLegDelta(rto, 'rightToes',  -0.02, 0);
+          applySitLegDelta(lto, 'leftToes',   -0.02, 0);
           if (!vrmaGestureNow) {
             // Arms on lap
             const lapSway    = (Math.sin(t * 0.35) * 0.013 + Math.sin(t * 0.21 + 1.3) * 0.008) * skelMul;
@@ -4399,19 +4799,21 @@ function VRMScene({
           // sit.vrma drives TWO things on the hips bone:
           //   1. position (root motion) — lowers hips ~0.3 m from T-pose bind height
           //   2. quaternion            — tilts pelvis forward (sitting lean)
-          // CRITICAL: T-pose hips.y for teach.vrm ≈ 0.9m (NOT 0!). Setting y=0
+          // CRITICAL: T-pose hips.y for cogni.vrm ≈ 0.9m (NOT 0!). Setting y=0
           // would sink the skeleton BELOW the floor. We restore to the saved bind
           // position captured right after VRM load (hipsBindPosRef).
           // Spine bones are NOT touched here — §1-A (breathing) is additive on spine
           // and runs before v.update(); resetting spine in §8 would kill breathing.
           const hipsBone = rawBone8(humanoid, 'hips');
-          if (hipsBone) {
+          if (hipsBone && !disableStabilizers) {
             const bp = hipsBindPosRef.current;
-            if (bp) hipsBone.position.copy(bp);
-            else
-              hipsBone.position.set(0, hipsBone.position.y, 0);
-            // Euler Z = V20 tilt + microscopic weight roll (no hips.position.x slide)
-            hipsBone.rotation.set(0, 0, lifeHipTiltZRef.current + pelvicRollStand, 'XYZ');
+            if (bp) (hipsBone as THREE.Object3D).position.copy(bp);
+            else    (hipsBone as THREE.Object3D).position.setY((hipsBone as THREE.Object3D).position.y);
+            // Use rotation.set → near-identity Euler so the VRM's raw-bone Z-axis aligns
+            // with the local vertical. The tiny lifeHipTiltZ gives a micro weight-shift;
+            // pelvicRollStand adds a subtle sinusoidal roll for organic breathing.
+            (hipsBone as THREE.Object3D & { rotation: THREE.Euler })
+              .rotation.set(0, 0, lifeHipTiltZRef.current + pelvicRollStand, 'XYZ');
           }
           // Keep standing feet in bind pose; zeroing rotations breaks some VRM rigs.
           // Arms: only override when no VRMA gesture (let clap/wave/cheer drive arms)
@@ -4573,10 +4975,25 @@ function VRMScene({
           if (idxI) idxI.rotation.z += wTap * 0.65;
         }
       }
-    }
-    // » §8 bone writes are the last thing before this frame renders — no v.update after this
 
-    // ── §9 MOCAP Interceptor ─────────────────────────────────────────────────
+      if (vrmaGestureUntilRef.current && Date.now() > vrmaGestureUntilRef.current) {
+        vrmaGestureNowRef.current = false;
+        vrmaGestureUntilRef.current = 0;
+      }
+
+      // V121 — post-§8 sole vs walk plane (standing): run after all bone overrides for this frame
+      if (liftNodeRef.current && groupRef.current && footCalibDoneRef.current && !isSittingNow && v) {
+        applyFootFloorCalib({
+          vrm: v,
+          liftNode: liftNodeRef.current,
+          group: groupRef.current,
+          gap: FOOT_SOLE_GAP_M,
+        });
+      }
+    }
+    // (1) ↑ closes `if (humanoid)` — §8 raw-bone overrides end here (`v.humanoid` was truthy above).
+
+    // ── §9 MOCAP / MotionLogger — runs outside `if (humanoid)`; snapshots after §8. ──
     // Passively snapshots bone quaternions + blendshapes for the Cogni dataset.
     // Zero cost when not recording (single boolean check, no heap allocations).
     if (motionLogger.isRecording && v?.humanoid && v?.expressionManager) {
@@ -4612,6 +5029,42 @@ function VRMScene({
 
     // ── V54 — orbit target follows avatar (after §8 bones); diagnostics ─────────
     group.updateMatrixWorld(true);
+    v?.scene?.updateMatrixWorld(true);
+
+    if (process.env.NODE_ENV === 'development' && v?.humanoid && groupRef.current) {
+      groundTruthFrameRef.current += 1;
+      if (groundTruthFrameRef.current % 100 === 0) {
+        groupRef.current.getWorldPosition(_gtAvatarWorld);
+        const lf =
+          v.humanoid.getNormalizedBoneNode('leftFoot' as never)
+          ?? v.humanoid.getRawBoneNode('leftFoot' as never);
+        let leftFootY: number | string = 'N/A';
+        if (lf) {
+          lf.getWorldPosition(_gtFootWorld);
+          leftFootY = +_gtFootWorld.y.toFixed(4);
+        }
+        const carpet =
+          scene.getObjectByName('EduverseCarpetGlbFloor') ||
+          scene.getObjectByName('ActiveEnvironmentGlb');
+        let carpetY: number | string = 'N/A';
+        if (carpet) {
+          carpet.getWorldPosition(_gtCarpetWorld);
+          carpetY = +_gtCarpetWorld.y.toFixed(4);
+        }
+        const wPhy = typeof window !== 'undefined'
+          ? (window as Window & { __PHYSICS_FLOOR_Y?: number })
+          : null;
+        console.table({
+          Avatar_Group_World_Y: +_gtAvatarWorld.y.toFixed(4),
+          LeftFoot_World_Y: leftFootY,
+          Carpet_Root_World_Y: carpetY,
+          ROOM_BOUNDS_floorY_walk_plane: ROOM_BOUNDS.floorY,
+          Physics_Floor_Top_Y: wPhy?.__PHYSICS_FLOOR_Y ?? 'N/A',
+          LiftNode_Local_Y: liftNodeRef.current?.position.y ?? 'N/A',
+        });
+      }
+    }
+
     group.getWorldPosition(_v53WorldPos);
     v54OrbitLookAtWorld.copy(_v53WorldPos);
     const vEnd = vrmRef.current;
@@ -4722,7 +5175,21 @@ function VRMScene({
         readAvatarDebugForceStandEnv(),
       );
     }
+
   });
+
+  useEffect(() => {
+    const w = window as typeof window & { FREEZE_COGNIG?: () => void };
+    w.FREEZE_COGNIG = () => {
+      vrmaGestureNowRef.current = false;
+      activeVrmaRef.current = 'idle0';
+      isSittingRef.current = false;
+      console.warn('ALL SYSTEMS RESET TO IDLE-ZERO');
+    };
+    return () => {
+      delete w.FREEZE_COGNIG;
+    };
+  }, []);
 
   // ── Dev hotkey: Alt+R → toggle MotionLogger (record ▶ / export-and-stop ⏹) ──
   useEffect(() => {
@@ -4740,13 +5207,85 @@ function VRMScene({
     return () => window.removeEventListener('keydown', handler);
   }, []);
 
+  useFrame(() => {
+    if (!vrmRef.current?.humanoid) return;
+    const v = vrmRef.current;
+    const h = v.humanoid;
+    const get = (n: string) =>
+      h.getRawBoneNode?.(n as never) ?? h.getNormalizedBoneNode?.(n as never);
+    const moving = isActivelyMovingRef.current;
+    const sitEff = isSittingEffectiveRef.current;
+
+    if (typeof window !== 'undefined' && !(window as unknown as { __SOVEREIGN_V11_LOGGED?: boolean }).__SOVEREIGN_V11_LOGGED) {
+      (window as unknown as { __SOVEREIGN_V11_LOGGED?: boolean }).__SOVEREIGN_V11_LOGGED = true;
+      console.log('!!! SOVEREIGN_V11_EXECUTING !!!');
+    }
+
+    const sbm = (v as VRM & { springBoneManager?: { reset?: () => void } }).springBoneManager;
+    sbm?.reset?.();
+
+    // #region agent log — sovereign trace (overwrite / physics visibility)
+    if (typeof window !== 'undefined') {
+      const w = window as typeof window & { __FRAME_COUNT?: number };
+      w.__FRAME_COUNT = (w.__FRAME_COUNT ?? 0) + 1;
+      if (w.__FRAME_COUNT % 60 === 0) {
+        const hips = h.getRawBoneNode?.('hips' as never) ?? h.getNormalizedBoneNode?.('hips' as never);
+        const physOff =
+          typeof window !== 'undefined'
+          && (window as unknown as { __DISABLE_PHYSICS?: boolean }).__DISABLE_PHYSICS;
+        const physicsBypassed = isActivelyMovingRef.current || !!physOff;
+        console.table({
+          Hips_Y: hips ? (hips as THREE.Object3D).position.y : null,
+          Is_Sitting: sitEff,
+          Active_VRMA: activeVrmaRef.current,
+          Physics_Status: !physicsBypassed ? 'ACTIVE' : 'OFF',
+        });
+      }
+    }
+    // #endregion
+
+    if (moving) {
+      const hips = get('hips');
+      if (hips) {
+        hips.position.x = 0;
+        hips.position.z = 0;
+        if (!sitEff) hips.position.y = hipsBindPosRef.current?.y ?? 0.98;
+      }
+      for (const leg of ['leftUpperLeg', 'rightUpperLeg'] as const) {
+        const b = get(leg);
+        if (b && Math.abs(b.rotation.x) > 1.5) {
+          b.quaternion.set(0, 0, 0, 1);
+        }
+      }
+    }
+    v.scene.updateMatrixWorld(true);
+  }, 1000);
+
   return (
     <>
-      {/* Stable wrapper: scale ~1.35; rotation.y default π (legacy teach) — useFrame sets group.rotation.y from avatarFacingRef (base VRM0≈π, VRM1≈0). */}
+      {/* Stable wrapper: scale ~1.35; rotation.y default π (legacy VRM0 facing) — useFrame sets group.rotation.y from avatarFacingRef (base VRM0≈π, VRM1≈0). */}
       {/* Fix 6: Initial position matches currentAvatarXRef/ZRef to prevent one-frame flicker. */}
       {/* V121: Render liftNode (contains vrm.scene) instead of vrm.scene directly. */}
-      <group ref={groupRef} position={[AVATAR_DEFAULT_STAND_X, AVATAR_BASE_Y, AVATAR_DEFAULT_STAND_Z]} rotation={[0, Math.PI, 0]} scale={[1.35, 1.35, 1.35]}>
+      <group
+        ref={groupRef}
+        position={[
+          AVATAR_DEFAULT_STAND_X,
+          numOr(avatarBaseY ?? ROOM_BOUNDS.floorY, ROOM_BOUNDS_DEFAULT.floorY),
+          AVATAR_DEFAULT_STAND_Z,
+        ]}
+        rotation={[0, Math.PI, 0]}
+        scale={[1.35, 1.35, 1.35]}
+      >
         {liftNodeRef.current && <primitive object={liftNodeRef.current} />}
+        {/* BTEC Marking HUD — spatial UI (feature-gated) */}
+        {process.env.NEXT_PUBLIC_BTEC_HUD === '1' && (
+          <group position={[0.8, 1.2, 0]}>
+            <BtecMarkingHUD
+              assignmentId={resolveAssignmentId()}
+              criteria={btecCriteria}
+            />
+          </group>
+        )}
       </group>
     </>
   );
@@ -4754,26 +5293,44 @@ function VRMScene({
 
 // المكتب (Office GLB) أُزيل من المشهد — تبقى الغرفة (RoomShell) + الأفاتار فقط.
 
-// ── ZoomController — lives inside <Canvas> ──────────────────────────────────
+// ── ZoomController — direct wheel → camera.position.z (bypasses OrbitControls lock) ──
+// This ensures zoom works regardless of pointer-event or OrbitControls config issues.
 function ZoomController() {
   const { camera, gl } = useThree();
-  const zRef = useRef((camera as THREE.PerspectiveCamera).position.z);
 
   useEffect(() => {
     const canvas = gl.domElement;
     const onWheel = (e: WheelEvent) => {
-      // Let OrbitControls handle scroll zoom — do not preventDefault
-      zRef.current = zRef.current + e.deltaY * 0.018;
+      e.stopPropagation();
+      const cam = camera as THREE.PerspectiveCamera;
+      if (!cam.isPerspectiveCamera) return;
+      // Zoom by moving camera along its forward axis
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion).normalize();
+      const zoomSpeed = 0.3;
+      const delta = e.deltaY > 0 ? zoomSpeed : -zoomSpeed;
+      const newPos = cam.position.clone().addScaledVector(forward, -delta);
+      // Clamp distance from origin to prevent going through scene
+      const dist = newPos.length();
+      if (dist > 0.5 && dist < 30) {
+        cam.position.copy(newPos);
+      }
     };
-    canvas.addEventListener('wheel', onWheel, { passive: true });
+    // non-passive so we can stopPropagation
+    canvas.addEventListener('wheel', onWheel, { passive: false });
     return () => canvas.removeEventListener('wheel', onWheel);
-  }, [gl]);
-
-  useFrame(() => {
-    // ZoomController disabled — OrbitControls handles all camera movement freely
-  });
+  }, [camera, gl]);
 
   return null;
+}
+
+// ── DiagnosticSphere — bright marker at avatar stand position (remove when avatar visible) ──
+function DiagnosticSphere() {
+  return (
+    <mesh position={[AVATAR_DEFAULT_STAND_X, numOr(ROOM_BOUNDS.floorY, ROOM_BOUNDS_DEFAULT.floorY) + 1.0, AVATAR_DEFAULT_STAND_Z]}>
+      <sphereGeometry args={[0.25, 16, 16]} />
+      <meshBasicMaterial color="#ff00ff" />
+    </mesh>
+  );
 }
 
 // ── NaturalScene — lives inside <Canvas> ─────────────────────────────────────
@@ -4863,18 +5420,70 @@ function ExposureSync({ exposure }: { exposure: number }) {
   return null;
 }
 
+// ── CinematicFOV — emotion-reactive camera zoom (no new library) ─────────────
+// Thinking/explaining → narrow FOV (45→40°) = subtle push-in, more intimate.
+// Celebrating/waving  → wide FOV (45→52°)   = pull-back, room for big gestures.
+// All transitions use lerp at ~1.2°/frame — imperceptible but felt.
+const FOV_BY_EMOTION: Record<string, number> = {
+  thinking:    40,
+  curious:     40,
+  attentive:   40,
+  celebrate:   52,
+  excited:     52,
+  happy:       50,
+  encouraging: 48,
+  neutral:     45,
+  friendly:    45,
+  calm:        43,
+};
+function CinematicFOV({ emotion }: { emotion: string }) {
+  const { camera } = useThree();
+  const targetFov  = useRef(45);
+  useEffect(() => {
+    targetFov.current = FOV_BY_EMOTION[emotion] ?? 45;
+  }, [emotion]);
+  useFrame((state, delta) => {
+    const cam = camera as THREE.PerspectiveCamera;
+    if (!cam.isPerspectiveCamera) return;
+
+    // Camera NaN recovery — if a previous NaN frame corrupted the camera matrix,
+    // reset to sane defaults so the avatar becomes visible without a page reload.
+    const pos = cam.position;
+    if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y) || !Number.isFinite(pos.z)) {
+      pos.set(0, ROOM_BOUNDS_DEFAULT.floorY + CAMERA_OFFSET_Y, 3.0);
+      cam.lookAt(0, ROOM_BOUNDS_DEFAULT.floorY + CAMERA_TARGET_OFFSET_Y, AVATAR_DEFAULT_STAND_Z);
+      cam.updateProjectionMatrix();
+    }
+    // FOV NaN recovery
+    if (!Number.isFinite(cam.fov) || cam.fov < 10 || cam.fov > 170) {
+      cam.fov = 45;
+    }
+
+    const t = Math.min(1, delta * 1.8);   // ~550 ms transition
+    cam.fov += (targetFov.current - cam.fov) * t;
+    cam.updateProjectionMatrix();
+  });
+  return null;
+}
+
 // ── Main component (pure VRM renderer — no WS hook, no HUD) ─────────────────
 // HUD and WS state management live in AvatarAgentClient.tsx.
 // This component only renders the R3F canvas and reacts to window avatar:* events.
 
 export default function AvatarCanvas({
-  vrmUrl = '/models/teach.vrm',
+  vrmUrl = pickVrmUrl(),
   fallbackVrmUrl: _fallbackVrmUrl,
 }: {
   vrmUrl?: string;
   /** Optional fallback VRM path (reserved for future use). */
   fallbackVrmUrl?: string;
 }) {
+  console.log('%c🔥 FORCED OFFICE ENVIRONMENT ACTIVE', 'color: orange; font-size: 16px;');
+  // #region agent log — Docker Sync Fingerprint
+  if (typeof window !== 'undefined') {
+    console.log("🚀 VERSION_CHECK: [" + new Date().toISOString() + "] - SOVEREIGN_PATCH_V10");
+  }
+  // #endregion
   // ── Canonical renderer lock: prevent double-mount ────────────────────────
   if (typeof window !== 'undefined') {
     const w = window as typeof window & { __AVATAR_CANONICAL__?: string };
@@ -4893,6 +5502,16 @@ export default function AvatarCanvas({
 
   const [loaded,    setLoaded]    = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Mood-based lighting: tracks current Cogni emotion to drive ComfortLightingRig
+  const [emotionForLighting, setEmotionForLighting] = useState('neutral');
+  useEffect(() => {
+    const onEmotion = (e: Event) => {
+      const em = (e as CustomEvent<{ emotion?: string }>).detail?.emotion;
+      if (em) setEmotionForLighting(em);
+    };
+    window.addEventListener('avatar:emotion', onEmotion);
+    return () => window.removeEventListener('avatar:emotion', onEmotion);
+  }, []);
 
   // ── Leva: dev-only natural light controls ───────────────────────────────────
   const { toneMappingExposure, envIntensity } = useControls(
@@ -4947,7 +5566,8 @@ export default function AvatarCanvas({
 
   const applyAvatarGroundOffset = useCallback(
     (nextY: number) => {
-      ROOM_BOUNDS.floorY = nextY;
+      // Double-guard: GroundLock already rejects NaN, but defend here too.
+      ROOM_BOUNDS.floorY = numOr(nextY, ROOM_BOUNDS_DEFAULT.floorY);
       ROOM_BOUNDS.minX = ROOM_BOUNDS_DEFAULT.minX;
       ROOM_BOUNDS.maxX = ROOM_BOUNDS_DEFAULT.maxX;
       ROOM_BOUNDS.minZ = ROOM_BOUNDS_DEFAULT.minZ;
@@ -4972,13 +5592,12 @@ export default function AvatarCanvas({
 
   /** ── V56.1 — Legacy Carpet Redirect (HMR-safe) ───────────────────────────── */
   /**
-   * Same rug walk extra as V56 — uses module-level {@link RUG_WALK_SURFACE_Y_EXTRA} (env snapshot).
-   * Redefining it here would duplicate the identifier; keep a single source at module scope.
+   * Rug extra: DEFAULT uses `NEXT_PUBLIC_RUG_WALK_SURFACE_Y_EXTRA`; OFFICE uses `ENV_MODELS.OFFICE.rugExtra`.
    */
   const legacyCarpetRedirect = useCallback(
     (box: THREE.Box3) => {
       if (!box || !box.max || (typeof box.isEmpty === 'function' && box.isEmpty())) return;
-      const proposed = (box.max.y ?? 0) + RUG_WALK_SURFACE_Y_EXTRA;
+      const proposed = numOr(box.max?.y, 0) + getEffectiveRugExtraForActiveEnv();
       tryApplyFloorY(proposed, applyAvatarGroundOffset, { bypassGroundLock: true });
       if (process.env.NODE_ENV === 'development') {
         console.warn('[V56] Legacy applyCarpetFloorYFromWorldBox redirected to GroundLock');
@@ -5013,16 +5632,18 @@ export default function AvatarCanvas({
   );
 
   useEffect(() => {
+    if (ACTIVE_ENV !== 'DEFAULT') return;
+
     const applyLockedCarpetFloor = (box: THREE.Box3) => {
       if (!box || !box.max || (typeof box.isEmpty === 'function' && box.isEmpty())) return;
       if (carpetBoundsAppliedRef.current) return;
 
-      const proposed = (box.max.y ?? 0) + RUG_WALK_SURFACE_Y_EXTRA;
+      const proposed = numOr(box.max?.y, 0) + getEffectiveRugExtraForActiveEnv();
       /** Order: `tryApplyFloorY` → `applyAvatarGroundOffset` → `ROOM_BOUNDS` + `setPlayableBounds` + `room:bounds:applied`. */
       tryApplyFloorY(proposed, applyAvatarGroundOffset, { bypassGroundLock: true });
       /**
        * V100 — foot–floor vs locked carpet: after floorY is applied (or GroundLock skips apply), force V52 foot
-       * re-calibration so soles match **current** `ROOM_BOUNDS.floorY` + `NEXT_PUBLIC_RUG_WALK_SURFACE_Y_EXTRA`.
+       * re-calibration so soles match **current** `ROOM_BOUNDS.floorY` (rug extra baked into floorY for active env).
        * Does not clear `groundLockedRef` or break GroundLock.
        */
       if (typeof window !== 'undefined') {
@@ -5069,6 +5690,22 @@ export default function AvatarCanvas({
     };
   }, [applyAvatarGroundOffset, tryApplyFloorY, groundLockedRef]);
 
+  /** OFFICE — fixed walk plane from `ENV_MODELS` (no `room:carpetBounds`). */
+  useEffect(() => {
+    if (ACTIVE_ENV !== 'OFFICE') return;
+    if (typeof window === 'undefined') return;
+    const proposed = getFixedWalkPlaneYFromEnvConfig();
+    tryApplyFloorY(proposed, applyAvatarGroundOffset, { bypassGroundLock: true });
+    carpetBoundsAppliedRef.current = true;
+    window.dispatchEvent(new CustomEvent('room:footRecalib'));
+    if (process.env.NODE_ENV === 'development') {
+      console.info('%c[ENV/OFFICE] fixed walk plane from config', 'color:#38bdf8;font-weight:bold', {
+        proposed,
+        ENV_MODELS_OFFICE: ENV_MODELS.OFFICE,
+      });
+    }
+  }, [tryApplyFloorY, applyAvatarGroundOffset]);
+
   useEffect(() => {
     if (typeof window === 'undefined' || process.env.NODE_ENV !== 'development') return;
     const w = window as typeof window & {
@@ -5092,8 +5729,11 @@ export default function AvatarCanvas({
     };
   }, [groundLockedRef, firstFloorYRef, lastAppliedYRef, allowedResetsRef, resetsPerformedRef]);
 
-  const standForCamera = useMemo(() => getDefaultStandXZ(playableBounds), [playableBounds]);
-  const cameraPosZ = useMemo(() => getCameraPosZ(playableBounds), [playableBounds]);
+  const standForCamera = useMemo(() => {
+    const s = getDefaultStandXZ(playableBounds) ?? { x: 0, z: 0 };
+    return { x: numOr(s.x, 0), z: numOr(s.z, 0) };
+  }, [playableBounds]);
+  const cameraPosZ = useMemo(() => numOr(getCameraPosZ(playableBounds), 3.5), [playableBounds]);
   const orbitDistance = useMemo(() => getCameraOrbitDistance(playableBounds), [playableBounds]);
 
   // لا مكتب في المشهد — امسح أي مرجع قديم لـ desk collider (HMR / تنقل)
@@ -5129,14 +5769,12 @@ export default function AvatarCanvas({
     return () => { delete w.__avatarDebug; };
   }, []);
 
+  // Task-5: safe JSX targets — guards against NaN from uninitialised bounds
+  const SAFE_STAND_X = numOr(standForCamera?.x, 0);
+  const SAFE_STAND_Z = numOr(standForCamera?.z, 0);
+
   return (
     <div className="relative w-full h-full bg-[#0a0a12]">
-      <div className="absolute top-2 left-2 z-20 rounded bg-red-900/80 px-2 py-1 text-[10px] text-yellow-200">
-        EMERGENCY_REVERT v9
-      </div>
-      <div className="absolute top-8 left-2 z-20 rounded bg-black/70 px-2 py-1 text-[10px] text-cyan-300">
-        VRM: {vrmUrl}
-      </div>
       {!loaded && !loadError && (
         <div className={styles.loadingOverlay}>جاري تحميل الدكتور حمزة…</div>
       )}
@@ -5148,58 +5786,37 @@ export default function AvatarCanvas({
       {loadError && loadError !== 'allFailed' && (
         <div className={styles.errorOverlay}>⚠️ تعذّر تحميل الأفاتار</div>
       )}
-      {/* Leva debug panel — dev only, hidden in production */}
-      <Leva hidden={process.env.NODE_ENV !== 'development'} collapsed />
+      {/* NUCLEAR: office.glb + VRM only — restore Leva/HUD/post via git when stable */}
       <Canvas
         dpr={[1, 1.75]}
-        shadows="soft"
+        shadows
         gl={{
           powerPreference: 'high-performance',
           antialias:       false,
           alpha:           false,
         }}
         onCreated={({ gl }) => {
-          /* بيج دافئ يطابق حواف الصورة — يقلل الهوامش البيضاء */
-          gl.setClearColor(0xe4dcd2, 1);
+          gl.setClearColor(0x0a0a12, 1);
           gl.outputColorSpace     = THREE.SRGBColorSpace;
           gl.toneMapping          = THREE.ACESFilmicToneMapping;
-          gl.toneMappingExposure  = 0.90;
+          gl.toneMappingExposure  = toneMappingExposure;
         }}
         style={{ width: '100%', height: '100%', display: 'block' }}
       >
         <PerspectiveCamera
           makeDefault
-          position={[0, playableBounds.floorY + CAMERA_OFFSET_Y, cameraPosZ]}
+          position={[0, numOr(playableBounds.floorY, ROOM_BOUNDS_DEFAULT.floorY) + CAMERA_OFFSET_Y, cameraPosZ]}
           fov={45}
           near={0.01}
           far={500}
           up={[0, 1, 0]}
         />
-        <CameraUpLock />
-        {/* ── Royal comfort lighting + exposure sync ──────────────── */}
-        <ComfortLightingRig />
-        <ExposureSync exposure={toneMappingExposure} />
+        <ambientLight intensity={0.55} />
+        <directionalLight position={[4, 12, 6]} intensity={1.15} castShadow />
 
         <Suspense fallback={null}>
-          {/* خلفية المكتب + غلاف غرفة يدمجان الصورة مع المشهد */}
-          <EduverseRoomBackdrop bounds={backdropLayoutBounds} groundLockedRef={groundLockedRef} />
-          {/* شبكة أرضية بلون أرضية Eduverse (Cool Cyan-Grey) — خطوط منتصف داكنة + مربعات فاتحة */}
-          {EDUVERSE_FLOOR_GRID_VISIBLE && EDUVERSE_FLOOR_MODE !== 'carpet_glb' && (
-            <gridHelper
-              args={[
-                EDUVERSE_GRID_SIZE,
-                EDUVERSE_GRID_DIVISIONS,
-                EDUVERSE_GRID_COLOR_CENTER,
-                EDUVERSE_GRID_COLOR_CELL,
-              ]}
-              position={[
-                0,
-                playableBounds.floorY + EDUVERSE_FLOOR_EPSILON_Y + EDUVERSE_GRID_Y_ABOVE_FLOOR,
-                getRoomZCenter(playableBounds),
-              ]}
-              renderOrder={-2004}
-            />
-          )}
+          <OfficeGlbLoadProbe />
+          <ActiveEnvironment glbPath="/models/office/office.glb" bounds={backdropLayoutBounds} />
           <VRMScene
             vrmUrl={vrmUrl}
             onLoad={handleLoad}
@@ -5207,53 +5824,24 @@ export default function AvatarCanvas({
             groundLockedRef={groundLockedRef}
             fixFeet={fixFeetEnabled}
             pruneFeetTracks={pruneFeetEnabled}
-          />
-          {/* أرضية فقط — بدون جدران جانبية لرؤية أوضح للخلفية والمكتب */}
-          <RoomShell
-            width={playableBounds.maxX - playableBounds.minX}
-            floorY={playableBounds.floorY}
-            zNear={playableBounds.maxZ}
-            zFar={playableBounds.minZ}
-            height={playableBounds.ceilY - playableBounds.floorY}
-            showFloor={false}
-            showBackWall={false}
-            showSideWalls={false}
-          />
-          {/* مكتب جديد من office_desk.glb — useGLTF + primitive (القديم يُزال من الـ VRM فقط) */}
-          <OfficeDeskFromGltf
-            floorY={playableBounds.floorY}
-            zCenter={getRoomZCenter(playableBounds)}
-            groundLockedRef={groundLockedRef}
+            avatarBaseY={playableBounds.floorY}
           />
         </Suspense>
 
-        {/* Soft contact shadows under avatar/furniture */}
-        <ContactShadows
-          position={[0, playableBounds.floorY + 0.012, standForCamera.z]}
-          opacity={0.18}
-          blur={2.2}
-          far={6}
-          resolution={512}
-          frames={1}
-        />
-
         <OrbitControls
           makeDefault
-          target={[standForCamera.x, playableBounds.floorY + CAMERA_TARGET_OFFSET_Y, standForCamera.z]}
-          minDistance={orbitDistance}
-          maxDistance={orbitDistance}
+          target={[SAFE_STAND_X, numOr(playableBounds.floorY, ROOM_BOUNDS_DEFAULT.floorY) + CAMERA_TARGET_OFFSET_Y, SAFE_STAND_Z]}
+          minDistance={0.5}
+          maxDistance={orbitDistance * 4}
           minPolarAngle={0.12}
           maxPolarAngle={Math.PI / 2 - 0.05}
-          enableRotate={false}
+          enableRotate={true}
           enablePan={false}
-          enableZoom={false}
-          enableDamping={false}
+          enableZoom={true}
+          enableDamping={true}
+          dampingFactor={0.08}
+          zoomSpeed={1.2}
         />
-
-        {/* PostFX after controls so camera matrix is final for this frame */}
-        <EffectComposer multisampling={0} enableNormalPass>
-          <SSAO intensity={0.22} radius={0.16} luminanceInfluence={0.28} />
-        </EffectComposer>
       </Canvas>
     </div>
   );

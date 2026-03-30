@@ -8,6 +8,9 @@ import type { VRM } from '@pixiv/three-vrm';
 import { PHYSICS_CONFIG } from '@/config/avatar';
 import { ROOM_BOUNDS } from '../scene/RoomShell';
 
+/** Half-thickness (Y) of the static floor cuboid — top surface = bodyY + HALF. */
+const RAPIER_FLOOR_HALF_EXTENT_Y = 0.08;
+
 let _staticsRegistered = false;
 let _charController: ReturnType<RAPIER.World['createCharacterController']> | null = null;
 let _avatarBody: ReturnType<RAPIER.World['createRigidBody']> | null = null;
@@ -18,12 +21,22 @@ function buildFloor(world: RAPIER.World): void {
   const hd = (ROOM_BOUNDS.maxZ - ROOM_BOUNDS.minZ) / 2;
   const cx = (ROOM_BOUNDS.minX + ROOM_BOUNDS.maxX) / 2;
   const cz = (ROOM_BOUNDS.minZ + ROOM_BOUNDS.maxZ) / 2;
-  const floorY = ROOM_BOUNDS.floorY - 0.06;
-  const body = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(cx, floorY, cz));
-  const desc = RAPIER.ColliderDesc.cuboid(hw, 0.08, hd)
+  /**
+   * Walk plane = `ROOM_BOUNDS.floorY` (after carpet/GroundLock this already includes
+   * `NEXT_PUBLIC_RUG_WALK_SURFACE_Y_EXTRA`). Rigid-body Y is chosen so collider *top*
+   * matches that plane: top = bodyY + HALF → bodyY = walkY - HALF.
+   * (Legacy had body at floorY−0.06 with half 0.08 → top at floorY+0.02, fighting visuals.)
+   */
+  const walkSurfaceY = ROOM_BOUNDS.floorY;
+  const bodyY = walkSurfaceY - RAPIER_FLOOR_HALF_EXTENT_Y;
+  const body = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(cx, bodyY, cz));
+  const desc = RAPIER.ColliderDesc.cuboid(hw, RAPIER_FLOOR_HALF_EXTENT_Y, hd)
     .setFriction(PHYSICS_CONFIG.environment.friction)
     .setRestitution(PHYSICS_CONFIG.environment.restitution);
   world.createCollider(desc, body);
+  if (typeof window !== 'undefined') {
+    (window as Window & { __PHYSICS_FLOOR_Y?: number }).__PHYSICS_FLOOR_Y = walkSurfaceY;
+  }
 }
 
 function buildDesk(world: RAPIER.World, box: THREE.Box3): void {

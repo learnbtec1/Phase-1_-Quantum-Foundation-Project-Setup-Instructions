@@ -55,6 +55,7 @@ from app.services.emotional_memory_manager import EmotionalMemoryManager
 from app.services.cogni_output_format import (
     ALLOWED_EMOTIONS,
     parse_reply_unified,
+    parse_reply_with_inline_gestures,
     verify_cogni_reply_format,
 )
 
@@ -687,6 +688,12 @@ async def agent_ws(websocket: WebSocket):
             except Exception:
                 pass
 
+            # FIX-1: Enforce Socratic scaffolding in WS path — Cogni must guide,
+            # not deliver ready answers. The base _SCAFFOLDING_TUTOR_BLOCK_AR is
+            # already appended inside _get_cogni_response; this flag adds a brief
+            # gatekeeper rule PREPENDED to the system prompt for extra compliance.
+            context["enforce_socratic"] = True
+
             try:
                 reply_text = await _get_dr_hamza_response(user_text, context)
 
@@ -699,7 +706,9 @@ async def agent_ws(websocket: WebSocket):
                     logger.warning("[AgentWS] Pass-2 format fail — applying patch")
                     reply_text = _patch_format(reply_text)
 
-                parsed = parse_reply_unified(reply_text)
+                # parse_reply_with_inline_gestures: extracts [wave]/[think]/etc. tokens
+                # from dialogue, converts them to performance[] cues, then strips them.
+                parsed = parse_reply_with_inline_gestures(reply_text)
                 parsed["dialogue"] = strip_internal_llm_markers(
                     parsed.get("dialogue", "") or ""
                 ).strip()

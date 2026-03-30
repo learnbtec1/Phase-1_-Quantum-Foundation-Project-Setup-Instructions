@@ -758,7 +758,8 @@ async def evaluate_one(
             "evidence": [],
             "evidence_quote": "",
             "quality": "خطأ",
-            "missing_requirements": ["مفتاح API غير مُعيَّن"]
+            "missing_requirements": ["مفتاح API غير مُعيَّن"],
+            "scaffolding_questions": [],
         }
 
     cache_k = _cache_key(assignment, student, code)
@@ -1020,6 +1021,22 @@ async def evaluate_one(
 
 خطوة 4 — اقتبس الأدلة الحرفية من نص الطالب الداعمة لحكمك.
 
+╔══════════════════════════════════════════════════╗
+║  المرحلة 5 — الإسقاط المعرفي (Cognitive Scaffolding) ║
+╚══════════════════════════════════════════════════╝
+بعد الحكم، **لا تكتب للطالب إجابة نموذجية جاهزة** يمكن نسخها كواجب. اتبع منطق الإسقاط التدريجي
+(دعم يُفضّل عبر أسئلة إرشادية وخطوات صغيرة، مع إمكانية سحب الدعم تدريجياً عند تحسّن الأداء):
+
+• **معيار Pass (مثل P1):** إن كان `achieved` false أو يحتاج تعزيزاً، صاغ **أسئلة توجيهية** تدفع نحو
+  **الوصف / التحديد / التوضيح** في سياق السيناريو — لا تلقِ فقرة إجابة كاملة.
+• **معيار Merit (مثل M1):** ركّز الأسئلة على **التحليل، المقارنة، العلاقات السببية** (ليش؟ كيف؟ ما العلاقة؟)
+  بدل تزويد تحليل جاهز.
+• **معيار Distinction (مثل D1):** ركّز على **التقييم المبرّر، الحكم، التوصية المدعومة، الاستنتاج النقدي**
+  عبر أسئلة تتطلّب تبريراً — لا تقدّم حكماً جاهزاً ينسخه الطالب.
+
+هذا التمييز يتماشى مع الإسقاط القائم على **المنطقة القريبة من التطور** و**الدعم المشروط بالأداء**:
+الطالب يبني المعرفة بإجابته، والمقيّم يوضح **فجوة واحدة أو اثنتين** ويوجّه بسؤال، لا بحلّ كامل.
+
 أعد النتيجة بـ JSON فقط (بدون أي نص خارجه):
 {{
   "achieved": true أو false,
@@ -1032,7 +1049,14 @@ async def evaluate_one(
   "reasoning": "(1) فهمي للسيناريو وما يعنيه المعيار {code} في هذا الواجب: [استخلاصك] | (2) أين وجدت الإجابة في وثيقة الطالب وما الذي قدّمه: [الموقع + الدليل] | (3) الحكم النهائي ولماذا وفق Pearson: [التبرير]",
   "evidence": ["اقتباس حرفي 1 من إجابة الطالب", "اقتباس حرفي 2 إن وُجد"],
   "quality": "ممتاز / جيد / مقبول / ضعيف",
-  "missing_requirements": ["ما يحتاج الطالب لإضافته بالضبط لتحقيق هذا المعيار في سياق هذا الواجب"]
+  "missing_requirements": [
+    "جملة قصيرة لكل فجوة: ما ينقص لتحقيق المعيار — مفضّل صياغتها كـ **خطوة تالية** أو **سؤال إرشادي واحد**، وليس فقرة نموذج جاهزة"
+  ],
+  "scaffolding_questions": [
+    "سؤال إرشادي 1 بالعربية يناسب مستوى {band} والمعيار {code} — يوجّه الطالب نحو Merit أو Distinction إن كان الهدف ترقية الأداء دون إعطاء الحل",
+    "سؤال إرشادي 2 اختياري",
+    "سؤال إرشادي 3 اختياري — أو مصفوفة فارغة إن achieved=true ولا حاجة لدعم إضافي"
+  ]
 }}"""
 
     async with semaphore:
@@ -1055,7 +1079,8 @@ async def evaluate_one(
                     "reasoning": "تعذر تحليل استجابة المقيّم",
                     "evidence": [],
                     "quality": "غير محدد",
-                    "missing_requirements": ["تعذر التحليل"]
+                    "missing_requirements": ["تعذر التحليل"],
+                    "scaffolding_questions": [],
                 }
 
             # Validate evidence quotes
@@ -1078,6 +1103,10 @@ async def evaluate_one(
                         "note": "لم يتم التحقق من الاقتباس في نص الطالب"
                     })
 
+            _sq = result.get("scaffolding_questions")
+            if not isinstance(_sq, list):
+                _sq = []
+
             final_result = {
                 "band": band,
                 "achieved": result.get("achieved", False),
@@ -1087,6 +1116,7 @@ async def evaluate_one(
                 "evidence_quote": validated_evidence[0]["quote"] if validated_evidence else "",
                 "quality": result.get("quality", "غير محدد"),
                 "missing_requirements": result.get("missing_requirements", []),
+                "scaffolding_questions": _sq,
                 "quantitative_check": result.get("quantitative_check", None),  # Add quantitative verification
             }
 
@@ -1105,7 +1135,8 @@ async def evaluate_one(
                 "evidence": [],
                 "evidence_quote": "",
                 "quality": "خطأ",
-                "missing_requirements": ["انتهت مهلة التقييم"]
+                "missing_requirements": ["انتهت مهلة التقييم"],
+                "scaffolding_questions": [],
             }
         except Exception as e:
             err_msg = str(e).lower()
@@ -1140,6 +1171,7 @@ async def evaluate_one(
                 "evidence_quote": "",
                 "quality": "خطأ",
                 "missing_requirements": [reason],
+                "scaffolding_questions": [],
             }
             if is_api_error:
                 result["_api_error"] = True

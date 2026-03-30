@@ -86,17 +86,26 @@ services:
       target: dev-base
     container_name: nexus_frontend
     working_dir: /app
+    # Set PROJECT_ROOT in `.env` to this repo’s absolute host path (e.g. D:\work\ukd or /mnt/d/work/ukd) when WSL/cross-drive bind mounts miss edits.
     volumes:
-      - ./frontend:/app
+      - ${PROJECT_ROOT:-.}/frontend:/app
       - /app/node_modules
     command: ["npm", "run", "dev", "--", "-H", "0.0.0.0", "-p", "3000"]
     environment:
+      WATCHPACK_POLLING: "true"
+      NEXT_TELEMETRY_DISABLED: "1"
       NEXT_PUBLIC_API_URL: http://localhost:8000
       NEXT_PUBLIC_AGENT_WS: ws://localhost:8000/ws/agent
       BACKEND_URL: http://backend:8000
       TTS_BACKEND_URL: http://backend:8000/api/v1/tts-with-timing
       TTS_PROXY_TIMEOUT_MS: "90000"
       CHAT_BACKEND_URL: http://backend:8000/api/v1/chat
+      # Enable gesture/lip-sync simulation when Azure TTS key is absent.
+      # Set to "false" (or remove) once AZURE_SPEECH_KEY is provided.
+      NEXT_PUBLIC_MIME_MODE: "true"
+      NEXT_PUBLIC_AVATAR_VRM_URL: "/models/cogni_final.vrm"
+      # Scene: DEFAULT (carpet + desk) | OFFICE — must be set for Next dev server / client bundle
+      NEXT_PUBLIC_ACTIVE_ENV: ${NEXT_PUBLIC_ACTIVE_ENV:-DEFAULT}
     ports:
       - "3000:3000"
     depends_on:
@@ -115,6 +124,20 @@ services:
       timeout: 5s
       retries: 5
       start_period: 25s
+
+  # One-shot BTEC → ChromaDB (same volumes as backend). Run: docker compose --profile ingest run --rm btec-ingest
+  btec-ingest:
+    profiles: ["ingest"]
+    build: ./backend
+    env_file:
+      - .env
+    environment:
+      PYTHONPATH: /app
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - ./backend/data:/app/data
+      - ./backend/data/btec-bus:/app/btec_corpus:ro
+    command: ["python", "scripts/btec_ingest.py", "--data-dir", "/app/btec_corpus", "--chroma-dir", "/app/data/chroma_cogni"]
 
 volumes:
   whisper_model_cache:

@@ -19,6 +19,7 @@ class CriterionResult(BaseModel):
     evidence_quote: str = Field(default="")
     concept_coverage: ConceptCoverage = Field(default_factory=ConceptCoverage)
     missing_requirements: List[str] = Field(default_factory=list)
+    scaffolding_questions: List[str] = Field(default_factory=list)
     needs_review: bool = Field(default=False)
 
 

@@ -112,28 +112,78 @@ export function resolvePerformanceCue(cue: PerformanceCue): ResolvedPerformance 
   }
 
   const anim = (cue.animation || '').toLowerCase();
+
+  // Full animation key → VRMA key map (mirrors VRMA_PATHS in AvatarCanvas).
   const gMap: Record<string, string> = {
-    point_forward: 'point',
-    point: 'point',
-    explain_01: 'think',
-    explain: 'think',
-    wave: 'wave',
-    clap: 'clap',
-    open_hand: 'openHand',
-    cheer: 'cheer',
-    beckon: 'beckon',
+    // Core gestures
+    wave:         'wave',
+    waving:       'wave',
+    think:        'think',
+    thinking:     'think',
+    point:        'point',
+    pointing:     'point',
+    point_forward:'point',
+    beckon:       'beckon',
+    beckoning:    'beckon',
+    agree:        'agree',
+    agreeing:     'agree',
+    ack:          'ack',
+    acknowledging:'ack',
+    nod:          'ack',
+    clap:         'clap',
+    clapping:     'clap',
+    cheer:        'cheer',
+    celebrate:    'cheer',
+    relax:        'relax',
+    look:         'look',
+    look2:        'look2',
+    goodbye:      'goodbye',
+    bye:          'goodbye',
+    // Aliases used by LLM / system
+    explain:      'think',
+    explain_01:   'think',
+    open_hand:    'openHand',
+    openhand:     'openHand',
+    encourage:    'ack',
+    question:     'think',
+    shrug:        'relax',
+    // Emotion-gestures
+    sad:          'sad',
+    angry:        'angry',
+    surprise:     'surprise',
+    surprised:    'surprise',
+    blush:        'blush',
+    sleepy:       'sleepy',
+    // MotionPack
+    peace:        'peace',
+    greet:        'greet',
+    pose:         'pose',
   };
+
   if (anim && gMap[anim]) {
     return { kind: 'gesture', token: gMap[anim] };
   }
+
+  // [GESTURE_XXX] tag support (backend-generated performance cues)
   if (tag.startsWith('[GESTURE_')) {
-    if (tag.includes('POINT')) return { kind: 'gesture', token: 'point' };
-    if (tag.includes('EXPLAIN')) return { kind: 'gesture', token: 'think' };
-    if (tag.includes('WAVE')) return { kind: 'gesture', token: 'wave' };
-    if (tag.includes('CLAP')) return { kind: 'gesture', token: 'clap' };
-    if (tag.includes('OPEN')) return { kind: 'gesture', token: 'openHand' };
+    const inner = tag.replace(/^\[GESTURE_/, '').replace(/\]$/, '').toLowerCase();
+    const mapped = gMap[inner] ?? gMap[inner.replace(/_/g, '')] ?? null;
+    if (mapped) return { kind: 'gesture', token: mapped };
+    // Keyword fallbacks
+    if (inner.includes('point'))   return { kind: 'gesture', token: 'point' };
+    if (inner.includes('explain')) return { kind: 'gesture', token: 'think' };
+    if (inner.includes('wave'))    return { kind: 'gesture', token: 'wave' };
+    if (inner.includes('clap'))    return { kind: 'gesture', token: 'clap' };
+    if (inner.includes('cheer'))   return { kind: 'gesture', token: 'cheer' };
+    if (inner.includes('think'))   return { kind: 'gesture', token: 'think' };
+    if (inner.includes('beckon'))  return { kind: 'gesture', token: 'beckon' };
+    if (inner.includes('nod'))     return { kind: 'gesture', token: 'ack' };
+    if (inner.includes('agree'))   return { kind: 'gesture', token: 'agree' };
+    if (inner.includes('relax'))   return { kind: 'gesture', token: 'relax' };
+    if (inner.includes('goodbye')) return { kind: 'gesture', token: 'goodbye' };
     return { kind: 'gesture', token: 'openHand' };
   }
+
   if (anim) {
     return { kind: 'gesture', token: gMap[anim] ?? 'openHand' };
   }

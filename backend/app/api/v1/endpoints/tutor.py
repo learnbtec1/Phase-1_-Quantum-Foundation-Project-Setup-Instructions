@@ -553,9 +553,9 @@ def _dialogue_has_egyptian_leak(raw: str) -> bool:
 
 
 def parse_cogni_output(raw: str) -> dict:
-    from app.services.cogni_output_format import parse_reply_unified
+    from app.services.cogni_output_format import parse_reply_with_inline_gestures
 
-    u = parse_reply_unified(raw or "")
+    u = parse_reply_with_inline_gestures(raw or "")
     return {
         "dialogue": u["dialogue"],
         "emotion": u["emotion"],
@@ -893,7 +893,8 @@ async def _get_cogni_response(message: str, context: dict) -> str:
         system_content += (
             "\n\n## نتيجة تقييم إجابة الطالب للتو\n"
             + str(_gf).strip()[:2000]
-            + "\nعلّق بلطف ووجّه للخطوة التالية إن لزم.\n"
+            + "\nإن وُجدت في النص أسئلة إرشادية أو «scaffolding»، استخدمها كنقاط حوار — لا تُكمل الإجابة عن الطالب.\n"
+            "علّق بلطف ووجّه للخطوة التالية إن لزم.\n"
         )
 
     # Long-term episodic snippets (vector DB / fallback — injected by agent_ws)
@@ -1054,6 +1055,17 @@ async def _get_cogni_response(message: str, context: dict) -> str:
     system_content = _append_scaffolding_tutor_rules(system_content)
     if context.get("deep_link_high_target") and not _is_quick_review_session:
         system_content += _DEEP_LINK_DISTINCTION_GATE_RELAX_AR
+
+    # FIX-1: WS Socratic enforcement — prepend a short, firm gatekeeper rule so
+    # the LLM sees it first (system messages are read top-to-bottom).
+    if context.get("enforce_socratic"):
+        _socratic_prepend = (
+            "### قاعدة مطلقة لا تُكسر (Gatekeeper)\n"
+            "لا تُعطِ أبداً إجابةً أو حلاً جاهزاً مباشرةً. "
+            "دائماً اطرح سؤالاً توجيهياً واحداً أو فحصاً مصغّراً يدفع الطالب لبناء الإجابة بنفسه. "
+            "هذه القاعدة تسبق أي تعليمات أخرى.\n\n"
+        )
+        system_content = _socratic_prepend + system_content
 
     messages = [{"role": "system", "content": system_content}]
     

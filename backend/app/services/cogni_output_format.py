@@ -165,3 +165,124 @@ def verify_cogni_reply_format(text: str) -> bool:
     return bool(re.search(r"\*[^*]+\*", text)) and bool(
         re.search(r"\[EMOTION:\s*\w+\]", text)
     )
+
+
+# ── Inline gesture token support ────────────────────────────────────────────
+# The LLM may embed gesture tokens directly in dialogue, e.g.:
+#   "[wave] أهلاً بكم"  or  "[think] دعني أفكر"
+# These are extracted, converted to performance[] cues, and stripped from text.
+
+# Canonical gesture names accepted inside [brackets] (case-insensitive).
+# Maps token → animation key used in VRMA_PATHS / animationMap.ts
+_INLINE_GESTURE_MAP: Dict[str, str] = {
+    # Core gestures
+    "wave":       "wave",
+    "waving":     "wave",
+    "think":      "think",
+    "thinking":   "think",
+    "point":      "point",
+    "pointing":   "point",
+    "beckon":     "beckon",
+    "beckoning":  "beckon",
+    "agree":      "agree",
+    "agreeing":   "agree",
+    "nod":        "ack",
+    "clap":       "clap",
+    "clapping":   "clap",
+    "cheer":      "cheer",
+    "celebrate":  "cheer",
+    "relax":      "relax",
+    "look":       "look",
+    "goodbye":    "goodbye",
+    "bye":        "goodbye",
+    # Emotions as gestures
+    "sad":        "sad",
+    "angry":      "angry",
+    "surprise":   "surprise",
+    "surprised":  "surprise",
+    "blush":      "blush",
+    "sleepy":     "sleepy",
+    # Aliases
+    "explain":    "point",
+    "encourage":  "ack",
+    "question":   "think",
+    "greet":      "wave",
+    "salute":     "wave",
+    "shrug":      "relax",
+    "peace":      "peace",
+}
+
+_INLINE_GESTURE_RE = re.compile(
+    r"\[(" + "|".join(re.escape(k) for k in _INLINE_GESTURE_MAP) + r")\]",
+    re.IGNORECASE,
+)
+
+
+def extract_inline_gestures(text: str) -> tuple[str, List[Dict[str, Any]]]:
+    """
+    Scan *text* for inline [gesture] tokens.
+
+    Returns:
+        (cleaned_text, performance_cues)
+
+    cleaned_text   — original text with [gesture] tokens removed and whitespace normalised.
+    performance_cues — list of performance dicts compatible with parse_reply_unified output.
+
+    Example:
+        "[wave] أهلاً بكم، [think] دعني أفكر" →
+        ("أهلاً بكم، دعني أفكر",
+         [{"tag": "[GESTURE_WAVE]", "start_word": 0, "animation": "wave", "intensity": 0.6},
+          {"tag": "[GESTURE_THINK]", "start_word": 3, "animation": "think", "intensity": 0.55}])
+    """
+    if not text:
+        return text, []
+
+    cues: List[Dict[str, Any]] = []
+    # Track word index as we process tokens
+    # Strategy: split on token positions, count words in segments before each token
+    word_cursor = 0
+    cleaned_parts: List[str] = []
+    last_end = 0
+
+    for m in _INLINE_GESTURE_RE.finditer(text):
+        # Text before this token
+        segment = text[last_end:m.start()]
+        if segment:
+            cleaned_parts.append(segment)
+            word_cursor += len(segment.split())
+        last_end = m.end()
+
+        token_lower = m.group(1).lower()
+        anim_key = _INLINE_GESTURE_MAP.get(token_lower, "ack")
+        tag = f"[GESTURE_{token_lower.upper()}]"
+        cues.append({
+            "tag":        tag,
+            "start_word": word_cursor,
+            "animation":  anim_key,
+            "intensity":  0.60,
+        })
+
+    # Remaining text after last token
+    tail = text[last_end:]
+    if tail:
+        cleaned_parts.append(tail)
+
+    cleaned = "".join(cleaned_parts)
+    # Normalise multiple spaces/newlines left by removed tokens
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
+    return cleaned, cues
+
+
+def parse_reply_with_inline_gestures(text: str) -> Dict[str, Any]:
+    """
+    Full pipeline:
+      1. Extract inline [gesture] tokens → extra performance cues.
+      2. Run parse_reply_unified on the cleaned text.
+      3. Merge performance arrays (inline cues first, then LLM-generated).
+    """
+    cleaned_text, inline_cues = extract_inline_gestures(text)
+    result = parse_reply_unified(cleaned_text)
+    existing_perf: List[Dict[str, Any]] = result.get("performance") or []
+    result["performance"] = inline_cues + existing_perf
+    return result

@@ -37,6 +37,7 @@ class CriterionHistory:
     quality: str
     missing_requirements: List[str]
     timestamp: str
+    scaffolding_questions: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -71,7 +72,11 @@ def load_student_history(student_id: str) -> List[AssessmentSession]:
             data = json.load(f)
         sessions = []
         for s in data.get("sessions", []):
-            criteria = [CriterionHistory(**c) for c in s.get("criteria", [])]
+            criteria = []
+            for c in s.get("criteria", []):
+                cc = dict(c)
+                cc.setdefault("scaffolding_questions", [])
+                criteria.append(CriterionHistory(**cc))
             sessions.append(AssessmentSession(
                 job_id=s["job_id"],
                 timestamp=s["timestamp"],
@@ -98,16 +103,21 @@ def save_assessment_session(
     path    = _student_path(student_id)
     sessions = load_student_history(student_id)
 
-    criteria_list = [
-        CriterionHistory(
-            code=code,
-            achieved=r.get("achieved", False),
-            quality=r.get("quality", "غير محدد"),
-            missing_requirements=r.get("missing_requirements", []),
-            timestamp=datetime.utcnow().isoformat(),
+    criteria_list = []
+    for code, r in criteria_results.items():
+        _sq = r.get("scaffolding_questions")
+        if not isinstance(_sq, list):
+            _sq = []
+        criteria_list.append(
+            CriterionHistory(
+                code=code,
+                achieved=r.get("achieved", False),
+                quality=r.get("quality", "غير محدد"),
+                missing_requirements=r.get("missing_requirements", []),
+                timestamp=datetime.utcnow().isoformat(),
+                scaffolding_questions=_sq,
+            )
         )
-        for code, r in criteria_results.items()
-    ]
 
     new_session = AssessmentSession(
         job_id=job_id,

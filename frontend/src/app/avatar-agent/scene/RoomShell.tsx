@@ -1,29 +1,29 @@
-'use client';
+﻿'use client';
 /**
- * RoomShell.tsx — Three walls (back, left, right) + floor.
+ * RoomShell.tsx â€” Three walls (back, left, right) + floor.
  *
  * Coordinate system (matches AvatarCanvas):
- *   Y-up, camera at z≈+3.2 looking toward -z.
+ *   Y-up, camera at zâ‰ˆ+3.2 looking toward -z.
  *   Floor at y = floorY (-1.0 by default = AVATAR_BASE_Y).
  *
  * Props:
- *   width    — x span (meters)     default 6
- *   depth    — total z span        default 8  (zFar=-5 to zNear=+3)
- *   height   — room height above floor default 4
- *   thickness — mesh thickness      default 0.05
- *   floorY   — world y of floor     default -1.0
- *   zNear    — front z edge        default +3.0
- *   zFar     — back z edge         default -5.0
- *   showFloor / showBackWall / showSideWalls — toggle parts (e.g. side walls only when GLB supplies floor/back).
+ *   width    â€” x span (meters)     default 6
+ *   depth    â€” total z span        default 8  (zFar=-5 to zNear=+3)
+ *   height   â€” room height above floor default 4
+ *   thickness â€” mesh thickness      default 0.05
+ *   floorY   â€” world y of floor     default -1.0
+ *   zNear    â€” front z edge        default +3.0
+ *   zFar     â€” back z edge         default -5.0
+ *   showFloor / showBackWall / showSideWalls â€” toggle parts (e.g. side walls only when GLB supplies floor/back).
  *
- * لضبط حجم الغرفة مع الفيزياء: مرّر الأبعاد من `ROOM_BOUNDS` كما في AvatarCanvas
- * (width = maxX−minX، zNear/maxZ، zFar/minZ، height = ceilY−floorY).
+ * Ù„Ø¶Ø¨Ø· Ø­Ø¬Ù… Ø§Ù„ØºØ±ÙØ© Ù…Ø¹ Ø§Ù„ÙÙŠØ²ÙŠØ§Ø¡: Ù…Ø±Ù‘Ø± Ø§Ù„Ø£Ø¨Ø¹Ø§Ø¯ Ù…Ù† `ROOM_BOUNDS` ÙƒÙ…Ø§ ÙÙŠ AvatarCanvas
+ * (width = maxXâˆ’minXØŒ zNear/maxZØŒ zFar/minZØŒ height = ceilYâˆ’floorY).
  */
 import React, { useMemo } from 'react';
 import * as THREE from 'three';
 import { ROOM_PALETTE, getRoomMaterial, getNoiseNormalMap } from './BackdropTheme';
 
-// ── Warm wood parquet (square tiles, canvas-generated — no external image) ─
+// â”€â”€ Warm wood parquet (square tiles, canvas-generated â€” no external image) â”€
 const PARQUET_TEX_GEN = 3;
 let _parquetTex: THREE.CanvasTexture | null = null;
 let _parquetTexGen = 0;
@@ -36,11 +36,11 @@ function makeParquetTexture(): THREE.CanvasTexture {
   }
 
   const SIZE = 512;
-  /** عدد المربعات في كل اتجاه داخل نسيج واحد (1×1 متر تقريباً عند repeat) */
+  /** Ø¹Ø¯Ø¯ Ø§Ù„Ù…Ø±Ø¨Ø¹Ø§Øª ÙÙŠ ÙƒÙ„ Ø§ØªØ¬Ø§Ù‡ Ø¯Ø§Ø®Ù„ Ù†Ø³ÙŠØ¬ ÙˆØ§Ø­Ø¯ (1Ã—1 Ù…ØªØ± ØªÙ‚Ø±ÙŠØ¨Ø§Ù‹ Ø¹Ù†Ø¯ repeat) */
   const TILES_PER_SIDE = 8;
   const cell = SIZE / TILES_PER_SIDE;
-  const GROUT = 2; // فواصل بنية بين المربعات
-  /** ألوان خشب باركيه دافئة (بلوط / جوز) */
+  const GROUT = 2; // ÙÙˆØ§ØµÙ„ Ø¨Ù†ÙŠØ© Ø¨ÙŠÙ† Ø§Ù„Ù…Ø±Ø¨Ø¹Ø§Øª
+  /** Ø£Ù„ÙˆØ§Ù† Ø®Ø´Ø¨ Ø¨Ø§Ø±ÙƒÙŠÙ‡ Ø¯Ø§ÙØ¦Ø© (Ø¨Ù„ÙˆØ· / Ø¬ÙˆØ²) */
   const WOODS = [
     '#C4A574', '#B8956A', '#A67C52', '#9A7B5C', '#8B6914', '#7D5A3C',
     '#6B4E3D', '#A0826D', '#BFA78F', '#D4C4A8', '#8F6F4F',
@@ -67,7 +67,7 @@ function makeParquetTexture(): THREE.CanvasTexture {
       ctx.fillStyle = WOODS[ci]!;
       ctx.fillRect(x + inset, y + inset, cell - GROUT, cell - GROUT);
 
-      // حبيبات خشب خفيفة داخل المربع
+      // Ø­Ø¨ÙŠØ¨Ø§Øª Ø®Ø´Ø¨ Ø®ÙÙŠÙØ© Ø¯Ø§Ø®Ù„ Ø§Ù„Ù…Ø±Ø¨Ø¹
       ctx.strokeStyle = 'rgba(45, 32, 20, 0.22)';
       ctx.lineWidth = 1;
       for (let g = 1; g < 4; g++) {
@@ -78,7 +78,7 @@ function makeParquetTexture(): THREE.CanvasTexture {
         ctx.stroke();
       }
 
-      // لمعان خفيف على حافة
+      // Ù„Ù…Ø¹Ø§Ù† Ø®ÙÙŠÙ Ø¹Ù„Ù‰ Ø­Ø§ÙØ©
       ctx.strokeStyle = 'rgba(255, 248, 230, 0.12)';
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -134,7 +134,7 @@ export function RoomShell({
 
   const floorMat = useMemo(() => {
     const tex = makeParquetTexture();
-    // Repeat so each 1 m² shows one canvas tile
+    // Repeat so each 1 mÂ² shows one canvas tile
     tex.repeat.set(width, zLen);
     tex.needsUpdate = true;
     return new THREE.MeshStandardMaterial({
@@ -166,7 +166,7 @@ export function RoomShell({
 
   return (
     <group name="RoomShell">
-      {/* ── Floor ── */}
+      {/* â”€â”€ Floor â”€â”€ */}
       {showFloor && floorMat && (
         <mesh
           name="RoomFloor"
@@ -178,7 +178,7 @@ export function RoomShell({
         />
       )}
 
-      {/* ── Back wall (z = zFar) ── */}
+      {/* â”€â”€ Back wall (z = zFar) â”€â”€ */}
       {showBackWall && (
         <mesh
           name="BackWall"
@@ -190,7 +190,7 @@ export function RoomShell({
         </mesh>
       )}
 
-      {/* ── Left wall (x = -width/2), faces +x ── */}
+      {/* â”€â”€ Left wall (x = -width/2), faces +x â”€â”€ */}
       {showSideWalls && (
         <mesh
           name="LeftWall"
@@ -203,7 +203,7 @@ export function RoomShell({
         </mesh>
       )}
 
-      {/* ── Right wall (x = +width/2), faces -x ── */}
+      {/* â”€â”€ Right wall (x = +width/2), faces -x â”€â”€ */}
       {showSideWalls && (
         <mesh
           name="RightWall"
@@ -219,17 +219,54 @@ export function RoomShell({
   );
 }
 
-/** Static world bounds used by physics system */
-export const ROOM_BOUNDS = {
-  /**
-   * أرض المشهد (متر). تُضبط لمحاذاة أرضية الباركيه/الشبكة مع أرضية غرفة صورة Eduverse.
-   * (قيمة سالبة = خفض المشهد 3D ليتطابق مع منظور الصورة.)
-   */
-  /** محاذاة مع أرضية صورة Eduverse — خفّض القيمة إذا بقي المشهد “عالياً” عن الخلفية */
-  floorY:     -2.95,
-  ceilY:      5.0,
-  minX:      -3.0,
-  maxX:       3.0,
-  minZ:      -5.0,
-  maxZ:       3.0,
+// â”€â”€ RoomBounds type â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+export type RoomBounds = {
+  floorY: number; ceilY: number;
+  minX: number; maxX: number;
+  minZ: number; maxZ: number;
+};
+
+/** Immutable snapshot â€” never changes at runtime (reset / default target). */
+export const ROOM_BOUNDS_DEFAULT = {
+  floorY: -2.95, ceilY: 5.0,
+  minX:   -3.0,  maxX:  3.0,
+  minZ:   -5.0,  maxZ:  3.0,
 } as const;
+
+/** Mutable live bounds â€” AvatarCanvas mutates floorY when carpet AABB arrives. */
+export const ROOM_BOUNDS: RoomBounds = {
+  floorY: -2.95, ceilY: 5.0,
+  minX:   -3.0,  maxX:  3.0,
+  minZ:   -5.0,  maxZ:  3.0,
+};
+
+/** Default avatar XZ standing position. */
+export function getDefaultStandXZ(bounds: RoomBounds = ROOM_BOUNDS): { x: number; z: number } {
+  return {
+    x: (bounds.minX + bounds.maxX) / 2,
+    z: bounds.minZ + (bounds.maxZ - bounds.minZ) * 0.38,
+  };
+}
+
+/** Camera default Z (camera looks toward âˆ’Z from here). */
+export function getCameraPosZ(bounds: RoomBounds = ROOM_BOUNDS): number {
+  return bounds.maxZ;
+}
+
+/** Room centre Z. */
+export function getRoomZCenter(bounds: RoomBounds = ROOM_BOUNDS): number {
+  return (bounds.minZ + bounds.maxZ) / 2;
+}
+
+/** 4-corner patrol waypoints inside the playable area. */
+export function buildPatrolWaypoints(bounds: RoomBounds = ROOM_BOUNDS): [number, number][] {
+  const m = 0.8;
+  return [
+    [bounds.minX + m, bounds.minZ + m],
+    [bounds.maxX - m, bounds.minZ + m],
+    [bounds.maxX - m, bounds.maxZ - m],
+    [bounds.minX + m, bounds.maxZ - m],
+  ];
+}
+

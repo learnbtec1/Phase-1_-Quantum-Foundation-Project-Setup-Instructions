@@ -14,3 +14,6 @@ backend/.env
 
 # Misc
 .DS_Store
+
+# VRM avatar files — large binaries, managed outside git
+public/models/*.vrm

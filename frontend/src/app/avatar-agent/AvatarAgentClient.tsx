@@ -112,6 +112,27 @@ export type AvatarAgentClientProps = {
   embedVariant?: 'default' | 'dashboard';
 };
 
+/** One-time wipe of any stale VRM/avatar cached state from the browser.
+ *  Runs on first render after a new avatar version stamp is detected. */
+const COGNI_VRM_VERSION = 'cogni-v1';
+function clearStaleAvatarCache(): void {
+  if (typeof window === 'undefined') return;
+  const key = '__cogni_vrm_ver__';
+  if (localStorage.getItem(key) === COGNI_VRM_VERSION) return;
+  // Stale version detected — wipe all known avatar/VRM storage keys
+  const keysToRemove = [
+    'avatarBindPose', 'vrmBindPose', 'cogniAvatarState', 'vrm_cache_v',
+    'avatarFloorY', 'avatarStandY', 'cogni_foot_calib',
+  ];
+  keysToRemove.forEach(k => localStorage.removeItem(k));
+  // Wipe stale IndexedDB caches
+  ['VRMCache', 'cogni-vrm-cache', 'vrm-model-cache'].forEach(db => {
+    try { indexedDB.deleteDatabase(db); } catch { /* ignore */ }
+  });
+  localStorage.setItem(key, COGNI_VRM_VERSION);
+  console.log('[AvatarAgentClient] Stale avatar cache cleared for', COGNI_VRM_VERSION);
+}
+
 export default function AvatarAgentClient({
   initialUnit = '',
   initialTarget = '',
@@ -121,6 +142,18 @@ export default function AvatarAgentClient({
   embedVariant = 'default',
 }: AvatarAgentClientProps) {
   const [hasStarted, setHasStarted] = useState(false);
+
+  // Run cache-clear once on first mount (before any 3D scene initializes)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { clearStaleAvatarCache(); }, []);
+
+  // Dev bridge: optional live BTEC criteria for AvatarCanvas HUD (`window.__btecCriteria = [...]`).
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'development') {
+      (window as any).__btecCriteria = (window as any).__btecCriteria ?? null;
+    }
+  }, []);
+
   const [userInput, setUserInput] = useState('');
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [isSitting, setIsSitting] = useState(false);
