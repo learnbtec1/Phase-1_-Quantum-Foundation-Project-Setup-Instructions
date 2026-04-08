@@ -1,5 +1,7 @@
 import { NextRequest } from 'next/server';
 
+import { getBearerTokenFromRequest } from './_auth';
+
 export const runtime = 'nodejs';
 export const maxDuration = 300;
 
@@ -14,6 +16,14 @@ const ERROR_PAYLOAD = (msg: string) => ({
 });
 
 export async function POST(req: NextRequest) {
+  const token = getBearerTokenFromRequest(req);
+  if (!token) {
+    return new Response(
+      JSON.stringify({ type: 'error', detail: 'يجب تسجيل الدخول لتشغيل التقييم.' }),
+      { status: 401, headers: { 'Content-Type': 'application/json' } },
+    );
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 290_000);
 
@@ -42,10 +52,10 @@ export async function POST(req: NextRequest) {
       }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     }
 
-    if (!student_text || student_text.length < 50) {
+    if (!student_text || student_text.length < 20) {
       return new Response(JSON.stringify({
         type: 'error',
-        detail: `إجابة الطالب قصيرة جداً. الحد الأدنى 50 حرف. الطول الحالي: ${student_text.length}`,
+        detail: `إجابة الطالب قصيرة جداً. الحد الأدنى 20 حرفاً. الطول الحالي: ${student_text.length}`,
       }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     }
 
@@ -53,7 +63,10 @@ export async function POST(req: NextRequest) {
     const student_id = body?.student_id ?? undefined;
     const backendResponse = await fetch(`${backendUrl}/api/v1/assessment/forensic-grade-v3`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
       body: JSON.stringify({ assignment_text, student_text, ...(student_id && { student_id }) }),
       signal: controller.signal,
     });

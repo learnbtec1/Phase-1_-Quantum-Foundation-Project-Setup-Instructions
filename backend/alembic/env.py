@@ -25,7 +25,7 @@ target_metadata = Base.metadata
 # استخدام DATABASE_URL من البيئة
 database_url = os.getenv(
     "DATABASE_URL",
-    "postgresql://nexus:nexus_secret@localhost:5432/nexus_db"
+    "postgresql://eduverse:eduverse_secret@localhost:5432/eduverse_db"
 )
 config.set_main_option("sqlalchemy.url", database_url)
 

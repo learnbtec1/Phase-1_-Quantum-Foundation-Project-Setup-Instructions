@@ -10,7 +10,7 @@ Canonical implementations:
 """
 from __future__ import annotations
 
-from app.services import mini_check_evaluator
+from app.archive import mini_check_evaluator
 from app.services import tutorial_progress_store
 from app.services import tutorial_session_bridge
 

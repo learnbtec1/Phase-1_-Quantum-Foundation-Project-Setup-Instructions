@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "primary_gesture_to_vrma": {
+    "lean_forward_listen": "think",
+    "hands_open_calming": "beckon",
+    "explain_slowly": "think",
+    "nod_enthusiastically": "ack",
+    "tilt_head_confused": "think",
+    "wave": "wave",
+    "point": "point",
+    "think": "think",
+    "clap": "clap",
+    "open_hand": "openHand"
+  },
+  "notes": "Maps LLM primary_gesture tokens to frontend VRMA keys. Extend alongside animationMap.ts."
+}

@@ -2,7 +2,7 @@ param()
 Set-StrictMode -Off
 $ErrorActionPreference = 'Continue'
 
-Write-Host "==== NEXUS Stack Launcher ===="
+Write-Host "==== EDUVERSE Stack Launcher ===="
 Write-Host ("Time: {0:s}" -f (Get-Date))
 
 # Use API version that works with this engine
@@ -22,11 +22,11 @@ Write-Host "docker ps OK. Running containers:"
 Write-Host ($psOut | Out-String)
 
 # Remove conflicting containers
-Write-Host "Removing existing nexus containers..."
+Write-Host "Removing existing eduverse containers..."
 $env:DOCKER_API_VERSION = "1.44"
-docker rm -f nexus_db        2>&1 | Out-Null
-docker rm -f nexus_backend   2>&1 | Out-Null
-docker rm -f nexus_frontend  2>&1 | Out-Null
+docker rm -f eduverse_db        2>&1 | Out-Null
+docker rm -f eduverse_backend   2>&1 | Out-Null
+docker rm -f eduverse_frontend  2>&1 | Out-Null
 Write-Host "Done."
 
 # Navigate to project root

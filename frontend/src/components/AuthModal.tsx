@@ -2,6 +2,8 @@
 
 import { useState } from 'react';
 import { apiBase, notifyAuthChanged, setAccessToken } from '@/lib/auth';
+import { BodyPortal } from '@/components/portal/BodyPortal';
+import { Z_LAYERS } from '@/lib/z-layers';
 
 type Mode = 'login' | 'register';
 
@@ -53,8 +55,13 @@ export default function AuthModal({
     }
   };
 
+  /* Portal → body: يتجاوز overflow/stacking على أسلاف AvatarAgentClient والمنصة */
   return (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+    <BodyPortal>
+      <div
+        className="fixed inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+        style={{ zIndex: Z_LAYERS.MODAL_BACKDROP }}
+      >
       <div className="w-full max-w-md rounded-2xl border border-violet-500/30 bg-[#121225] p-6 shadow-2xl text-right" dir="rtl">
         <h2 className="text-xl font-bold text-white mb-4">
           {mode === 'login' ? 'تسجيل الدخول' : 'إنشاء حساب'}
@@ -115,5 +122,6 @@ export default function AuthModal({
         </p>
       </div>
     </div>
+    </BodyPortal>
   );
 }

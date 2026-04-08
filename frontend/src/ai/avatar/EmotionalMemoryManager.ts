@@ -376,7 +376,7 @@ export class EmotionalMemoryManager {
     const traj = this.getTrajectory();
     let playfulGestureChance = 0.12;
     if (
-      (traj.dominantEmotion === 'happy' || traj.dominantEmotion === 'friendly') &&
+      (traj.dominantEmotion === 'encouraging' || traj.dominantEmotion === 'excited') &&
       traj.avgPleasure > 0.12
     ) {
       playfulGestureChance = 0.28;

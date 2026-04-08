@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-models.py — SQLAlchemy ORM models for the NEXUS BTEC platform.
+models.py — SQLAlchemy ORM models for the EDUVERSE BTEC platform.
 
 Tables:
   users        — platform users (students / teachers)

@@ -1,4 +1,4 @@
-# PROJECT_MEMORY.md — NEXUS / Verona Avatar Platform
+# PROJECT_MEMORY.md — EDUVERSE / Verona Avatar Platform
 <!-- ════════════════════════════════════════════════════════════════════════════
      هذا الملف هو ذاكرة المشروع الدائمة.
      في نهاية كل جلسة:  قل "قم بمراجعة ما أنجزناه وحدّث PROJECT_MEMORY.md"
@@ -323,9 +323,9 @@ cd frontend && npm run type-check
 | `BACKEND_URL` | `frontend/.env.local` | URL الـ backend (لا تضع ngrok hardcoded) |
 
 ### مفاتيح localStorage (لا تغيرها أبداً)
-- `nexus-auth` — جلسة المستخدم
-- `nexus-assessments` — التقييمات
-- `nexus-vr` — تقدم VR (hard-coded = 4 عناصر)
+- `eduverse-auth` — جلسة المستخدم
+- `eduverse-assessments` — التقييمات
+- `eduverse-vr` — تقدم VR (hard-coded = 4 عناصر)
 - `btec_platform_progress` — حالة اللعبة
 
 ---
@@ -333,9 +333,9 @@ cd frontend && npm run type-check
 ## 📐 بنية الـ State Management
 
 ```
-Zustand (persist) ──► nexus-auth         useAuth.ts
-                 ──► nexus-assessments   useAssessment.ts
-                 ──► nexus-vr            useVR.ts (VR evidence = 4 دائماً)
+Zustand (persist) ──► eduverse-auth         useAuth.ts
+                 ──► eduverse-assessments   useAssessment.ts
+                 ──► eduverse-vr            useVR.ts (VR evidence = 4 دائماً)
 
 React Context ────► btec_platform_progress  ProgressContext.tsx
 ```
@@ -375,7 +375,7 @@ Server → Client:
 
 ## 👤 بيانات تسجيل الدخول التجريبية
 ```
-Email   : student@nexus.edu
+Email   : student@eduverse.edu
 Password: password123
 ```
 

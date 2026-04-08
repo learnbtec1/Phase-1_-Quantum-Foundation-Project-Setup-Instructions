@@ -323,12 +323,14 @@ export function useVAD({
             console.log(
               `[VAD] WAV ready — invoking onSpeechEnd | size=${wav.size} bytes type=${wav.type || 'audio/wav'}`,
             );
+            console.log('📦 [VAD] Speech ended - WAV blob generated, size:', wav.size);
             onSpeechEnd?.(wav);
           } else {
             const rawBlob = new Blob(savedChunks, { type: savedChunks[0]?.type ?? 'audio/webm' });
             console.warn(
               `[VAD] buildWavBlob failed — invoking onSpeechEnd with raw blob | size=${rawBlob.size} type=${rawBlob.type}`,
             );
+            console.log('📦 [VAD] Speech ended - WAV blob generated, size:', rawBlob.size);
             onSpeechEnd?.(rawBlob);
           }
 
@@ -368,6 +370,7 @@ export function useVAD({
           if (!speechStartedRef.current) {
             console.log(`[useVAD] Speech Detected — Recording... (rms=${rms.toFixed(4)}, threshold=${silenceThreshold})`);
             hadSpeechThisSegmentRef.current = true;
+            console.log('🎤 [VAD] Speech started - capturing audio...');
             onSpeechStart?.();
           }
           speechStartedRef.current = true;
@@ -519,10 +522,12 @@ export function useVAD({
         const wav = await buildWavBlob(chunks, 16000);
         if (wav) {
           console.log(`[useVAD] Manual: WAV ready — onSpeechEnd | ${wav.size} bytes`);
+          console.log('📦 [VAD] Speech ended - WAV blob generated, size:', wav.size);
           onSpeechEnd?.(wav);
         } else {
           const raw = new Blob(chunks, { type: chunks[0]?.type ?? 'audio/webm' });
           console.warn('[useVAD] Manual: buildWavBlob failed — sending raw blob');
+          console.log('📦 [VAD] Speech ended - WAV blob generated, size:', raw.size);
           onSpeechEnd?.(raw);
         }
       };

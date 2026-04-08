@@ -74,8 +74,18 @@ class ConversationStore:
     # ── Internal helpers ───────────────────────────────────────────────────────
 
     def _ensure_dirs(self) -> None:
-        self._store_dir.mkdir(parents=True, exist_ok=True)
-        self._audio_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._store_dir.mkdir(parents=True, exist_ok=True)
+            self._audio_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.error(
+                "ConversationStore cannot create data dirs | store=%s audio=%s | %s",
+                self._store_dir,
+                self._audio_dir,
+                exc,
+                exc_info=True,
+            )
+            raise
 
     @staticmethod
     def _today() -> str:

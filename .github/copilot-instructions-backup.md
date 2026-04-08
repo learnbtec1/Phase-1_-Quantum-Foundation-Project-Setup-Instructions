@@ -1,4 +1,4 @@
-# NEXUS-EDU 2200 [Quantum Edition] - AI Coding Agent Instructions
+# EDUVERSE-EDU 2200 [Quantum Edition] - AI Coding Agent Instructions
 
 ## Project Overview
 This is an immersive educational application set in the year 2200, combining Next.js 14 with React Three Fiber to create a 3D quantum farm simulation for business education. Users interact with NPCs, collect evidence, and perform PESTLE analysis through a sci-fi themed UI.

@@ -356,7 +356,7 @@ v2.8 (2026-03-10)
 ║                                                    ║
 ║   Ready by: 2026-03-18 00:00 UTC                  ║
 ║   Author: Hamza                                   ║
-║   Platform: Eduverse NEXUS v3.0                   ║
+║   Platform: Eduverse EDUVERSE v3.0                   ║
 ║                                                    ║
 ╚════════════════════════════════════════════════════╝
 ```

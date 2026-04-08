@@ -18,10 +18,12 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import os
 import random
 import re as _re
 import uuid
 from typing import Optional, Tuple, List, Dict, Any
+from xml.sax.saxutils import escape as _xml_sax_escape
 
 try:
     import azure.cognitiveservices.speech as speechsdk
@@ -63,16 +65,31 @@ def is_azure_tts_auth_failure(exc: BaseException) -> bool:
 
 
 def _locked_jordanian_male_voice(requested: Optional[str]) -> str:
-    """Cogni policy: always ar-JO-TaimNeural for Arabic TTS (ignores female / alternate env)."""
+    """
+    Cogni policy: locked male Jordanian neural (COGNI_ARABIC_TTS_VOICE_LOCKED).
+    When TTS_FORCE_JORDANIAN is True, reject any voice name that does not contain ``ar-JO``.
+    """
     try:
         from app.core.config import settings as _cfg
 
         locked = str(getattr(_cfg, "COGNI_ARABIC_TTS_VOICE_LOCKED", "ar-JO-TaimNeural") or "ar-JO-TaimNeural")
+        force_jo = bool(getattr(_cfg, "TTS_FORCE_JORDANIAN", True))
     except Exception:
         locked = "ar-JO-TaimNeural"
+        force_jo = True
     r = (requested or "").strip()
-    if r and r != locked:
-        logger.warning("[AzureTTS] Voice %r overridden — Cogni uses locked male Jordanian %s", r, locked)
+    if not force_jo:
+        return r or locked
+    if r and "ar-JO" not in r:
+        logger.warning(
+            "[AzureTTS] Non-Jordanian voice %r rejected — using locked Jordanian %s",
+            r,
+            locked,
+        )
+        r = ""
+    eff = r or locked
+    if eff != locked:
+        logger.warning("[AzureTTS] Voice %r overridden — Cogni uses locked male Jordanian %s", eff, locked)
     return locked
 
 
@@ -106,17 +123,22 @@ def _is_all_ascii(s: str) -> bool:
 # All-uppercase abbreviation: PESTLE, SWOT, BTEC, KPI, GDP …
 _ACRONYM_RE = _re.compile(r'^[A-Z][A-Z0-9]{1,}$')
 
+# XML 1.0 — disallow control chars except TAB / LF / CR (Azure SSML parser rejects them).
+_INVALID_XML_CHAR_RE = _re.compile("[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]")
+
 
 def _xml_escape(s: str) -> str:
-    """Escape XML special characters in a plain-text node."""
-    return (
-        s
-        .replace('&', '&amp;')
-        .replace('<', '&lt;')
-        .replace('>', '&gt;')
-        .replace('"', '&quot;')
-        .replace("'", '&apos;')
-    )
+    """Escape XML special characters in a plain-text node (SSML-safe)."""
+    if not s:
+        return ""
+    return _xml_sax_escape(s, {'"': '&quot;', "'": '&apos;'})
+
+
+def _strip_invalid_xml_chars(s: str) -> str:
+    """Remove characters that are illegal in XML 1.0 text (prevents Azure 0x80045003 SSML errors)."""
+    if not s:
+        return ""
+    return _INVALID_XML_CHAR_RE.sub("", s)
 
 
 def _split_segments(text: str) -> list[tuple[str, str]]:
@@ -260,6 +282,11 @@ def _clean_tts_text(text: str) -> str:
     text = _re.sub(r'(?i)\beduverse\b', 'إيدوفيرس', text)
     text = _re.sub(r'(?i)\basas\b', 'أساس', text)
 
+    # Markdown line headers (# …) and stray bold markers often leak from the LLM
+    text = _re.sub(r'(?m)^#{1,6}\s+', '', text)
+    text = _re.sub(r'`{1,3}[^`]{0,2000}`{1,3}', '', text)
+    text = _re.sub(r'\*{2,}', '', text)
+
     # Collapse extra spaces / blank lines left by the deletions above
     text = _re.sub(r'[ \t]{2,}', ' ', text)
     text = _re.sub(r'\n{3,}', '\n\n', text)
@@ -270,6 +297,8 @@ def _prepare_tts_text(raw: str) -> tuple[str, list[str]]:
     """Strip markdown/brackets while preserving LLM inline SSML (break, prosody, …)."""
     t, slots = _extract_ssml_placeholders((raw or "").strip())
     t = _clean_tts_text(t)
+    t = _strip_invalid_xml_chars(t)
+    slots = [_strip_invalid_xml_chars(s) for s in slots]
     return t, slots
 
 
@@ -281,8 +310,8 @@ def _plain_text_for_edge_tts_from_prepared(cleaned: str) -> str:
 
 
 # ── Edge TTS (Microsoft Edge online — same neural voice IDs as Azure, no subscription) ──
-# Jordanian male: ar-JO-TaimNeural; fallbacks if a voice is unavailable in a region.
-_EDGE_VOICE_FALLBACKS: tuple[str, ...] = (
+# Jordanian male + regional fallbacks if a voice is unavailable (after TTS_EDGE_FALLBACK_VOICE).
+_BASE_EDGE_VOICE_FALLBACKS: tuple[str, ...] = (
     "ar-JO-TaimNeural",
     "ar-JO-OmarNeural",
     "ar-JO-HamedNeural",
@@ -379,6 +408,38 @@ def edge_tts_cues_to_websocket_shapes(
     return viseme_cues, word_cues
 
 
+def approx_viseme_cues_from_word_cues(
+    word_cues: List[Dict[str, Any]],
+    dialogue: str,
+) -> List[Dict[str, Any]]:
+    """
+    Build Azure-style viseme_cues ({t, id}) from word boundary timings when the SDK
+    produced word_cues but an empty viseme stream. Uses the same time base as the
+    audio (no second synthesis).
+    """
+    if not word_cues:
+        return []
+    sorted_w = sorted(word_cues, key=lambda x: int(x.get("t", 0) or 0))
+    if not sorted_w:
+        return []
+    d = (dialogue or "").strip()
+    est_end = int(sorted_w[-1].get("t", 0) or 0) + max(
+        250, min(8000, len(d) * 42 if d else 600)
+    )
+    cues: List[Dict[str, Any]] = []
+    for i, w in enumerate(sorted_w):
+        t = int(max(0, w.get("t", 0) or 0))
+        next_t = int(sorted_w[i + 1].get("t", 0) or 0) if i + 1 < len(sorted_w) else est_end
+        span = max(80, next_t - t)
+        cues.append({"t": t, "id": 4})
+        mid = t + min(140, max(50, span // 3))
+        cues.append({"t": mid, "id": 12})
+        tail = min(next_t - 15, mid + min(90, span // 2))
+        if tail > mid:
+            cues.append({"t": tail, "id": 0})
+    return cues
+
+
 async def synthesize_edge_tts_mp3(
     raw_text: str,
     rate: str = "+0%",
@@ -397,8 +458,14 @@ async def synthesize_edge_tts_mp3(
         raise ValueError("edge-tts: empty text after cleanup")
 
     locked = _locked_jordanian_male_voice(voice)
+    try:
+        from app.core.config import settings as _cfg
+
+        edge_fb = str(getattr(_cfg, "TTS_EDGE_FALLBACK_VOICE", "ar-JO-TaimNeural") or "ar-JO-TaimNeural")
+    except Exception:
+        edge_fb = "ar-JO-TaimNeural"
     voices: list[str] = []
-    for v in (locked, *_EDGE_VOICE_FALLBACKS):
+    for v in (locked, edge_fb, *_BASE_EDGE_VOICE_FALLBACKS):
         if v and v not in voices:
             voices.append(v)
 
@@ -715,7 +782,7 @@ class AzureTTSService:
         client_voice_rate: float = 1.0,
         client_pitch_scale: float = 1.0,
         usage_user_id: Optional[uuid.UUID] = None,
-    ) -> Tuple[bytes, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    ) -> Tuple[bytes, List[Dict[str, Any]], List[Dict[str, Any]], str]:
         """
         Synthesize *text* to MP3 bytes with temporal cues.
 
@@ -729,8 +796,16 @@ class AzureTTSService:
             - Raw MP3 bytes.
             - List of viseme cues [{"t": ms, "id": viseme_id}, ...].
             - List of word boundary cues [{"t": ms, "w": "word"}, ...].
+            - Provider id: ``"edge"`` or ``"azure"``.
         """
-        cleaned, slots = _prepare_tts_text((text or "").strip())
+        raw_in = (text or "").strip()
+        try:
+            from app.archive.dialect_corrector import maybe_correct_egyptian_for_tts
+
+            text_for_tts = maybe_correct_egyptian_for_tts(raw_in, context="azure_tts_synthesize")
+        except Exception:
+            text_for_tts = raw_in
+        cleaned, slots = _prepare_tts_text(text_for_tts)
         if not cleaned:
             raise ValueError("TTS text cannot be empty after cleanup")
 
@@ -738,46 +813,69 @@ class AzureTTSService:
 
         from app.core.config import settings as _cfg
 
-        primary = str(getattr(_cfg, "TTS_PRIMARY_PROVIDER", "edge") or "edge").lower().strip()
+        primary = str(getattr(_cfg, "TTS_PRIMARY_PROVIDER", "azure") or "azure").lower().strip()
         plain_edge = _plain_text_for_edge_tts_from_prepared(cleaned)
 
-        if primary != "azure" and plain_edge:
+        async def _synthesize_edge_pack() -> Tuple[bytes, List[Dict[str, Any]], List[Dict[str, Any]], str]:
             emo = (emotion or "neutral").lower()
             pros = EDGE_TTS_EMOTION_PROSODY.get(emo, DEFAULT_EDGE_TTS_PROSODY)
-            try:
-                async with self._synthesis_lock:
-                    mp3_b, wb, ve = await synthesize_edge_tts_mp3(
-                        (text or "").strip(),
-                        rate=pros["rate"],
-                        pitch=pros["pitch"],
-                        voice=voice,
-                    )
-                v_cues, w_cues = edge_tts_cues_to_websocket_shapes(wb, ve)
-                if usage_user_id:
-                    try:
-                        from app.services.usage_service import log_tts_usage
-
-                        log_tts_usage(usage_user_id, len(plain_edge))
-                    except Exception:
-                        pass
-                logger.info(
-                    "[TTS] Primary=edge | voice=%s | %d bytes | visemes=%d words=%d",
-                    voice,
-                    len(mp3_b),
-                    len(v_cues),
-                    len(w_cues),
+            async with self._synthesis_lock:
+                mp3_b, wb, ve = await synthesize_edge_tts_mp3(
+                    text_for_tts,
+                    rate=pros["rate"],
+                    pitch=pros["pitch"],
+                    voice=voice,
                 )
-                return mp3_b, v_cues, w_cues
+            v_cues, w_cues = edge_tts_cues_to_websocket_shapes(wb, ve)
+            if usage_user_id and plain_edge:
+                try:
+                    from app.services.usage_service import log_tts_usage
+
+                    log_tts_usage(usage_user_id, len(plain_edge))
+                except Exception:
+                    pass
+            logger.info(
+                "[TTS] edge-tts | voice=%s | %d bytes | visemes=%d words=%d",
+                voice,
+                len(mp3_b),
+                len(v_cues),
+                len(w_cues),
+            )
+            return mp3_b, v_cues, w_cues, "edge"
+
+        _force_edge = bool(getattr(_cfg, "TTS_FORCE_FALLBACK", False)) or os.getenv(
+            "TTS_FORCE_FALLBACK", ""
+        ).lower() in ("1", "true", "yes")
+        if _force_edge:
+            if not plain_edge:
+                raise ValueError("TTS_FORCE_FALLBACK: edge-tts cannot synthesize this text after cleanup")
+            logger.info("[TTS] TTS_FORCE_FALLBACK — using edge-tts only (Azure skipped)")
+            return await _synthesize_edge_pack()
+
+        if primary != "azure" and plain_edge:
+            try:
+                return await _synthesize_edge_pack()
             except Exception as ex:
                 logger.warning("[TTS] Edge primary failed, falling back to Azure: %s", ex)
 
+        def _allow_edge_after_azure_fail(exc: BaseException) -> bool:
+            if bool(getattr(_cfg, "TTS_DISABLE_NON_AZURE_FALLBACK", False)):
+                return is_azure_tts_auth_failure(exc)
+            return True
+
         if not _SDK_AVAILABLE:
+            if plain_edge:
+                logger.warning("[TTS] Azure SDK missing — using edge-tts")
+                return await _synthesize_edge_pack()
             raise RuntimeError(
-                "azure-cognitiveservices-speech is not installed and edge-tts failed. "
+                "azure-cognitiveservices-speech is not installed and edge-tts cannot run. "
                 "Run: pip install azure-cognitiveservices-speech>=1.37.0"
             )
 
         if not getattr(self, "_available", True):
+            if plain_edge:
+                logger.warning("[TTS] Azure credentials missing — using edge-tts")
+                return await _synthesize_edge_pack()
             raise RuntimeError(
                 "Azure TTS unavailable: AZURE_SPEECH_KEY or AZURE_SPEECH_REGION is missing in environment "
                 "(edge-tts also failed or was skipped)."
@@ -794,13 +892,11 @@ class AzureTTSService:
             client_pitch_scale=client_pitch_scale,
         )
 
-        # Ensure synthesizer is ready
         synthesizer = await self._ensure_synthesizer()
 
         loop = asyncio.get_running_loop()
         timeout_val = timeout if timeout is not None else self._timeout
 
-        # Use a lock to serialize synthesis calls (because synthesizer is not thread-safe)
         sync_func = functools.partial(
             self._synthesize_sync,
             synthesizer=synthesizer,
@@ -811,57 +907,73 @@ class AzureTTSService:
         max_retries = max(0, int(getattr(_cfg, "TTS_AZURE_RETRY_COUNT", 1)))
         delay_sec = float(getattr(_cfg, "TTS_AZURE_RETRY_DELAY_SEC", 2.5))
 
-        for attempt in range(max_retries + 1):
-            try:
-                async with self._synthesis_lock:
-                    result = await asyncio.wait_for(
-                        loop.run_in_executor(None, sync_func),
-                        timeout=timeout_val,
-                    )
-                if usage_user_id and result:
-                    try:
-                        from app.services.usage_service import log_tts_usage
+        try:
+            for attempt in range(max_retries + 1):
+                try:
+                    async with self._synthesis_lock:
+                        result = await asyncio.wait_for(
+                            loop.run_in_executor(None, sync_func),
+                            timeout=timeout_val,
+                        )
+                    if usage_user_id and result:
+                        try:
+                            from app.services.usage_service import log_tts_usage
 
-                        log_tts_usage(usage_user_id, len(cleaned))
-                    except Exception:
-                        pass
-                return result
-            except asyncio.TimeoutError:
-                logger.error("[AzureTTS] synthesis timed out after %ss", timeout_val)
-                raise
-            except RuntimeError as e:
-                err_s = str(e).lower()
-                transient = (
-                    "429" in err_s
-                    or "too many requests" in err_s
-                    or "rate limit" in err_s
-                )
-                if attempt < max_retries and transient:
-                    logger.warning(
-                        "[AzureTTS] transient rate/error — retry %d/%d after %.1fs | %s",
-                        attempt + 1,
-                        max_retries,
-                        delay_sec,
-                        e,
+                            log_tts_usage(usage_user_id, len(cleaned))
+                        except Exception:
+                            pass
+                    mp3_b, v_cues, w_cues = result
+                    return mp3_b, v_cues, w_cues, "azure"
+                except asyncio.TimeoutError as te:
+                    logger.error("[AzureTTS] synthesis timed out after %ss", timeout_val)
+                    if plain_edge and _allow_edge_after_azure_fail(te):
+                        logger.warning("⚠️ Azure failed: %s. Falling back to edge-tts", te)
+                        return await _synthesize_edge_pack()
+                    raise
+                except RuntimeError as e:
+                    err_s = str(e).lower()
+                    transient = (
+                        "429" in err_s
+                        or "too many requests" in err_s
+                        or "rate limit" in err_s
                     )
-                    await asyncio.sleep(delay_sec)
-                    continue
-                raise
-            except Exception as e:
-                err_s = str(e).lower()
-                if attempt < max_retries and (
-                    "429" in err_s or "too many requests" in err_s or "rate limit" in err_s
-                ):
-                    logger.warning(
-                        "[AzureTTS] transient — retry %d/%d after %.1fs | %s",
-                        attempt + 1,
-                        max_retries,
-                        delay_sec,
-                        e,
-                    )
-                    await asyncio.sleep(delay_sec)
-                    continue
-                raise
+                    if attempt < max_retries and transient:
+                        logger.warning(
+                            "[AzureTTS] transient rate/error — retry %d/%d after %.1fs | %s",
+                            attempt + 1,
+                            max_retries,
+                            delay_sec,
+                            e,
+                        )
+                        await asyncio.sleep(delay_sec)
+                        continue
+                    if plain_edge and _allow_edge_after_azure_fail(e):
+                        logger.warning("⚠️ Azure failed: %s. Falling back to edge-tts", e)
+                        return await _synthesize_edge_pack()
+                    raise
+                except Exception as e:
+                    err_s = str(e).lower()
+                    if attempt < max_retries and (
+                        "429" in err_s or "too many requests" in err_s or "rate limit" in err_s
+                    ):
+                        logger.warning(
+                            "[AzureTTS] transient — retry %d/%d after %.1fs | %s",
+                            attempt + 1,
+                            max_retries,
+                            delay_sec,
+                            e,
+                        )
+                        await asyncio.sleep(delay_sec)
+                        continue
+                    if plain_edge and _allow_edge_after_azure_fail(e):
+                        logger.warning("⚠️ Azure failed: %s. Falling back to edge-tts", e)
+                        return await _synthesize_edge_pack()
+                    raise
+        except Exception as outer:
+            if plain_edge and _allow_edge_after_azure_fail(outer):
+                logger.warning("⚠️ Azure failed: %s. Falling back to edge-tts", outer)
+                return await _synthesize_edge_pack()
+            raise
 
     def _synthesize_sync(
         self,
@@ -944,3 +1056,39 @@ class AzureTTSService:
             self._key = None
             self._region = None
             logger.info("[AzureTTS] Credentials cleared. Will reload from settings.")
+
+
+def synthesize(text: str) -> str:
+    """
+    Synchronous smoke test for TTS data dirs + edge-tts (no Azure required).
+
+    ``python -c "from app.services.tts_service import synthesize; print(synthesize('مرحبا'))"``
+    """
+    try:
+        from app.archive.tts_data_dirs import ensure_tts_data_dirs
+
+        ensure_tts_data_dirs()
+    except Exception as e:
+        return f"TTS smoke: data dirs error: {type(e).__name__}: {e}"
+    try:
+        import edge_tts  # noqa: F401
+    except ImportError:
+        return (
+            "TTS smoke: edge-tts not installed - run: pip install edge-tts "
+            "(data/audio dirs OK; install dependency to test synthesis)"
+        )
+    t = (text or "").strip()
+    if not t:
+        return "TTS smoke: empty text"
+
+    async def _once() -> Tuple[bytes, int, int]:
+        mp3_b, wb, _ve = await synthesize_edge_tts_mp3(t, rate="+0%", pitch="+0Hz", voice=None)
+        return mp3_b, len(wb), len(_ve)
+
+    try:
+        mp3_b, nw, nv = asyncio.run(_once())
+        return (
+            f"ok edge-tts | text_len={len(t)} | audio_bytes={len(mp3_b)} | words={nw} | viseme_events={nv}"
+        )
+    except Exception as e:
+        return f"TTS smoke failed: {type(e).__name__}: {e}"

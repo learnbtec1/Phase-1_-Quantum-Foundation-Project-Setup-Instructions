@@ -1,0 +1,9 @@
+{
+  "emotion_confidence_default": 0.5,
+  "engagement_default": 0.5,
+  "gesture_intensity_cap": 1.0,
+  "speech_speed_cap": 1.15,
+  "student_state_fallback": "engaged",
+  "enable_firasah_prompt": true,
+  "notes": "Tuned via ENABLE_EMOTIONAL_INTELLIGENCE and LLM JSON fields."
+}

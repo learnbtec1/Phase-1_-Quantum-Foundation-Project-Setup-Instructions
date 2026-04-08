@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
@@ -11,10 +12,22 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.core.security import decode_token
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.models.db_models import User, UserRole
 
 security = HTTPBearer(auto_error=False)
+
+
+def load_user_from_access_token(token: str) -> Optional[User]:
+    """Load active user from raw JWT string (WebSocket `auth` frame / subprotocol)."""
+    tok = (token or "").strip()
+    if not tok:
+        return None
+    db = SessionLocal()
+    try:
+        return _user_from_token(SimpleNamespace(credentials=tok), db)
+    finally:
+        db.close()
 
 
 def _user_from_token(

@@ -6,6 +6,12 @@
 export interface PerformanceCue {
   tag: string;
   start_word: number;
+  /** إن وُجد، يُفضَّل على start_word لجدولة التوقيت بالمللي ثانية من بداية الكلام */
+  start_ms?: number;
+  /** Extra lead/lag vs playback anchor (from LLM `cospeech_offset_ms` / `lead_ms`) */
+  cospeech_offset_ms?: number;
+  /** مدة نافذة الإيماءة (من LLM gestures[]) بالمللي ثانية */
+  duration_ms?: number;
   blendshape?: string;
   intensity?: number;
   animation?: string;
@@ -17,6 +23,59 @@ export interface WordCue {
 }
 
 /** Normalize unknown WS payload entries into PerformanceCue[]. */
+/**
+ * حقل `gestures` المنفصل في إطار WebSocket (بالإضافة إلى performance).
+ */
+export function normalizeGesturesArrayFromWs(raw: unknown): PerformanceCue[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PerformanceCue[] = [];
+  const animMap: Record<string, string> = {
+    wave: 'wave',
+    point: 'point',
+    think: 'think',
+    nod: 'ack',
+    smile: 'happy',
+    shrug: 'relax',
+    beckon: 'beckon',
+    clap: 'clap',
+    openhand: 'openHand',
+    openHand: 'openHand',
+  };
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const o = item as Record<string, unknown>;
+    const typ = typeof o.type === 'string' ? o.type.trim().toLowerCase() : '';
+    if (!typ) continue;
+    const startMs = Math.max(0, Math.round(Number(o.start_ms ?? 0) || 0));
+    let inten = 0.75;
+    const ri = Number(o.intensity);
+    if (Number.isFinite(ri)) inten = Math.max(0, Math.min(1, ri));
+    const safe = typ.replace(/[^a-z0-9_]+/gi, '_');
+    const anim = animMap[typ] ?? typ;
+    const durRaw = Number(o.duration_ms);
+    const duration_ms =
+      Number.isFinite(durRaw) && durRaw > 0
+        ? Math.max(500, Math.min(4000, Math.round(durRaw)))
+        : undefined;
+    let cosOff: number | undefined;
+    const coRaw = o.cospeech_offset_ms ?? o.co_speech_offset_ms ?? o.lead_ms;
+    if (coRaw !== undefined && coRaw !== null) {
+      const c = Number(coRaw);
+      if (Number.isFinite(c)) cosOff = Math.max(-2000, Math.min(8000, Math.round(c)));
+    }
+    out.push({
+      tag: `[GESTURE_${safe.toUpperCase()}]`,
+      start_word: 0,
+      start_ms: startMs,
+      animation: anim,
+      intensity: inten,
+      ...(duration_ms !== undefined ? { duration_ms } : {}),
+      ...(cosOff !== undefined ? { cospeech_offset_ms: cosOff } : {}),
+    });
+  }
+  return out;
+}
+
 export function normalizePerformanceList(raw: unknown): PerformanceCue[] {
   if (!Array.isArray(raw)) return [];
   const out: PerformanceCue[] = [];
@@ -32,11 +91,30 @@ export function normalizePerformanceList(raw: unknown): PerformanceCue[] {
       sw = 0;
     }
     const cue: PerformanceCue = { tag, start_word: sw };
+    if (o.start_ms !== undefined && o.start_ms !== null) {
+      const sms = Number(o.start_ms);
+      if (Number.isFinite(sms)) cue.start_ms = Math.max(0, Math.round(sms));
+    }
     if (typeof o.blendshape === 'string' && o.blendshape.trim()) {
       cue.blendshape = o.blendshape.trim();
     }
     if (typeof o.animation === 'string' && o.animation.trim()) {
       cue.animation = o.animation.trim();
+    }
+    if (o.duration_ms !== undefined && o.duration_ms !== null) {
+      const dm = Number(o.duration_ms);
+      if (Number.isFinite(dm) && dm > 0) {
+        cue.duration_ms = Math.max(500, Math.min(4000, Math.round(dm)));
+      }
+    }
+    const coRaw = (o as { cospeech_offset_ms?: unknown }).cospeech_offset_ms
+      ?? (o as { co_speech_offset_ms?: unknown }).co_speech_offset_ms
+      ?? (o as { lead_ms?: unknown }).lead_ms;
+    if (coRaw !== undefined && coRaw !== null) {
+      const c = Number(coRaw);
+      if (Number.isFinite(c)) {
+        cue.cospeech_offset_ms = Math.max(-2000, Math.min(8000, Math.round(c)));
+      }
     }
     let inten = 0.5;
     try {
@@ -132,11 +210,11 @@ export function resolvePerformanceCue(cue: PerformanceCue): ResolvedPerformance 
     nod:          'ack',
     clap:         'clap',
     clapping:     'clap',
-    cheer:        'cheer',
-    celebrate:    'cheer',
+    cheer:        'clap',
+    celebrate:    'clap',
     relax:        'relax',
-    look:         'look',
-    look2:        'look2',
+    look:         'wave',
+    look2:        'wave',
     goodbye:      'goodbye',
     bye:          'goodbye',
     // Aliases used by LLM / system
@@ -154,10 +232,10 @@ export function resolvePerformanceCue(cue: PerformanceCue): ResolvedPerformance 
     surprised:    'surprise',
     blush:        'blush',
     sleepy:       'sleepy',
-    // MotionPack
-    peace:        'peace',
-    greet:        'greet',
-    pose:         'pose',
+    // MotionPack aliases → rig tokens we still handle
+    peace:        'wave',
+    greet:        'wave',
+    pose:         'relax',
   };
 
   if (anim && gMap[anim]) {
@@ -174,7 +252,7 @@ export function resolvePerformanceCue(cue: PerformanceCue): ResolvedPerformance 
     if (inner.includes('explain')) return { kind: 'gesture', token: 'think' };
     if (inner.includes('wave'))    return { kind: 'gesture', token: 'wave' };
     if (inner.includes('clap'))    return { kind: 'gesture', token: 'clap' };
-    if (inner.includes('cheer'))   return { kind: 'gesture', token: 'cheer' };
+    if (inner.includes('cheer'))   return { kind: 'gesture', token: 'clap' };
     if (inner.includes('think'))   return { kind: 'gesture', token: 'think' };
     if (inner.includes('beckon'))  return { kind: 'gesture', token: 'beckon' };
     if (inner.includes('nod'))     return { kind: 'gesture', token: 'ack' };
@@ -196,11 +274,19 @@ export function schedulePerformanceCues(
   wordCues: WordCue[] | undefined,
   fallbackTotalMs: number,
   onFire: (cue: PerformanceCue) => void,
-): ReturnType<typeof setTimeout>[] {
-  const timers: ReturnType<typeof setTimeout>[] = [];
+  opts?: { anchorMs?: number },
+): number[] {
+  const timers: number[] = [];
   if (typeof window === 'undefined' || !performance?.length) return timers;
+  const anchor = Math.max(0, Math.round(opts?.anchorMs ?? 0));
   for (const cue of performance) {
-    const delay = startWordToDelayMs(cue.start_word, speech, wordCues, fallbackTotalMs);
+    const base =
+      typeof cue.start_ms === 'number' && Number.isFinite(cue.start_ms)
+        ? Math.max(0, cue.start_ms)
+        : startWordToDelayMs(cue.start_word, speech, wordCues, fallbackTotalMs);
+    const co = Number(cue.cospeech_offset_ms);
+    const extra = Number.isFinite(co) ? co : 0;
+    const delay = Math.max(0, anchor + base + extra);
     const id = window.setTimeout(() => {
       try {
         onFire(cue);

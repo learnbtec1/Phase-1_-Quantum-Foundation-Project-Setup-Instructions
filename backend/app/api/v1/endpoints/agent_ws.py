@@ -5,6 +5,7 @@ Agent WebSocket endpoint: ws://localhost:8000/ws/agent
 Handles real-time voice/text conversation with the Cogni avatar agent.
 
 Message protocol (client → server):
+  { "type": "auth", "token": "<JWT>" }  # first frame if not using Sec-WebSocket-Protocol (when anonymous not allowed)
   { "type": "ping" }
   { "type": "audio", "data": "<base64 WAV>", "system_prompt": "<optional Cogni>", "emotional_context": "<optional>" }
   { "type": "persona_init", "system_prompt": "<Arabic Cogni identity>" }
@@ -12,7 +13,9 @@ Message protocol (client → server):
   { "type": "deep_link_clear", ... }  # clears deep link + quick_review; restores default P-M-D scaffolding
   { "type": "deep_link_init", ... }  # legacy alias → same as deep_link_config
   { "type": "set_focus_subject", "subject": "...", "student_override": true }
-  { "type": "text",  "text": "<text>", "system_prompt": "<optional Cogni>", "persona_system_prompt": "<alias>", "emotional_context": "<optional>" }
+  { "type": "text",  "text": "<text>", "intent|user_intent?": "<optional hint for behavior layer>",
+                                "system_prompt": "<optional Cogni>", "persona_system_prompt": "<alias>", "emotional_context": "<optional>" }
+  { "type": "user_interrupt" }  # cancel in-flight LLM/TTS; server sends stop_speech (same as barge-in)
   { "type": "training_request", "topic": "<optional>", "difficulty": "pass|merit|distinction" }
   { "type": "clear" }
 
@@ -30,6 +33,7 @@ Message protocol (server → client):
   { "type": "error",           "error": { "message": "...", "severity": "error|warn" } }
   { "type": "cleared" }
   { "type": "stop_speech",     "reason": "interrupted|..." }  # stop avatar TTS (full-duplex interrupt)
+  { "type": "tool_result",     "tool": "...", "ok": true|false, "result_preview": "..." }  # LLM function-calling
   { "type": "deep_link_ack",   "deep_link": { ... } }
   { "type": "deep_link_cleared", "v": 1.1 }
 """
@@ -49,22 +53,45 @@ from typing import List, Optional, Any, Dict
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.config import settings
-from app.core.security import decode_token
+from app.api.deps import load_user_from_access_token
+from app.api.v1.ws_message_security import validate_ws_client_message
+from app.models.db_models import User
 from app.services.thinker import Thinker
-from app.services.emotional_memory_manager import EmotionalMemoryManager
-from app.services.cogni_output_format import (
+from app.archive.emotional_memory_manager import EmotionalMemoryManager
+from app.services.cogni_reply_parse_legacy import (
     ALLOWED_EMOTIONS,
     parse_reply_unified,
     parse_reply_with_inline_gestures,
     verify_cogni_reply_format,
 )
+from app.services.cogni_output_schema import (
+    cogni_strict_json_enabled,
+    parse_llm_reply_strict_json,
+)
 
 try:
     from app.services.settings import HEARTBEAT_INTERVAL_SEC
-except Exception:
+except Exception as _hb_import_exc:
     HEARTBEAT_INTERVAL_SEC = 15  # safe default if settings module unavailable
+    logging.getLogger("cogni.agent_ws").warning(
+        "HEARTBEAT_INTERVAL_SEC import failed, using 15s: %s",
+        _hb_import_exc,
+        exc_info=True,
+    )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("cogni.agent_ws")
+
+
+def _ws_ctx(session_id: str, req_id: Optional[str] = None) -> str:
+    """Compact id string for log messages (no PII)."""
+    sid = (session_id or "")[:32]
+    if req_id:
+        return f"session_id={sid} req_id={str(req_id)[:48]}"
+    return f"session_id={sid}"
+
+# ═══ NEW ═══
+_active_llm_tasks: Dict[str, asyncio.Task[Any]] = {}
+# ═══ NEW END ═══
 
 # ── Azure TTS singleton (lazy init — avoids import-time crash if SDK absent) ─
 _azure_tts = None
@@ -174,6 +201,44 @@ def _patch_format(text: str) -> str:
     return cleaned + f'\n[EMOTION: {emotion}]'
 
 
+COGNI_WS_SUBPROTOCOL = "cogni-auth-v1"
+COGNI_WS_AUTH_HANDSHAKE_SEC = 20.0
+
+
+def _allow_anonymous_agent_ws() -> bool:
+    return os.getenv("COGNI_WS_ALLOW_ANONYMOUS", "false").lower() in ("1", "true", "yes")
+
+
+def _jwt_from_sec_websocket_protocol(header_val: Optional[str]) -> Optional[str]:
+    """
+    Browser: new WebSocket(url, ['cogni-auth-v1', '<jwt>'])
+    → Sec-WebSocket-Protocol: cogni-auth-v1, <jwt>
+    Also supports a single token: cogni-auth-v1.<jwt>
+    """
+    if not header_val:
+        return None
+    parts = [p.strip() for p in header_val.split(",") if p.strip()]
+    if len(parts) >= 2 and parts[0].lower() == COGNI_WS_SUBPROTOCOL.lower():
+        return parts[1] or None
+    if len(parts) == 1:
+        p0 = parts[0]
+        prefix = COGNI_WS_SUBPROTOCOL.lower() + "."
+        if p0.lower().startswith(prefix):
+            return p0[len(COGNI_WS_SUBPROTOCOL) + 1 :] or None
+    return None
+
+
+def _user_ctx_from_row(user: User) -> tuple[uuid.UUID, str, str, str]:
+    r = user.role
+    user_role_str = r.value if hasattr(r, "value") else str(r)
+    return (
+        user.id,
+        str(user.subscription_plan or "free").lower(),
+        str(user.model_tier or "standard").lower(),
+        user_role_str,
+    )
+
+
 def _pedagogical_performance_supplement(
     dialogue: str,
     existing: Optional[List[Dict[str, Any]]],
@@ -229,43 +294,89 @@ async def agent_ws(websocket: WebSocket):
       audio → Whisper STT → Dr. Hamza LLM → tts_arabic TTS → avatar
       text  →               Dr. Hamza LLM → tts_arabic TTS → avatar
 
-    Optional query `token` (JWT): associates the socket with a user for persistent memory.
-    Missing/invalid token → guest mode (no cross-session persistence).
+    Auth (no JWT in query string — avoids proxy/CDN logs):
+      - Sec-WebSocket-Protocol: cogni-auth-v1, <jwt>  (see frontend useAgentAgent), or
+      - First text frame: {"type":"auth","token":"<jwt>"} before other messages
+        (required when COGNI_WS_ALLOW_ANONYMOUS is false).
+
+    User is resolved via load_user_from_access_token (DB + is_active), same as HTTP Bearer.
+    Optional: COGNI_WS_ALLOW_ANONYMOUS=true → guest mode when no valid token.
     """
     ws_req_id = str(uuid.uuid4())
-    token = websocket.query_params.get("token")
+    if websocket.query_params.get("token"):
+        await websocket.close(code=1008, reason="token_in_query_not_supported")
+        return
+
+    linked_eval_uuid: Optional[uuid.UUID] = None
+    _sdp = websocket.query_params.get("student_device_id")
+    if _sdp:
+        try:
+            linked_eval_uuid = uuid.UUID(str(_sdp).strip())
+        except (ValueError, TypeError):
+            logger.debug("[AgentWS] invalid student_device_id query param")
+
+    session_id: str = str(uuid.uuid4())
+    user_row: Optional[User] = None
+    jwt_hint = _jwt_from_sec_websocket_protocol(websocket.headers.get("sec-websocket-protocol"))
+    if jwt_hint:
+        user_row = load_user_from_access_token(jwt_hint)
+
+    req_protos = [
+        p.strip()
+        for p in (websocket.headers.get("sec-websocket-protocol") or "").split(",")
+        if p.strip()
+    ]
+    accept_subprotocol: Optional[str] = None
+    if user_row and req_protos:
+        head = req_protos[0].lower()
+        if head == COGNI_WS_SUBPROTOCOL.lower() or head.startswith(
+            COGNI_WS_SUBPROTOCOL.lower() + "."
+        ):
+            accept_subprotocol = COGNI_WS_SUBPROTOCOL
+
+    await websocket.accept(subprotocol=accept_subprotocol)
+
+    allow_guest = _allow_anonymous_agent_ws()
+    if user_row is None and not allow_guest:
+        try:
+            raw = await asyncio.wait_for(
+                websocket.receive_text(),
+                timeout=COGNI_WS_AUTH_HANDSHAKE_SEC,
+            )
+            data = json.loads(raw)
+            mtype = str(data.get("type") or "").lower()
+            if mtype not in ("auth", "authenticate"):
+                await websocket.close(code=1008, reason="auth_required")
+                return
+            tok = (data.get("token") or data.get("access_token") or "").strip()
+            user_row = load_user_from_access_token(tok)
+        except asyncio.TimeoutError:
+            await websocket.close(code=1008, reason="auth_timeout")
+            return
+        except json.JSONDecodeError:
+            await websocket.close(code=1008, reason="invalid_json")
+            return
+        except Exception as _auth_exc:
+            logger.debug("[AgentWS] auth handshake error: %s", _auth_exc)
+            await websocket.close(code=1011)
+            return
+
+    if user_row is None and not allow_guest:
+        await websocket.close(code=1008, reason="auth_failed")
+        return
+
     user_uuid: Optional[uuid.UUID] = None
     user_subscription_plan: str = "free"
     user_model_tier: str = "standard"
     user_role_str: str = "guest"
-    if token:
-        payload = decode_token(token)
-        sub = (payload or {}).get("sub")
-        if sub:
-            try:
-                user_uuid = uuid.UUID(str(sub))
-            except (ValueError, TypeError):
-                logger.info("[AgentWS] WS token sub not a UUID — guest | req_id=%s", ws_req_id)
-        else:
-            logger.info("[AgentWS] WS token invalid — guest | req_id=%s", ws_req_id)
-
-    if user_uuid:
+    if user_row is not None:
+        user_uuid, user_subscription_plan, user_model_tier, user_role_str = _user_ctx_from_row(user_row)
         try:
-            from app.database import SessionLocal
-            from app.models.db_models import User
-
-            _db = SessionLocal()
-            try:
-                urow = _db.query(User).filter(User.id == user_uuid).first()
-                if urow:
-                    user_subscription_plan = str(urow.subscription_plan or "free").lower()
-                    user_model_tier = str(urow.model_tier or "standard").lower()
-                    r = urow.role
-                    user_role_str = r.value if hasattr(r, "value") else str(r)
-            finally:
-                _db.close()
-        except Exception as _ux:
-            logger.debug("[AgentWS] user row load skipped: %s", _ux)
+            await websocket.send_text(
+                json.dumps({"type": "auth_ok", "v": 1.1}, ensure_ascii=False)
+            )
+        except Exception as _ok_e:
+            logger.debug("[AgentWS] auth_ok send failed: %s", _ok_e)
 
     # Free-tier students: session-only memory (no cross-session DB/Redis persistence).
     _session_only = user_uuid is None or (
@@ -274,7 +385,6 @@ async def agent_ws(websocket: WebSocket):
         and user_model_tier != "premium"
     )
 
-    await websocket.accept()
     logger.info(
         "[AgentWS] connected | req_id=%s user_id=%s persist=%s client=%s",
         ws_req_id,
@@ -283,23 +393,28 @@ async def agent_ws(websocket: WebSocket):
         websocket.client,
     )
 
-    # ── WS protocol v1 heartbeat ─────────────────────────────────────────────
-    async def _heartbeat_sender() -> None:
-        """Send a heartbeat frame every HEARTBEAT_INTERVAL_SEC seconds."""
-        try:
-            while True:
-                await asyncio.sleep(HEARTBEAT_INTERVAL_SEC)
-                await send({"v": 1.1, "id": "hb", "type": "heartbeat"})
-        except Exception:
-            pass  # silently exit when WS closes
-
-    heartbeat_task = asyncio.create_task(_heartbeat_sender())
+    heartbeat_task: Optional[asyncio.Task[Any]] = None
 
     # Per-connection conversation history (last 6 turns = 3 exchanges)
     history: List[dict] = []
 
-    # Episodic memory scope + cancellable LLM/TTS pipeline (interruption)
-    session_id: str = str(uuid.uuid4())
+    # ═══ NEW ═══
+    def _track_llm_task(task: asyncio.Task[Any]) -> None:
+        _active_llm_tasks[session_id] = task
+
+        def _done(_t: asyncio.Task[Any]) -> None:
+            if _active_llm_tasks.get(session_id) is _t:
+                _active_llm_tasks.pop(session_id, None)
+
+        task.add_done_callback(_done)
+
+    # ═══ NEW END ═══
+    # Chroma episodic: per-connection for guests / free session-only; stable user id otherwise (survives WS reconnect).
+    episodic_scope_id: str = (
+        session_id
+        if _session_only
+        else (str(user_uuid) if user_uuid else f"guest:{session_id}")
+    )
     # Avoid sending tts_unavailable with identical dialogue as the previous outbound turn
     last_outbound_dialogue: str = ""
     active_llm_task: Optional[asyncio.Task[Any]] = None
@@ -327,6 +442,12 @@ async def agent_ws(websocket: WebSocket):
 
     # Checkpoint #46 — assessment → avatar proactive nudge (one-shot per payload)
     pending_grade_nudge: Optional[dict] = None
+    # One-shot grade debrief from Redis (`pop_grade_result`) when client does not send `grade_result`
+    pending_redis_grade: Optional[dict] = None
+    # De-dup WS `grade_result` re-sends (client bug or retries) after first successful LLM turn
+    _ws_grade_result_delivered_fp: Optional[str] = None
+    # Instance ids acknowledged this connection (merged into Redis session blob on disconnect)
+    _eval_nudge_instance_acks_ws: list[str] = []
     focus_subject: Optional[str] = None
 
     # ADDED: teacher deep links (?unit=&target=&subject=) — session-scoped until cleared or student_override
@@ -364,7 +485,7 @@ async def agent_ws(websocket: WebSocket):
     cogni_voice_pitch_scale: float = 1.0
 
     # Shadow analytics tracker — one per WebSocket connection (fire-and-forget)
-    from app.services.shadow_analytics import SessionTracker as _SA
+    from app.archive.shadow_analytics import SessionTracker as _SA
     _analytics = _SA()
     await _analytics.session_start(persona_level=persona_level)
 
@@ -377,6 +498,17 @@ async def agent_ws(websocket: WebSocket):
             logger.warning("[WS WARNING] Tried to send on a closed websocket: %s", e)
         except Exception as e:
             logger.warning("WS send error: %s", e)
+
+    async def _heartbeat_sender() -> None:
+        """Send a heartbeat frame every HEARTBEAT_INTERVAL_SEC seconds."""
+        try:
+            while True:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_SEC)
+                await send({"v": 1.1, "id": "hb", "type": "heartbeat"})
+        except Exception as _hb_end:
+            logger.debug("%s heartbeat sender ended: %s", _ws_ctx(session_id), _hb_end)
+
+    heartbeat_task = asyncio.create_task(_heartbeat_sender())
 
     if user_uuid and getattr(settings, "ENABLE_REDIS_SESSION_SYNC", True):
         try:
@@ -392,18 +524,26 @@ async def agent_ws(websocket: WebSocket):
         if goal:
             try:
                 await send({"type": "goal_update", "v": 1.1, "goal": goal})
-            except Exception:
-                pass
+            except Exception as _goal_send_exc:
+                logger.warning(
+                    "%s goal_update send failed: %s",
+                    _ws_ctx(session_id),
+                    _goal_send_exc,
+                    exc_info=True,
+                )
 
     async def cancel_in_flight(reason: str = "interrupted") -> None:
         """Cancel the running LLM+TTS turn and tell the client to stop playback (full-duplex)."""
         nonlocal active_llm_task
+        # ═══ NEW ═══
+        _active_llm_tasks.pop(session_id, None)
+        # ═══ NEW END ═══
         if active_llm_task and not active_llm_task.done():
             active_llm_task.cancel()
             try:
                 await active_llm_task
             except asyncio.CancelledError:
-                pass
+                logger.debug("%s active_llm_task cancel awaited (expected)", _ws_ctx(session_id))
             await send({"type": "stop_speech", "v": 1.1, "reason": reason})
         active_llm_task = None
 
@@ -416,6 +556,9 @@ async def agent_ws(websocket: WebSocket):
             await process_text(**kwargs)
 
         active_llm_task = asyncio.create_task(_runner())
+        # ═══ NEW ═══
+        _track_llm_task(active_llm_task)
+        # ═══ NEW END ═══
 
     async def process_text(
         user_text: str,
@@ -426,6 +569,7 @@ async def agent_ws(websocket: WebSocket):
         cogni_welcome_turn: bool = False,
         thinker_proactive: bool = False,
         extra_context: Optional[dict] = None,
+        ws_client_intent: Optional[str] = None,
     ) -> None:
         """Run LLM + TTS and stream results back to the client.
 
@@ -441,10 +585,21 @@ async def agent_ws(websocket: WebSocket):
                           (COGNI_PERSONA.systemPrompt); overrides stored session copy if non-empty.
             cogni_welcome_turn: When True, tutor adds varied opening-greeting instructions.
             thinker_proactive: When True, tutor adds instructions for Thinker-initiated ice-breaker.
+            ws_client_intent: Optional intent string from WebSocket `text` frame (`intent` / `user_intent`).
         """
-        nonlocal pipeline_busy, playing_tts, last_outbound_dialogue, pending_grade_nudge
+        nonlocal pipeline_busy, playing_tts, last_outbound_dialogue, pending_grade_nudge, pending_redis_grade, _ws_grade_result_delivered_fp
         pipeline_busy = True
         _nudge_for_turn = False
+        _nudge_snapshot_for_ack: Optional[dict] = None
+        _grade_result_fp_for_turn: Optional[str] = None
+        _proc_ctx = _ws_ctx(session_id, req_id)
+        _proc_t0 = time.monotonic()
+        logger.debug(
+            "%s process_text start text_len=%d proactive=%s",
+            _proc_ctx,
+            len(user_text or ""),
+            thinker_proactive,
+        )
         try:
             try:
                 from app.api.v1.endpoints.tutor import (
@@ -513,7 +668,7 @@ async def agent_ws(websocket: WebSocket):
                         logger.warning("[AgentWS] BTEC training evaluate failed: %s", _tex)
                         btec_training_pending = _pend_snapshot
 
-            # "llm_thinking" matches the frontend handler in useAvatarAgent.ts:
+            # "llm_thinking" matches the frontend handler in useAgentAgent.ts:
             # `if (type === 'transcribing' || type === 'llm_thinking')`.
             # The old "thinking" type was silently dropped by the frontend.
             await send({"type": "llm_thinking", "id": req_id} if req_id else {"type": "llm_thinking"})
@@ -522,8 +677,11 @@ async def agent_ws(websocket: WebSocket):
             # can splice a Debrief Context block into the system prompt.
             context: dict = {"history": history[-6:], "session_id": session_id}
             if pending_grade_nudge:
-                context["pending_assessment_nudge"] = dict(pending_grade_nudge)
+                _nudge_snapshot_for_ack = dict(pending_grade_nudge)
+                context["pending_assessment_nudge"] = _nudge_snapshot_for_ack
                 _nudge_for_turn = True
+                # Consume immediately so format-retry / same-connection turns do not re-inject (pop semantics).
+                pending_grade_nudge = None
             if focus_subject and str(focus_subject).strip():
                 context["focus_subject"] = str(focus_subject).strip()[:200]
             # ADDED: thread deep-link session for tutor (RAG weighting + scaffolding)
@@ -547,19 +705,61 @@ async def agent_ws(websocket: WebSocket):
                 context.update(extra_context)
             if cogni_welcome_turn:
                 context["cogni_welcome_turn"] = True
+            _gr_source: Optional[dict] = None
             if grade_result and isinstance(grade_result, dict) and grade_result.get("final_grade"):
-                context["grade_result"] = {
-                    "final_grade":      str(grade_result.get("final_grade", "PENDING")),
-                    "subject":          str(grade_result.get("subject", "—")),
-                    "criteria_summary": str(grade_result.get("criteria_summary", "")),
-                    "achieved":         int(grade_result.get("achieved", 0)),
-                    "total":            int(grade_result.get("total", 0)),
-                }
-                logger.info(
-                    "[AgentWS] Debrief Context injected — grade=%s subject=%s",
-                    context["grade_result"]["final_grade"],
-                    context["grade_result"]["subject"],
+                _gr_source = grade_result
+            elif (
+                not cogni_welcome_turn
+                and pending_redis_grade is not None
+                and isinstance(pending_redis_grade, dict)
+                and pending_redis_grade.get("final_grade")
+            ):
+                _gr_source = pending_redis_grade
+                pending_redis_grade = None
+                logger.info("[AgentWS] Debrief Context from Redis pop_grade_result (consumed)")
+            if _gr_source is not None:
+                import hashlib as _hl
+                import json as _json
+
+                _gf_ser = _json.dumps(
+                    {
+                        "achieved":         _gr_source.get("achieved"),
+                        "criteria_summary": _gr_source.get("criteria_summary"),
+                        "final_grade":      _gr_source.get("final_grade"),
+                        "subject":          _gr_source.get("subject"),
+                        "total":            _gr_source.get("total"),
+                        "gaps_detail_ar":   _gr_source.get("gaps_detail_ar"),
+                        "coaching_goal_ar": _gr_source.get("coaching_goal_ar"),
+                    },
+                    sort_keys=True,
+                    default=str,
                 )
+                _gf_fp = _hl.sha256(_gf_ser.encode()).hexdigest()[:40]
+                if _gf_fp != _ws_grade_result_delivered_fp:
+                    _grade_result_fp_for_turn = _gf_fp
+                    context["grade_result"] = {
+                        "final_grade":      str(_gr_source.get("final_grade", "PENDING")),
+                        "subject":          str(_gr_source.get("subject", "—")),
+                        "criteria_summary": str(_gr_source.get("criteria_summary", "")),
+                        "achieved":         int(_gr_source.get("achieved", 0)),
+                        "total":            int(_gr_source.get("total", 0)),
+                    }
+                    _gda = str(_gr_source.get("gaps_detail_ar") or "").strip()
+                    if _gda:
+                        context["grade_result"]["gaps_detail_ar"] = _gda[:3500]
+                    _cga = str(_gr_source.get("coaching_goal_ar") or "").strip()
+                    if _cga:
+                        context["grade_result"]["coaching_goal_ar"] = _cga[:1200]
+                    _rex = str(_gr_source.get("report_excerpt") or "").strip()
+                    if _rex:
+                        context["grade_result"]["report_excerpt"] = _rex[:2000]
+                    logger.info(
+                        "[AgentWS] Debrief Context injected — grade=%s subject=%s",
+                        context["grade_result"]["final_grade"],
+                        context["grade_result"]["subject"],
+                    )
+                else:
+                    logger.debug("[AgentWS] grade_result skipped — already delivered this connection (fp=%s)", _gf_fp[:12])
 
             # Thread BTEC scaffold context — uses the per-connection btec_state
             # populated by "btec_progress" WebSocket messages.
@@ -611,11 +811,11 @@ async def agent_ws(websocket: WebSocket):
 
             # ── Long-term episodic memory (vector DB / fallback) — retrieve before LLM
             try:
-                from app.services.emotional_memory import retrieve_for_prompt
+                from app.archive.emotional_memory import retrieve_for_prompt
 
                 _q = strip_internal_llm_markers(user_text).strip()[:2000]
                 if _q:
-                    _mem = retrieve_for_prompt(session_id, _q, k=4)
+                    _mem = retrieve_for_prompt(episodic_scope_id, _q, k=4)
                     if _mem:
                         context["episodic_memory"] = _mem
                         logger.debug("[AgentWS] episodic_memory injected (len=%d)", len(_mem))
@@ -641,8 +841,13 @@ async def agent_ws(websocket: WebSocket):
             try:
                 context["student_understanding_score"] = think_mm.student_understanding_score
                 context["preferred_teaching_style"] = think_mm.preferred_teaching_style
-            except Exception:
-                pass
+            except Exception as _su_exc:
+                logger.warning(
+                    "%s think_mm student_understanding/teaching_style read failed: %s",
+                    _proc_ctx,
+                    _su_exc,
+                    exc_info=True,
+                )
 
             # V28 — theory of mind, persona traits, timeline, device context
             try:
@@ -679,47 +884,144 @@ async def agent_ws(websocket: WebSocket):
                 _alp_final = think_mm.get_active_lesson_plan()
                 if _alp_final and str(_alp_final).strip():
                     context["active_lesson_plan"] = str(_alp_final).strip()[:8000]
-            except Exception:
-                pass
+            except Exception as _alp_re_exc:
+                logger.debug("%s active_lesson_plan re-read skipped: %s", _proc_ctx, _alp_re_exc)
             try:
                 _lit2 = think_mm.get_last_of_type("internal_thought")
                 if _lit2 and str(_lit2).strip():
                     context["last_internal_thought"] = str(_lit2).strip()[:800]
-            except Exception:
-                pass
+            except Exception as _lit_re_exc:
+                logger.debug("%s last_internal_thought re-read skipped: %s", _proc_ctx, _lit_re_exc)
 
             # FIX-1: Enforce Socratic scaffolding in WS path — Cogni must guide,
             # not deliver ready answers. The base _SCAFFOLDING_TUTOR_BLOCK_AR is
             # already appended inside _get_cogni_response; this flag adds a brief
             # gatekeeper rule PREPENDED to the system prompt for extra compliance.
             context["enforce_socratic"] = True
+            # Optional structured avatar behavior plan (JSON envelope only — see tutor addon).
+            context["include_avatar_behavior_plan"] = True
 
             try:
+                _llm_t0 = time.monotonic()
                 reply_text = await _get_dr_hamza_response(user_text, context)
-
-                if not verify_cogni_reply_format(reply_text):
-                    logger.warning("[AgentWS] Pass-1 format fail — retrying")
-                    suffix = "\n\n[SYSTEM] يجب أن يكون ردك بالتنسيق الثلاثي: سطر الحوار\n*سطر الحركة*\n[EMOTION: tag]"
-                    reply_text = await _get_dr_hamza_response(user_text + suffix, context)
-
-                if not verify_cogni_reply_format(reply_text):
-                    logger.warning("[AgentWS] Pass-2 format fail — applying patch")
-                    reply_text = _patch_format(reply_text)
-
-                # parse_reply_with_inline_gestures: extracts [wave]/[think]/etc. tokens
-                # from dialogue, converts them to performance[] cues, then strips them.
-                parsed = parse_reply_with_inline_gestures(reply_text)
-                parsed["dialogue"] = strip_internal_llm_markers(
-                    parsed.get("dialogue", "") or ""
-                ).strip()
-                _reply_meta_ws = context.get("_reply_meta") or {}
-                parsed["performance"] = _pedagogical_performance_supplement(
-                    parsed.get("dialogue") or "",
-                    parsed.get("performance"),
-                    pedagogical_stage=str(_reply_meta_ws.get("pedagogical_stage") or "").strip() or None,
+                logger.info(
+                    "%s tutor LLM+RAG path done duration_sec=%.3f reply_len=%d",
+                    _proc_ctx,
+                    time.monotonic() - _llm_t0,
+                    len(reply_text or ""),
                 )
+                # Consume-once: debrief keys must not survive format-retry or the next user turn (anti-parrot).
+                context.pop("pending_assessment_nudge", None)
+                context.pop("grade_result", None)
+                if _grade_result_fp_for_turn:
+                    _ws_grade_result_delivered_fp = _grade_result_fp_for_turn
+
+                _strict_json = cogni_strict_json_enabled()
+                if not _strict_json:
+                    if not verify_cogni_reply_format(reply_text):
+                        logger.warning("[AgentWS] Pass-1 format fail — retrying")
+                        suffix = "\n\n[SYSTEM] يجب أن يكون ردك بالتنسيق الثلاثي: سطر الحوار\n*سطر الحركة*\n[EMOTION: tag]"
+                        reply_text = await _get_dr_hamza_response(user_text + suffix, context)
+
+                    if not verify_cogni_reply_format(reply_text):
+                        logger.warning("[AgentWS] Pass-2 format fail — applying patch")
+                        reply_text = _patch_format(reply_text)
+                else:
+                    logger.info(
+                        "%s COGNI_STRICT_JSON_MODE on — skipping legacy triple-line verify",
+                        _proc_ctx,
+                    )
+
+                for ev in context.pop("_cogni_tool_events", []) or []:
+                    try:
+                        await send({"type": "tool_result", "v": 1.1, "id": req_id, **ev})
+                    except Exception as _tool_send_exc:
+                        logger.warning(
+                            "%s tool_result send failed: %s",
+                            _proc_ctx,
+                            _tool_send_exc,
+                            exc_info=True,
+                        )
+                for _btec_fr in context.pop("_cogni_btec_ws_frames", []) or []:
+                    try:
+                        await send({"type": "btec_update", "v": 1.1, "id": req_id, **_btec_fr})
+                    except Exception as _btec_send_exc:
+                        logger.warning(
+                            "%s btec_update send failed: %s",
+                            _proc_ctx,
+                            _btec_send_exc,
+                            exc_info=True,
+                        )
+
+                parsed: Dict[str, Any]
+                _strict_ok = False
+                if _strict_json:
+                    try:
+                        parsed = parse_llm_reply_strict_json(reply_text)
+                        _strict_ok = True
+                    except ValueError as _strict_exc:
+                        logger.warning(
+                            "%s strict JSON parse failed, legacy path: %s",
+                            _proc_ctx,
+                            _strict_exc,
+                        )
+                        _strict_ok = False
+
+                if not _strict_json or not _strict_ok:
+                    # Legacy: inline [gesture] tokens → performance[]; optional behavior layers.
+                    parsed = parse_reply_with_inline_gestures(reply_text)
+                    parsed["dialogue"] = strip_internal_llm_markers(
+                        parsed.get("dialogue", "") or ""
+                    ).strip()
+                    _reply_meta_ws = context.get("_reply_meta") or {}
+                    parsed["performance"] = _pedagogical_performance_supplement(
+                        parsed.get("dialogue") or "",
+                        parsed.get("performance"),
+                        pedagogical_stage=str(_reply_meta_ws.get("pedagogical_stage") or "").strip() or None,
+                    )
+                    try:
+                        from app.services.cogni_behavior import augment_ws_reply_gestures
+
+                        _rb = None
+                        if isinstance(_reply_meta_ws, dict):
+                            _rb = _reply_meta_ws.get("rule_based_intent")
+                        augment_ws_reply_gestures(
+                            parsed,
+                            user_text or "",
+                            ws_client_intent=ws_client_intent,
+                            rule_based_intent=str(_rb).strip() if _rb else None,
+                        )
+                    except Exception as _beh_exc:
+                        logger.debug("[AgentWS] behavior layer skipped: %s", _beh_exc)
+                    try:
+                        from app.services.behavior_ws_bridge import maybe_apply_behavior_engine_to_parsed
+
+                        maybe_apply_behavior_engine_to_parsed(
+                            parsed,
+                            user_text=user_text or "",
+                            ws_client_intent=ws_client_intent,
+                            reply_meta=_reply_meta_ws if isinstance(_reply_meta_ws, dict) else {},
+                            conversation_turn=len(history),
+                            session_id=session_id,
+                        )
+                    except Exception as _be_exc:
+                        logger.debug("[AgentWS] weighted behavior engine skipped: %s", _be_exc)
                 if _nudge_for_turn:
                     pending_grade_nudge = None
+                    _nudge_scope = user_uuid or linked_eval_uuid
+                    if _nudge_scope and _nudge_snapshot_for_ack:
+                        try:
+                            from app.services.session_state_redis import (
+                                acknowledge_evaluation_nudge,
+                                evaluation_nudge_instance_id,
+                            )
+
+                            acknowledge_evaluation_nudge(_nudge_scope, _nudge_snapshot_for_ack)
+                            _eval_nudge_instance_acks_ws.append(
+                                evaluation_nudge_instance_id(_nudge_snapshot_for_ack)
+                            )
+                        except Exception as _nack:
+                            logger.debug("%s acknowledge_evaluation_nudge: %s", _proc_ctx, _nack)
             except RuntimeError as e:
                 if "OPENAI_AUTH_401" in str(e):
                     logger.error("[AgentWS] OpenAI API key invalid (401) — sending friendly error frame")
@@ -764,10 +1066,10 @@ async def agent_ws(websocket: WebSocket):
 
             # Persist episodic turn for future retrieval (best-effort)
             try:
-                from app.services.emotional_memory import add_episode
+                from app.archive.emotional_memory import add_episode
 
                 add_episode(
-                    session_id,
+                    episodic_scope_id,
                     _u_hist[:800],
                     parsed["dialogue"][:800],
                     parsed.get("emotion", "neutral"),
@@ -787,8 +1089,13 @@ async def agent_ws(websocket: WebSocket):
                 if isinstance(extra_context, dict):
                     _gfb = extra_context.get("graded_feedback")
                 think_mm.adjust_understanding_and_style(_u_hist, graded_feedback=_gfb)
-            except Exception:
-                pass
+            except Exception as _observe_exc:
+                logger.warning(
+                    "%s think_mm.observe_dialogue_turn/adjust_understanding failed: %s",
+                    _proc_ctx,
+                    _observe_exc,
+                    exc_info=True,
+                )
 
             # Shadow analytics: log completed LLM turn (fire-and-forget)
             asyncio.ensure_future(
@@ -806,8 +1113,8 @@ async def agent_ws(websocket: WebSocket):
                 contagion_hint = contagion_avatar_hint(
                     (user_state.get("perception") or {}).get("emotion")
                 ) or {}
-            except Exception:
-                pass
+            except Exception as _cont_exc:
+                logger.debug("%s contagion_avatar_hint skipped: %s", _proc_ctx, _cont_exc)
 
             # ── Azure Neural TTS (ar-JO-TaimNeural — male, Jordanian Arabic) ────────
             audio_b64 = ""
@@ -818,8 +1125,14 @@ async def agent_ws(websocket: WebSocket):
             playing_tts = True
             try:
                 if azure_tts and parsed['dialogue']:
+                    from app.archive.tts_diagnostics import classify_tts_failure, log_tts_success
+
+                    _ak = bool((getattr(settings, "AZURE_SPEECH_KEY", None) or "").strip())
+                    _ar = str(getattr(settings, "AZURE_SPEECH_REGION", None) or "").strip()
+                    _dlen = len(parsed.get("dialogue") or "")
+                    _vname = str(settings.TTS_ARABIC_VOICE or azure_tts._default_voice or "")
                     try:
-                        mp3_bytes, viseme_cues, word_cues = await azure_tts.synthesize(
+                        mp3_bytes, viseme_cues, word_cues, tts_provider = await azure_tts.synthesize(
                             parsed['dialogue'],
                             voice_name=settings.TTS_ARABIC_VOICE,
                             emotion=parsed.get('emotion', 'neutral'),
@@ -831,41 +1144,37 @@ async def agent_ws(websocket: WebSocket):
 
                         if mp3_bytes:
                             audio_b64 = base64.b64encode(mp3_bytes).decode('ascii')
-                            logger.info(
-                                "[AgentWS] Azure TTS OK | %d mp3 bytes | %d visemes | %d words | voice=%s",
-                                len(mp3_bytes), len(viseme_cues), len(word_cues), azure_tts._default_voice,
+                            log_tts_success(
+                                source=tts_provider,
+                                text_len=_dlen,
+                                audio_bytes=len(mp3_bytes),
+                                viseme_n=len(viseme_cues),
+                                word_n=len(word_cues),
+                                voice=_vname,
                             )
                     except Exception as e:
-                        logger.warning("[AgentWS] Azure TTS error: %s", e)
-                        _disable_fb = bool(getattr(settings, "TTS_DISABLE_NON_AZURE_FALLBACK", False))
-                        try:
-                            from app.services.tts_service import is_azure_tts_auth_failure
-                            from app.services.tts_service import (
-                                DEFAULT_EDGE_TTS_PROSODY,
-                                EDGE_TTS_EMOTION_PROSODY,
-                                _locked_jordanian_male_voice as _lock_voice,
-                                edge_tts_cues_to_websocket_shapes,
-                                synthesize_edge_tts_mp3,
-                            )
+                        _code, _human = classify_tts_failure(
+                            e, azure_key_set=_ak, azure_region=_ar, edge_attempted=True,
+                        )
+                        logger.error(
+                            "[AgentWS] TTS synthesis failed after Azure+edge policy in tts_service | "
+                            "code=%s | detail=%s | exc_type=%s | exc=%s",
+                            _code,
+                            _human,
+                            type(e).__name__,
+                            e,
+                            exc_info=True,
+                        )
 
-                            if not _disable_fb or is_azure_tts_auth_failure(e):
-                                emo_fb = (parsed.get("emotion") or "neutral").lower()
-                                prosody = EDGE_TTS_EMOTION_PROSODY.get(emo_fb, DEFAULT_EDGE_TTS_PROSODY)
-                                mp3_fb, wb_fb, ve_fb = await synthesize_edge_tts_mp3(
-                                    parsed["dialogue"],
-                                    rate=prosody["rate"],
-                                    pitch=prosody["pitch"],
-                                    voice=_lock_voice(settings.TTS_ARABIC_VOICE),
-                                )
-                                if mp3_fb:
-                                    viseme_cues, word_cues = edge_tts_cues_to_websocket_shapes(wb_fb, ve_fb)
-                                    audio_b64 = base64.b64encode(mp3_fb).decode("ascii")
-                                    logger.info(
-                                        "[AgentWS] Edge TTS fallback OK | %d bytes (Azure error bypassed)",
-                                        len(mp3_fb),
-                                    )
-                        except Exception as fb_exc:
-                            logger.warning("[AgentWS] TTS fallback chain failed: %s", fb_exc)
+                # Lip-sync: same synthesis produced word_cues; approximate visemes if SDK omitted them (no extra TTS).
+                if audio_b64 and not viseme_cues and word_cues:
+                    from app.services.tts_service import approx_viseme_cues_from_word_cues
+
+                    viseme_cues = approx_viseme_cues_from_word_cues(word_cues, parsed["dialogue"])
+                    logger.info(
+                        "[AgentWS] viseme timeline from word_cues | approx=%d (no duplicate synthesis)",
+                        len(viseme_cues),
+                    )
 
                 def _dedupe_tts_dialogue_outbound(raw: str) -> str:
                     d = (raw or "").strip()
@@ -889,6 +1198,10 @@ async def agent_ws(websocket: WebSocket):
                         "action":       parsed['action'],
                         "emotion":      parsed['emotion'],
                         "performance":  parsed.get("performance") or [],
+                        "gestures":     parsed.get("gestures") or [],
+                        "motor_commands": parsed.get("motor_commands"),
+                        "awareness_cues": parsed.get("awareness_cues"),
+                        "internal_monologue": parsed.get("internal_monologue"),
                         "user_mood":    user_mood,
                         "user_pad":     user_pad,
                         "persona_level": persona_level,
@@ -899,6 +1212,12 @@ async def agent_ws(websocket: WebSocket):
                         "contagion":    contagion_hint,
                         "pedagogical_stage": _meta_out.get("pedagogical_stage"),
                         "tutorial_unit_id": _meta_out.get("tutorial_unit_id"),
+                        "student_state": parsed.get("student_state") or context.get("cogni_inferred_student_state"),
+                        "student_confidence": parsed.get("student_confidence"),
+                        "student_engagement": parsed.get("student_engagement"),
+                        "teaching_strategy": parsed.get("teaching_strategy") or context.get("cogni_teaching_strategy"),
+                        "psychological_analysis": parsed.get("psychological_analysis"),
+                        "behavior": parsed.get("behavior"),
                     })
                 else:
                     d_out = _dedupe_tts_dialogue_outbound(parsed["dialogue"])
@@ -912,13 +1231,32 @@ async def agent_ws(websocket: WebSocket):
                         "action":     parsed['action'],
                         "emotion":    parsed['emotion'],
                         "performance": parsed.get("performance") or [],
+                        "gestures":    parsed.get("gestures") or [],
+                        "motor_commands": parsed.get("motor_commands"),
+                        "awareness_cues": parsed.get("awareness_cues"),
+                        "internal_monologue": parsed.get("internal_monologue"),
                         "user_mood":  user_mood,
                         "user_pad":   user_pad,
                         "persona_level": persona_level,
                         "contagion":  contagion_hint,
                         "pedagogical_stage": _meta_out.get("pedagogical_stage"),
                         "tutorial_unit_id": _meta_out.get("tutorial_unit_id"),
+                        "student_state": parsed.get("student_state") or context.get("cogni_inferred_student_state"),
+                        "student_confidence": parsed.get("student_confidence"),
+                        "student_engagement": parsed.get("student_engagement"),
+                        "teaching_strategy": parsed.get("teaching_strategy") or context.get("cogni_teaching_strategy"),
+                        "psychological_analysis": parsed.get("psychological_analysis"),
+                        "behavior": parsed.get("behavior"),
                     })
+                if cogni_welcome_turn and user_uuid and settings.ENABLE_REDIS_SESSION_SYNC:
+                    try:
+                        from app.services.session_state_redis import load_session_state, save_session_state
+
+                        _hg = load_session_state(user_uuid) or {}
+                        _hg["has_greeted"] = True
+                        save_session_state(user_uuid, _hg)
+                    except Exception as _hg_e:
+                        logger.debug("[AgentWS] has_greeted Redis save: %s", _hg_e)
                 try:
                     from app.services.tutorial_session_bridge import mark_expects_mini_after_assistant_reply
 
@@ -942,6 +1280,11 @@ async def agent_ws(websocket: WebSocket):
                 asyncio.create_task(_reset_playing_tts_after_grace())
 
         finally:
+            logger.debug(
+                "%s process_text finished elapsed_sec=%.3f",
+                _proc_ctx,
+                time.monotonic() - _proc_t0,
+            )
             pipeline_busy = False
 
     async def _trigger_proactive_speech() -> None:
@@ -1005,8 +1348,8 @@ async def agent_ws(websocket: WebSocket):
 
             if is_llm_paused():
                 return
-        except Exception:
-            pass
+        except Exception as _imp_sn:
+            logger.debug("%s is_llm_paused check skipped (soft_nudge): %s", _ws_ctx(session_id), _imp_sn)
         if pipeline_busy or playing_tts:
             return
         if active_llm_task is not None and not active_llm_task.done():
@@ -1063,31 +1406,94 @@ async def agent_ws(websocket: WebSocket):
         logger.warning("[AgentWS] Thinker not started: %s", _thx)
         thinker = None
 
-    def _prime_grade_nudge_from_db() -> None:
-        nonlocal pending_grade_nudge, focus_subject
-        if not user_uuid or pending_grade_nudge is not None:
+    def _load_latest_grade_for_user() -> None:
+        """
+        Prime pending_grade_nudge from persisted evaluations (Postgres or in-memory repo).
+        Tries JWT user first, then optional student_device_id (same id as assessment student_id).
+        """
+        nonlocal pending_grade_nudge
+        if pending_grade_nudge is not None:
+            return
+        candidates: List[uuid.UUID] = []
+        if user_uuid:
+            candidates.append(user_uuid)
+        if linked_eval_uuid and linked_eval_uuid not in candidates:
+            candidates.append(linked_eval_uuid)
+        if not candidates:
             return
         try:
-            from app.database import SessionLocal
-            from app.services.assessment_grade_context import fetch_latest_evaluation_nudge_payload
+            from app.repository.evaluations import DatabaseUnavailableError, get_evaluation_repo
 
-            db = SessionLocal()
+            repo = get_evaluation_repo()
+        except DatabaseUnavailableError:
+            logger.debug("[AgentWS] evaluation repo unavailable — skip grade prime")
+            return
+        except Exception as _repo_e:
+            logger.debug("[AgentWS] get_evaluation_repo failed: %s", _repo_e)
+            return
+
+        if not hasattr(repo, "get_latest_nudge_payload_for_student"):
+            return
+
+        from app.services.session_state_redis import (
+            evaluation_nudge_instance_id,
+            is_evaluation_nudge_acknowledged,
+            load_session_state,
+        )
+
+        _nudge_scope = user_uuid or linked_eval_uuid
+
+        def _nudge_already_delivered(snap: dict) -> bool:
+            if _nudge_scope and is_evaluation_nudge_acknowledged(_nudge_scope, snap):
+                return True
+            if _nudge_scope:
+                try:
+                    ex = load_session_state(_nudge_scope) or {}
+                    iid = evaluation_nudge_instance_id(snap)
+                    if iid in set(str(x) for x in (ex.get("eval_nudge_ack_ids") or [])):
+                        return True
+                except Exception as _exl:
+                    logger.debug("[AgentWS] nudge ack session blob check: %s", _exl)
+            return False
+
+        for uid in candidates:
             try:
-                fs = str(focus_subject).strip() if focus_subject else None
-                snap = fetch_latest_evaluation_nudge_payload(db, user_uuid, fs or None)
-                if snap:
-                    pending_grade_nudge = snap
-                    logger.info(
-                        "[AgentWS] DB grade nudge primed grade=%s subject_filter=%s",
-                        snap.get("grade"),
-                        fs or "—",
+                snap = repo.get_latest_nudge_payload_for_student(str(uid))
+            except Exception as _le:
+                logger.debug("[AgentWS] get_latest_nudge_payload_for_student(%s): %s", uid, _le)
+                snap = None
+            if snap:
+                if _nudge_already_delivered(snap):
+                    logger.debug(
+                        "[AgentWS] Latest evaluation nudge already acknowledged — skip prime | scope=%s",
+                        _nudge_scope,
                     )
-            finally:
-                db.close()
-        except Exception as _pge:
-            logger.debug("[AgentWS] grade nudge DB prime skipped: %s", _pge)
+                    return
+                pending_grade_nudge = snap
+                logger.info(
+                    "[AgentWS] Latest evaluation nudge primed grade=%s tried_ids=%s",
+                    snap.get("grade"),
+                    [str(u) for u in candidates],
+                )
+                return
 
-    _prime_grade_nudge_from_db()
+    _load_latest_grade_for_user()
+    if pending_grade_nudge is None and user_uuid and settings.ENABLE_REDIS_SESSION_SYNC:
+        try:
+            import json as _json
+
+            from app.services.session_state_redis import pop_grade_result, pop_nudge
+
+            _raw_nudge = pop_nudge(user_uuid)
+            if _raw_nudge:
+                pending_grade_nudge = _json.loads(_raw_nudge)
+                logger.info("[AgentWS] Primed pending_grade_nudge from Redis (consumed)")
+            _raw_grade = pop_grade_result(user_uuid)
+            if _raw_grade:
+                pending_redis_grade = _json.loads(_raw_grade)
+                logger.info("[AgentWS] Primed pending_redis_grade from Redis (consumed)")
+        except Exception as _pn_e:
+            logger.debug("[AgentWS] Redis pop_nudge/pop_grade on connect: %s", _pn_e)
 
     # ── One-shot welcome greeting on connect ─────────────────────────────────
     # Fires once per WebSocket connection (~0.6 s after accept) so the avatar
@@ -1104,6 +1510,16 @@ async def agent_ws(websocket: WebSocket):
             _connect_greeted = True
             logger.info("[AgentWS] welcome skipped — DND mode")
             return
+        if user_uuid and settings.ENABLE_REDIS_SESSION_SYNC:
+            try:
+                from app.services.session_state_redis import load_session_state
+
+                if (load_session_state(user_uuid) or {}).get("has_greeted"):
+                    _connect_greeted = True
+                    logger.info("[AgentWS] welcome skipped — has_greeted (Redis)")
+                    return
+            except Exception as _wg:
+                logger.debug("[AgentWS] welcome Redis has_greeted check: %s", _wg)
         if _connect_greeted:
             return
         # If the student already started a turn, skip auto-greet (avoid interrupting them)
@@ -1136,6 +1552,9 @@ async def agent_ws(websocket: WebSocket):
             )
 
         active_llm_task = asyncio.create_task(_greet())
+        # ═══ NEW ═══
+        _track_llm_task(active_llm_task)
+        # ═══ NEW END ═══
 
     asyncio.create_task(_send_welcome())
 
@@ -1185,7 +1604,93 @@ async def agent_ws(websocket: WebSocket):
                 await send({"type": "error", "error": {"message": "invalid_json", "severity": "warn"}})
                 continue
 
+            try:
+                validate_ws_client_message(msg)
+            except ValueError as sec_e:
+                await send({
+                    "type": "error",
+                    "error": {
+                        "message": str(sec_e),
+                        "severity": "warn",
+                        "code": "security_violation",
+                    },
+                })
+                logger.warning(
+                    "[AgentWS] security_violation | %s | %s",
+                    _ws_ctx(session_id, ws_req_id),
+                    sec_e,
+                )
+                continue
+
             msg_type = msg.get("type", "")
+
+            # Voice: STT then reuse the full `text` frame pipeline (practice, BTEC training, focus, coaching).
+            if msg_type == "audio":
+                _touch_interaction()
+                req_audio = str(msg.get("id") or f"audio_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}")
+                b64 = msg.get("data") or ""
+                try:
+                    raw_audio = base64.b64decode(b64, validate=True) if isinstance(b64, str) else b""
+                except Exception:
+                    await send(
+                        {
+                            "type": "error",
+                            "v": 1.1,
+                            "id": req_audio,
+                            "error": {
+                                "message": "audio_decode_failed",
+                                "severity": "warn",
+                                "code": "audio_decode_failed",
+                            },
+                        }
+                    )
+                    continue
+                await send({"type": "transcribing", "v": 1.1, "id": req_audio})
+                try:
+                    from app.services.whisper_stt import transcribe_audio as _transcribe_audio
+
+                    _mime_a = msg.get("mime_type") or msg.get("mime")
+                    _mime_s = str(_mime_a).strip()[:128] if _mime_a else None
+                    transcript_clean = (
+                        await _transcribe_audio(raw_audio, mime_type=_mime_s, req_id=req_audio)
+                    ).strip()
+                except Exception as stt_exc:
+                    _code = getattr(stt_exc, "code", None)
+                    err_code = str(_code) if _code else "stt_error"
+                    _detail = getattr(stt_exc, "detail", None) or str(stt_exc)
+                    if _code == "audio_too_short":
+                        err_code = "audio_too_short"
+                    await send(
+                        {
+                            "type": "error",
+                            "v": 1.1,
+                            "id": req_audio,
+                            "error": {
+                                "message": err_code,
+                                "severity": "warn",
+                                "code": err_code,
+                                "detail": str(_detail)[:300],
+                            },
+                        }
+                    )
+                    continue
+                if not transcript_clean:
+                    await send(
+                        {
+                            "type": "error",
+                            "v": 1.1,
+                            "id": req_audio,
+                            "error": {
+                                "message": "empty_transcript",
+                                "severity": "warn",
+                                "code": "empty_transcript",
+                            },
+                        }
+                    )
+                    continue
+                msg["type"] = "text"
+                msg["text"] = transcript_clean
+                msg_type = "text"
 
             if msg_type == "ping":
                 # v1.1: echo back the id so client can correlate heartbeat latency
@@ -1195,23 +1700,60 @@ async def agent_ws(websocket: WebSocket):
                 # Client acknowledging our heartbeat — nothing to do besides log
                 logger.debug("[WS] pong received id=%s", msg.get("id", "?"))
 
+            elif msg_type in ("auth", "authenticate"):
+                # Client sends auth first even when JWT was already accepted via Sec-WebSocket-Protocol
+                # (avoids auth_required if proxies strip the second protocol value).
+                logger.debug("[AgentWS] post-handshake auth frame ignored (already authenticated)")
+
+            # ═══ NEW ═══
+            elif msg_type == "user_interrupt":
+                _touch_interaction()
+                logger.info("[AgentWS] user_interrupt — cancelling in-flight turn session_id=%s", session_id[:8])
+                await cancel_in_flight("user_interrupt")
+                continue
+            # ═══ NEW END ═══
+
             elif msg_type == "persona_init":
-                # Frontend Step-1: lock Cogni / Eduverse identity for this WebSocket session
-                sp = msg.get("system_prompt") or msg.get("systemPrompt")
-                if sp and str(sp).strip():
-                    cogni_persona_system_prompt = str(sp).strip()[:8000]
-                    logger.info("[AgentWS] persona_init — stored system prompt len=%d", len(cogni_persona_system_prompt))
+                # Server-owned persona only — client system_prompt is ignored (prompt-injection hardening).
+                if msg.get("system_prompt") or msg.get("systemPrompt"):
+                    logger.info(
+                        "[AgentWS] persona_init — ignoring client system_prompt (server-owned persona)",
+                    )
+                try:
+                    from app.api.v1.endpoints import tutor as _tutor_mod
+
+                    if _tutor_mod._cogni_performance_json_enabled():
+                        cogni_persona_system_prompt = _tutor_mod._PROFESSOR_COGNI_BUSINESS_JSON_SYSTEM
+                    else:
+                        cogni_persona_system_prompt = (
+                            _tutor_mod._DEFAULT_PERSONA_SYSTEM_AR + _tutor_mod._SCAFFOLDING_TUTOR_BLOCK_AR
+                        ).strip()
+                    logger.info(
+                        "[AgentWS] persona_init — server persona applied len=%d",
+                        len(cogni_persona_system_prompt or ""),
+                    )
+                except Exception as _pe:
+                    logger.warning("[AgentWS] server persona load failed: %s", _pe)
+                    cogni_persona_system_prompt = None
                 vd = msg.get("voice_defaults") or msg.get("voiceDefaults")
                 if isinstance(vd, dict):
                     try:
                         cogni_voice_rate = max(0.72, min(1.22, float(vd.get("rate", 1.0))))
-                    except (TypeError, ValueError):
-                        pass
+                    except (TypeError, ValueError) as _vr_exc:
+                        logger.warning(
+                            "%s persona_init voice rate invalid, keeping default: %s",
+                            _ws_ctx(session_id),
+                            _vr_exc,
+                        )
                     try:
                         ps = vd.get("pitchScale", vd.get("pitch_scale", 1.0))
                         cogni_voice_pitch_scale = max(0.88, min(1.18, float(ps)))
-                    except (TypeError, ValueError):
-                        pass
+                    except (TypeError, ValueError) as _vp_exc:
+                        logger.warning(
+                            "%s persona_init voice pitchScale invalid, keeping default: %s",
+                            _ws_ctx(session_id),
+                            _vp_exc,
+                        )
                     logger.info(
                         "[AgentWS] persona_init — voice_defaults rate=%.3f pitchScale=%.3f",
                         cogni_voice_rate,
@@ -1285,19 +1827,70 @@ async def agent_ws(websocket: WebSocket):
                     continue
                 _touch_interaction()
                 req_id = str(msg.get("id") or f"text_{int(time.time()*1000)}_{uuid.uuid4().hex[:6]}")
+                _preview = (user_text[:160] + "…") if len(user_text) > 160 else user_text
+                logger.info("[AgentWS] incoming text frame req_id=%s len=%d preview=%r", req_id, len(user_text), _preview)
                 grade_result = msg.get("grade_result") or None
                 emo_ctx = msg.get("emotional_context")
                 emo_str = str(emo_ctx).strip() if emo_ctx is not None else None
-                psp = (
+                if (
                     msg.get("system_prompt")
                     or msg.get("systemPrompt")
                     or msg.get("persona_system_prompt")
                     or msg.get("personaSystemPrompt")
-                )
-                psp_s = str(psp).strip() if psp else None
+                ):
+                    logger.debug(
+                        "%s text frame — ignoring client system prompt fields (server persona)",
+                        _ws_ctx(session_id, req_id),
+                    )
+                psp_s = None
 
                 extra_ctx: dict = {}
                 graded_this_turn = False
+
+                # ── All Intelligence Layers Metadata (from frontend engines) ──
+                _ts = msg.get("teaching_strategy")
+                if _ts and isinstance(_ts, dict):
+                    _sl  = str(_ts.get("student_level", "")).strip()
+                    _ss  = str(_ts.get("student_state", "")).strip()
+                    _bt  = str(_ts.get("btec_target", "")).strip()
+                    _lm  = str(_ts.get("learning_moment", "")).strip()
+                    _tc  = _ts.get("turn_count", 0)
+                    # Intuition layer
+                    _sp  = str(_ts.get("student_pattern", "")).strip()
+                    _hw  = str(_ts.get("hidden_weakness", "")).strip()
+                    _cc  = _ts.get("comprehension_confidence", 0.5)
+                    _sigs = _ts.get("stress_signals", [])
+                    # Temporal layer
+                    _phase  = str(_ts.get("session_phase", "")).strip()
+                    _energy = _ts.get("energy_level", 0.7)
+                    _exam_d = _ts.get("days_to_exam")
+                    # Persuasion layer
+                    _pm  = str(_ts.get("persuasion_mode", "")).strip()
+
+                    if _sl or _ss or _lm:
+                        extra_ctx["cogni_student_level"]   = _sl or "developing"
+                        extra_ctx["cogni_student_state"]   = _ss or "neutral"
+                        extra_ctx["cogni_btec_target"]     = _bt or "unknown"
+                        extra_ctx["cogni_learning_moment"] = _lm or "question_asked"
+                        extra_ctx["cogni_session_turn"]    = int(_tc) if str(_tc).isdigit() else 0
+                        # Intuition
+                        if _sp:   extra_ctx["cogni_student_pattern"] = _sp
+                        if _hw:   extra_ctx["cogni_hidden_weakness"]  = _hw[:500]
+                        if _cc:   extra_ctx["cogni_comprehension"]    = float(_cc) if isinstance(_cc, (int, float)) else 0.5
+                        if _sigs and isinstance(_sigs, list):
+                            extra_ctx["cogni_stress_signals"] = ",".join(str(s) for s in _sigs[:6])
+                        # Temporal
+                        if _phase:  extra_ctx["cogni_session_phase"] = _phase
+                        if _energy: extra_ctx["cogni_energy_level"]  = float(_energy) if isinstance(_energy, (int, float)) else 0.7
+                        if _exam_d is not None:
+                            extra_ctx["cogni_days_to_exam"] = int(_exam_d) if isinstance(_exam_d, (int, float)) else None
+                        # Persuasion
+                        if _pm: extra_ctx["cogni_persuasion_mode"] = _pm
+                        logger.debug(
+                            "[AgentWS] Intelligence layers: level=%s state=%s moment=%s pattern=%s weakness=%s phase=%s energy=%.2f persuasion=%s",
+                            _sl, _ss, _lm, _sp, _hw[:40] if _hw else "none",
+                            _phase, float(_energy) if isinstance(_energy, (int, float)) else 0, _pm,
+                        )
 
                 def _practice_intent(t: str) -> bool:
                     return bool(re.search(r"تدريب|تمرين|practice", t or "", re.I))
@@ -1361,7 +1954,7 @@ async def agent_ws(websocket: WebSocket):
 
                         from app.database import SessionLocal as _SL
                         from app.models.db_models import Answer as _Ans, Question as _Qq
-                        from app.services.answer_grading import grade_curriculum_answer as _gca
+                        from app.archive.answer_grading import grade_curriculum_answer as _gca
                         from app.services.curriculum_service import update_mastery_after_answer as _uma
 
                         _db = _SL()
@@ -1446,6 +2039,20 @@ async def agent_ws(websocket: WebSocket):
                     except Exception as _px:
                         logger.warning("[AgentWS] practice start failed: %s", _px)
 
+                _aid_msg = msg.get("assignment_id") or msg.get("assignmentId")
+                if _aid_msg and str(_aid_msg).strip():
+                    extra_ctx["assignment_id"] = str(_aid_msg).strip()[:160]
+
+                _fs_msg = str(msg.get("focus_subject") or "").strip()[:200]
+                if _fs_msg:
+                    focus_subject = _fs_msg
+                    extra_ctx["focus_subject"] = _fs_msg
+                _ac_msg = msg.get("assessment_coaching")
+                if isinstance(_ac_msg, dict) and (_ac_msg.get("subject") or _ac_msg.get("final_grade")):
+                    extra_ctx["assessment_coaching"] = _ac_msg
+
+                _ws_ci = msg.get("intent") or msg.get("user_intent") or msg.get("dialogue_intent")
+                _ws_ci_s = str(_ws_ci).strip()[:96] if _ws_ci else None
                 await start_user_turn(
                     user_text=user_text or "…",
                     grade_result=grade_result,
@@ -1453,202 +2060,8 @@ async def agent_ws(websocket: WebSocket):
                     emotional_context=emo_str or None,
                     persona_system_prompt=psp_s or None,
                     extra_context=extra_ctx if extra_ctx else None,
+                    ws_client_intent=_ws_ci_s or None,
                 )
-
-            elif msg_type == "audio":
-                b64_data = str(msg.get("data", ""))
-                req_id   = str(msg.get("id", ""))   # correlate frames to this request
-                if not b64_data:
-                    continue
-                _touch_interaction()
-                print(f"[agent_ws] AUDIO received: req_id={req_id!r} b64_len={len(b64_data)}", flush=True)
-                await send({"type": "transcribing", "id": req_id})
-
-                # Decode → local Whisper → OpenAI whisper-1 → Arabic placeholder (always reaches LLM)
-                transcript = ""
-                stt_source = "none"
-                try:
-                    audio_bytes = base64.b64decode(b64_data)
-                    print(f"[agent_ws] AUDIO decoded: {len(audio_bytes)} bytes", flush=True)
-                except Exception as e:
-                    logger.exception("[AgentWS] audio base64 decode: %s", e)
-                    await send({
-                        "type": "error",
-                        "id": req_id,
-                        "error": {"message": f"تعذر فك تشفير الصوت: {e}", "severity": "error", "code": "audio_decode"},
-                    })
-                    continue
-
-                from app.services.whisper_stt import (
-                    STTError,
-                    STT_PIPELINE_FALLBACK_USER_AR,
-                    is_available as stt_available,
-                    transcribe_audio,
-                    transcribe_openai_whisper_api,
-                )
-
-                print(f"[agent_ws] STT local_available={stt_available()}", flush=True)
-
-                if stt_available():
-                    try:
-                        print(f"[agent_ws] Calling transcribe_audio req_id={req_id!r}", flush=True)
-                        t = await transcribe_audio(
-                            audio_bytes, mime_type=None, req_id=req_id
-                        )
-                        if (t or "").strip():
-                            transcript = t.strip()
-                            stt_source = "local_whisper"
-                        print(
-                            f"[agent_ws] STT returned: {repr(transcript[:80]) if transcript else repr(t)}",
-                            flush=True,
-                        )
-                    except STTError as e:
-                        logger.warning(
-                            "[AgentWS] local STT rejected req=%s code=%s: %s",
-                            req_id,
-                            e.code,
-                            e.detail,
-                        )
-                        await send({
-                            "type": "error",
-                            "id": req_id,
-                            "error": {
-                                "message": e.detail,
-                                "severity": "warn",
-                                "code": getattr(e, "code", "stt_rejected"),
-                            },
-                        })
-                    except Exception as e:
-                        logger.exception("[AgentWS] local STT unexpected: %s", e)
-                        await send({
-                            "type": "error",
-                            "id": req_id,
-                            "error": {
-                                "message": f"STT محلي: {e}",
-                                "severity": "warn",
-                                "code": "stt_internal",
-                            },
-                        })
-                else:
-                    logger.warning(
-                        "[AgentWS] faster-whisper not loaded — OpenAI / placeholder only (req=%s)",
-                        req_id,
-                    )
-                    await send({
-                        "type": "error",
-                        "id": req_id,
-                        "error": {
-                            "message": "STT المحلي غير متاح — جارٍ تجربة السحابة أو الرسالة الافتراضية",
-                            "severity": "warn",
-                            "code": "stt_local_unavailable",
-                        },
-                    })
-
-                if not transcript:
-                    cloud = await transcribe_openai_whisper_api(audio_bytes, req_id=req_id)
-                    if (cloud or "").strip():
-                        transcript = cloud.strip()
-                        stt_source = "openai_whisper"
-
-                if not transcript:
-                    transcript = STT_PIPELINE_FALLBACK_USER_AR
-                    stt_source = "placeholder"
-                    logger.warning(
-                        "[AgentWS] STT placeholder pipeline req=%s — set OPENAI_API_KEY or enable faster-whisper",
-                        req_id,
-                    )
-
-                # ── Sprint 3: STT debug + immediate transcript echo ───────────
-                # Print to the backend terminal so the developer can confirm
-                # Whisper actually heard the words before the LLM call starts.
-                # encode/decode guards against cp1252 charmap errors on Windows.
-                _t_safe = transcript.encode('utf-8', errors='replace').decode('utf-8')
-                print(f"--- [STT RESULT source={stt_source}]: {_t_safe} ---", flush=True)
-                logger.info("[AgentWS] STT transcript: %s", ascii(transcript[:120]))
-                # Echo the raw transcript to the frontend BEFORE the LLM replies so
-                # the UI can fill the text box / chat input immediately.
-                await send(
-                    {
-                        "type": "transcript",
-                        "text": transcript,
-                        "id": req_id,
-                        "stt_source": stt_source,
-                    }
-                )
-
-                # STT dialect normalization: fix Whisper BTEC mis-transcriptions.
-                # Runs after echo so the user sees the raw Whisper output,
-                # but the LLM receives academically-correct terms.
-                from app.services.jordanian_dialect import normalize_stt_transcript as _norm_stt
-                transcript = _norm_stt(transcript)
-                if transcript:
-                    logger.debug("[AgentWS] Normalised transcript: %s", ascii(transcript[:80]))
-
-                # Gap 4-A: voice messages may also carry grade + emotional memory context
-                grade_result = msg.get("grade_result") or None
-                emo_ctx = msg.get("emotional_context")
-                emo_str = str(emo_ctx).strip() if emo_ctx is not None else None
-                psp = (
-                    msg.get("system_prompt")
-                    or msg.get("systemPrompt")
-                    or msg.get("persona_system_prompt")
-                    or msg.get("personaSystemPrompt")
-                )
-                psp_s = str(psp).strip() if psp else None
-                await start_user_turn(
-                    user_text=transcript,
-                    grade_result=grade_result,
-                    req_id=req_id,
-                    emotional_context=emo_str or None,
-                    persona_system_prompt=psp_s or None,
-                )
-
-            elif msg_type == "user:emotion":
-                # SER (Speech Emotion Recognition) frame from frontend.
-                # Accepted when USE_SER=true; stored in session state for
-                # EmotionEngine context on the next LLM turn.
-                import os as _os
-                if _os.environ.get("USE_SER", "false").lower() in {"1", "true", "yes"}:
-                    pleasure  = float(msg.get("pleasure",  0))
-                    arousal   = float(msg.get("arousal",   0))
-                    dominance = float(msg.get("dominance", 0))
-                    # Clamp to [-1, 1]
-                    pleasure  = max(-1.0, min(1.0, pleasure))
-                    arousal   = max(-1.0, min(1.0, arousal))
-                    dominance = max(-1.0, min(1.0, dominance))
-                    logger.debug(
-                        "[AgentWS] SER frame P=%.2f A=%.2f D=%.2f",
-                        pleasure, arousal, dominance,
-                    )
-                    # Attach to next LLM context for downstream use
-                    # (stored on the per-connection history for future use)
-                    if not history or history[-1].get("user_emotion") is None:
-                        history.append({"user_emotion": {
-                            "pleasure": pleasure,
-                            "arousal":  arousal,
-                            "dominance": dominance,
-                        }})
-                    else:
-                        history[-1]["user_emotion"] = {
-                            "pleasure":  pleasure,
-                            "arousal":   arousal,
-                            "dominance": dominance,
-                        }
-                else:
-                    logger.debug("[AgentWS] SER frame received but USE_SER=false — ignored")
-
-            elif msg_type == "clear":
-                _touch_interaction()
-                await cancel_in_flight("cleared")
-                history.clear()
-                btec_state.clear()
-                pending_question_id = None
-                btec_training_pending = None
-                pending_grade_nudge = None
-                focus_subject = None
-                deep_link_state.clear()
-                session_state["is_quick_review"] = False
-                await send({"type": "cleared"})
 
             elif msg_type == "btec_progress":
                 # Frontend sends this frame when the student's BTEC progress changes
@@ -1708,6 +2121,15 @@ async def agent_ws(websocket: WebSocket):
                     "achieved":       achieved,
                     "summary":        summary,
                 })
+                asyncio.ensure_future(_analytics.update_btec_state(
+                    unit_id=unit_id,
+                    btec_level=current_level or "pass",
+                    next_criterion=(
+                        next_criterion.get("code")
+                        if isinstance(next_criterion, dict)
+                        else (next_criterion or "")
+                    ),
+                ))
                 asyncio.ensure_future(_analytics.update_btec_state(
                     unit_id=unit_id,
                     btec_level=current_level or "pass",
@@ -1890,8 +2312,13 @@ async def agent_ws(websocket: WebSocket):
                         _dbf2.close()
                     try:
                         think_mm.apply_thumb_feedback(bool(msg.get("thumbs_up") or up >= 0.5))
-                    except Exception:
-                        pass
+                    except Exception as _thumb_exc:
+                        logger.warning(
+                            "%s apply_thumb_feedback failed: %s",
+                            _ws_ctx(session_id),
+                            _thumb_exc,
+                            exc_info=True,
+                        )
                     await send({"type": "session_feedback_ack", "v": 1.1})
                 except Exception as _fbe:
                     logger.warning("[AgentWS] session_feedback: %s", _fbe)
@@ -1911,22 +2338,40 @@ async def agent_ws(websocket: WebSocket):
         try:
             await send({"type": "error", "error": {"message": str(e), "severity": "error"}})
             await websocket.close()
-        except Exception:
-            pass
+        except Exception as _close_after_err:
+            logger.debug(
+                "ws_req_id=%s send/close after loop error failed: %s",
+                ws_req_id,
+                _close_after_err,
+            )
     finally:
-        if user_uuid:
+        _persist_scope = user_uuid or linked_eval_uuid
+        if _persist_scope:
             try:
-                from app.services.reflection_service import append_session_timeline
-                from app.services.session_state_redis import save_session_state
+                from app.services.session_state_redis import load_session_state, save_session_state
 
+                _existing = load_session_state(_persist_scope) or {}
+                _ack_ids = [str(x) for x in (_existing.get("eval_nudge_ack_ids") or [])]
+                for _iid in _eval_nudge_instance_acks_ws:
+                    if _iid not in _ack_ids:
+                        _ack_ids.append(_iid)
+                _ack_ids = _ack_ids[-50:]
                 save_session_state(
-                    user_uuid,
+                    _persist_scope,
                     {
+                        **_existing,
                         "session_id": session_id,
                         "turns": len(history),
                         "persona_level": persona_level,
+                        "eval_nudge_ack_ids": _ack_ids,
                     },
                 )
+            except Exception as _fin_redis:
+                logger.debug("[AgentWS] finally session_state save: %s", _fin_redis)
+        if user_uuid:
+            try:
+                from app.services.reflection_service import append_session_timeline
+
                 _db_tl = None
                 try:
                     from app.database import SessionLocal as _SL_FIN
@@ -1952,12 +2397,17 @@ async def agent_ws(websocket: WebSocket):
         if thinker is not None:
             try:
                 await thinker.stop()
-            except Exception:
-                pass
-        if not heartbeat_task.done():
+            except Exception as _thinker_stop_exc:
+                logger.warning(
+                    "ws_req_id=%s thinker.stop failed: %s",
+                    ws_req_id,
+                    _thinker_stop_exc,
+                    exc_info=True,
+                )
+        if heartbeat_task is not None and not heartbeat_task.done():
             heartbeat_task.cancel()
             logger.info("[AgentWS] Heartbeat ghost task successfully cancelled.")
         try:
             await _analytics.session_end()
-        except Exception:
-            pass
+        except Exception as _analytics_end_exc:
+            logger.debug("ws_req_id=%s session_end analytics failed: %s", ws_req_id, _analytics_end_exc)

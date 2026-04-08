@@ -1,5 +1,5 @@
 
-> nexus-platform-v3@3.0.0 build
+> eduverse-platform-v3@3.0.0 build
 > next build --webpack
 
 ▲ Next.js 16.1.6 (webpack)

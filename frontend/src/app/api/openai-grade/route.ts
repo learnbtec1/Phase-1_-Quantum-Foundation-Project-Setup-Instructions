@@ -1,12 +1,12 @@
 // frontend/src/app/api/openai-grade/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
+import {
+  blockAiBffUnlessEnabledInProduction,
+  requireAuthenticatedUser,
+} from '@/lib/server/bffAuth';
 
 export const runtime = 'nodejs';
-
-const OPENAI_API_KEY =
-  process.env.OPENAI_API_KEY ??
-  'REDACTED_OPENAI_KEY_2';
 
 type GradePayload = {
   grade: 'DISTINCTION' | 'MERIT' | 'PASS' | 'REFER (FAIL)';
@@ -21,13 +21,27 @@ function sleep(ms: number) {
 }
 
 export async function POST(req: NextRequest) {
+  const disabled = blockAiBffUnlessEnabledInProduction();
+  if (disabled) return disabled;
+
+  const auth = await requireAuthenticatedUser(req);
+  if (!auth.ok) return auth.response;
+
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
+    return NextResponse.json(
+      { error: 'OPENAI_API_KEY is not configured on the server' },
+      { status: 503 },
+    );
+  }
+
   try {
-    if (!OPENAI_API_KEY) return NextResponse.json({ error: 'مفتاح الخادم مفقود' }, { status: 500 });
-
     const { submission, unit } = await req.json();
-    if (!submission) return NextResponse.json({ error: 'Missing submission' }, { status: 400 });
+    if (!submission) {
+      return NextResponse.json({ error: 'Missing submission' }, { status: 400 });
+    }
 
-    const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+    const openai = new OpenAI({ apiKey });
 
     const system = `
 أنت معلم BTEC ذكي ولكن صارم.
@@ -49,7 +63,9 @@ ${submission}
 `.trim();
 
     const MAX_RETRIES = 2;
-    let completion: any;
+    let completion: Awaited<
+      ReturnType<typeof openai.chat.completions.create>
+    > | null = null;
 
     for (let i = 0; i <= MAX_RETRIES; i++) {
       try {
@@ -64,22 +80,43 @@ ${submission}
           ],
         });
         break;
-      } catch (err: any) {
-        const st = err?.status || err?.response?.status;
+      } catch (err: unknown) {
+        const st =
+          err &&
+          typeof err === 'object' &&
+          'status' in err &&
+          typeof (err as { status: unknown }).status === 'number'
+            ? (err as { status: number }).status
+            : (err as { response?: { status?: number } })?.response?.status;
         if (i < MAX_RETRIES && (st === 429 || st === 500 || st === 503)) {
           await sleep(400 * Math.pow(2, i));
           continue;
         }
-        return NextResponse.json({ error: 'فشل الاتصال بخدمة OpenAI.' }, { status: 500 });
+        return NextResponse.json(
+          { error: 'فشل الاتصال بخدمة OpenAI.' },
+          { status: 500 },
+        );
       }
+    }
+
+    if (!completion) {
+      return NextResponse.json(
+        { error: 'فشل الاتصال بخدمة OpenAI.' },
+        { status: 500 },
+      );
     }
 
     const raw = completion?.choices?.[0]?.message?.content || '{}';
     let parsed: GradePayload;
     try {
-      parsed = JSON.parse(raw.replace(/```json/g, '').replace(/```/g, '').trim());
+      parsed = JSON.parse(
+        raw.replace(/```json/g, '').replace(/```/g, '').trim(),
+      );
     } catch {
-      return NextResponse.json({ error: 'تعذر استخراج نتيجة التقييم من رد الذكاء الصناعي.' }, { status: 500 });
+      return NextResponse.json(
+        { error: 'تعذر استخراج نتيجة التقييم من رد الذكاء الصناعي.' },
+        { status: 500 },
+      );
     }
 
     parsed.score = Math.max(0, Math.min(100, Number(parsed.score) || 0));

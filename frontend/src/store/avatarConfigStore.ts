@@ -20,7 +20,7 @@ export interface AvatarConfigStore {
   resetToDefaults: () => void;
 }
 
-const DEFAULT_CONFIG: AvatarConfig = {
+export const AVATAR_CONFIG_DEFAULTS: AvatarConfig = {
   // افتراضياً: لا يمشي حتى يطلب المستخدم ذلك صراحةً عبر الدردشة
   isWalking: false,
   idleSwayAmount: 0.08,
@@ -28,8 +28,8 @@ const DEFAULT_CONFIG: AvatarConfig = {
 };
 
 export const useAvatarConfigStore = create<AvatarConfigStore>((set, get) => ({
-  config: DEFAULT_CONFIG,
-  defaults: DEFAULT_CONFIG,
+  config: AVATAR_CONFIG_DEFAULTS,
+  defaults: AVATAR_CONFIG_DEFAULTS,
   setConfig: (partial) =>
     set((state) => ({
       config: { ...state.config, ...partial },
@@ -39,4 +39,9 @@ export const useAvatarConfigStore = create<AvatarConfigStore>((set, get) => ({
       config: { ...state.defaults },
     })),
 }));
+
+/** Deep clone for per-user server defaults (BFF /api/avatar-config). */
+export function cloneAvatarConfigDefaults(): AvatarConfig {
+  return { ...AVATAR_CONFIG_DEFAULTS };
+}
 

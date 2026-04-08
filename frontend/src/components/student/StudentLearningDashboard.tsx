@@ -74,16 +74,18 @@ export default function StudentLearningDashboard() {
           <StudentAssessmentPanel focusTopicLabel={currentSubject} onGradeUpdated={setGradeNudge} />
         </div>
       </aside>
-      <main className="relative flex min-w-0 flex-1 flex-col min-h-0">
-        <Suspense
-          fallback={
-            <div className="flex flex-1 items-center justify-center bg-[#06060c] text-gray-500 text-sm">
-              جاري تحميل الكوجني…
-            </div>
-          }
-        >
-          <DashboardAvatarSlot focusSubject={currentSubject} gradeNudge={gradeNudge} />
-        </Suspense>
+      <main className="relative z-50 flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="relative z-50 isolate flex min-h-0 flex-1 flex-col">
+          <Suspense
+            fallback={
+              <div className="flex min-h-[520px] flex-1 items-center justify-center bg-[#06060c] text-gray-500 text-sm">
+                جاري تحميل الكوجني…
+              </div>
+            }
+          >
+            <DashboardAvatarSlot focusSubject={currentSubject} gradeNudge={gradeNudge} />
+          </Suspense>
+        </div>
       </main>
     </div>
   );

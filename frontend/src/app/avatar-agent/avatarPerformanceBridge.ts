@@ -1,7 +1,5 @@
 /**
- * avatar:performance listener logic — kept in a separate module so Turbopack does not
- * incorrectly drop the handler while preserving addEventListener('…', onPerformance)
- * references (runtime ReferenceError: onPerformance is not defined).
+ * avatar:performance → تعبيرات / إيماءات إجرائية (يتطلب مستمعاً في AvatarCanvas).
  */
 
 import type { VRM } from '@pixiv/three-vrm';
@@ -23,27 +21,38 @@ export function createAvatarPerformanceHandler(
     if (!cue?.tag) return;
     const resolved = resolvePerformanceCue(cue);
     if (!resolved) {
-      console.log(`[BRAIN] avatar:performance — unresolved: ${cue.tag}`);
+      if (typeof console !== 'undefined' && process.env.NODE_ENV === 'development') {
+        console.log(`[BRAIN] avatar:performance — unresolved: ${cue.tag}`);
+      }
       return;
     }
     if (resolved.kind === 'emotion') {
-      window.dispatchEvent(new CustomEvent('avatar:emotion', { detail: { emotion: resolved.emotion } }));
-      console.log(`[BRAIN] avatar:performance → emotion ${resolved.emotion}`);
+      window.dispatchEvent(
+        new CustomEvent('avatar:emotion', { detail: { emotion: resolved.emotion } }),
+      );
       return;
     }
     if (resolved.kind === 'gesture') {
+      const dm = cue.duration_ms;
+      const durationSec =
+        typeof dm === 'number' && Number.isFinite(dm) && dm > 0
+          ? Math.max(0.5, Math.min(4, dm / 1000))
+          : 2.5;
       window.dispatchEvent(
         new CustomEvent('avatar:gesture', {
-          detail: { type: resolved.token, duration: 2.5, side: 'right' },
+          detail: {
+            type: resolved.token,
+            duration: durationSec,
+            side: 'right',
+            fromPerformance: true,
+          },
         }),
       );
-      console.log(`[BRAIN] avatar:performance → gesture ${resolved.token}`);
       return;
     }
     const em = getVrm()?.expressionManager;
     if (em) {
       setEM(em, resolved.key, resolved.intensity);
-      console.log(`[BRAIN] avatar:performance → blendshape ${resolved.key} @ ${resolved.intensity}`);
     }
   };
 }

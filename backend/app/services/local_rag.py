@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-logger = logging.getLogger("nexus.local_rag")
+logger = logging.getLogger("eduverse.local_rag")
 
 # ── Configuration (read from env, with safe defaults) ────────────────────────
 _DEFAULT_RAG_DIR = r"E:\BTEC"

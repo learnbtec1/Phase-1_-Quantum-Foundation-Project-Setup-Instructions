@@ -65,10 +65,21 @@ export interface AgentFrame {
   user_pad?:           PADVector;
   /**
    * True when the WS frame included a non-empty LLM `performance` array.
-   * AgentDirector must not infer body gestures from legacy action text,
-   * GestureEngine, emotion contracts, or co-speech — only `avatar:performance` cues apply.
    */
   gesturesFromStructuredPerformance?: boolean;
+
+  // ── Awareness / Cogni Brain fields (from JSON brain mode) ──────────────────
+  /** Inner monologue — teacher's private thought about the student's state. */
+  internal_monologue?: string;
+  /** Awareness cues — rich context for avatar body/gaze/energy decisions. */
+  awareness_cues?: {
+    emotion?:          string;
+    gaze_target?:      'user' | 'away' | 'think' | string;
+    movement_energy?:  number; // 0–1
+    student_state?:    string; // e.g. 'confused', 'engaged', 'bored'
+  };
+  /** Thinker goal update — forwarded from goal_update WS frame if bundled. */
+  thinker_goal?: string;
 }
 
 // ─── Behavior output ───────────────────────────────────────────────────────────

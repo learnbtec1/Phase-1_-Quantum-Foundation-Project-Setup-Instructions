@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "savedAt": null,
+  "note": "This file is optional. The calibrator persists to localStorage and can export/import this JSON. Replace or commit exported calibration_memory.json to share defaults across machines.",
+  "idle": null,
+  "poses": null,
+  "confirmedTabs": null
+}

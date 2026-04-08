@@ -22,7 +22,7 @@ const config: Config = {
         glass: "rgb(var(--glass-bg) / <alpha-value>)",
         "glass-border": "rgb(var(--glass-border) / <alpha-value>)",
         
-        // 👇 الألوان المطلوبة لمنصة Nexus (رؤية 2046)
+        // 👇 الألوان المطلوبة لمنصة Eduverse (رؤية 2046)
         midnight: "#020617", // لون الفضاء العميق
         cyan: {
           DEFAULT: "#06b6d4",
@@ -91,7 +91,7 @@ const config: Config = {
       backgroundImage: {
         'gradient-radial': 'radial-gradient(var(--tw-gradient-stops))',
         'gradient-conic': 'conic-gradient(from 180deg at 50% 50%, var(--tw-gradient-stops))',
-        'gradient-nexus': 'linear-gradient(135deg, rgba(6,182,212,0.2) 0%, rgba(139,92,246,0.2) 50%, rgba(236,72,153,0.2) 100%)',
+        'gradient-eduverse': 'linear-gradient(135deg, rgba(6,182,212,0.2) 0%, rgba(139,92,246,0.2) 50%, rgba(236,72,153,0.2) 100%)',
         'gradient-market': 'linear-gradient(135deg, #00f3ff 0%, #b967ff 50%, #ff6b35 100%)',
       },
 
@@ -102,8 +102,8 @@ const config: Config = {
       },
 
       boxShadow: {
-        'nexus': '0 0 50px rgba(6, 182, 212, 0.2)',
-        'nexus-bright': '0 0 30px rgba(6, 182, 212, 0.5)',
+        'eduverse': '0 0 50px rgba(6, 182, 212, 0.2)',
+        'eduverse-bright': '0 0 30px rgba(6, 182, 212, 0.5)',
         'emerald-glow': '0 0 30px rgba(16, 185, 129, 0.4)',
         'market': '0 0 40px rgba(139, 92, 246, 0.3)',
         'district': '0 10px 40px rgba(0, 0, 0, 0.5)',

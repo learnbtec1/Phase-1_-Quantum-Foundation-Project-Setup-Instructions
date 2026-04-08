@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { apiBase, authHeaders, getAccessToken } from '@/lib/auth';
+import { BodyPortal } from '@/components/portal/BodyPortal';
+import { Z_LAYERS } from '@/lib/z-layers';
 
 type Props = {
   open: boolean;
@@ -68,7 +70,11 @@ export default function DigitalHumanSettingsModal({ open, onClose }: Props) {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 p-4">
+    <BodyPortal>
+      <div
+        className="fixed inset-0 flex items-center justify-center bg-black/70 p-4"
+        style={{ zIndex: Z_LAYERS.MODAL_BACKDROP }}
+      >
       <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1020] p-6 text-sm text-gray-200 shadow-2xl">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-bold text-white">إعدادات كوجني الذكية</h2>
@@ -102,5 +108,6 @@ export default function DigitalHumanSettingsModal({ open, onClose }: Props) {
         {msg ? <p className="mt-3 text-xs text-amber-300/90">{msg}</p> : null}
       </div>
     </div>
+    </BodyPortal>
   );
 }

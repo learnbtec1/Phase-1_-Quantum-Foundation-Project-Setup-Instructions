@@ -14,6 +14,9 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.api.deps import get_current_user
+from app.api.v1.dependencies.phase2_gates import gate_tts_user
+from app.models.db_models import User
 from app.services.tts_service import AzureTTSService, _SDK_AVAILABLE
 
 logger = logging.getLogger(__name__)
@@ -43,6 +46,7 @@ def get_tts_service(request: Request) -> AzureTTSService:
 )
 async def generate_tts(
     body: TTSRequest,
+    _auth: User = Depends(gate_tts_user),
     service: AzureTTSService = Depends(get_tts_service),
 ) -> StreamingResponse:
     """
@@ -55,7 +59,7 @@ async def generate_tts(
         )
 
     try:
-        mp3_bytes, _v, _w = await service.synthesize(
+        mp3_bytes, _v, _w, _prov = await service.synthesize(
             text=body.text,
             voice_name=body.voice_name,
         )
@@ -93,7 +97,10 @@ async def generate_tts(
     summary="Show current TTS configuration (debug)",
     include_in_schema=False,
 )
-async def tts_info(service: AzureTTSService = Depends(get_tts_service)) -> dict:
+async def tts_info(
+    _auth: User = Depends(get_current_user),
+    service: AzureTTSService = Depends(get_tts_service),
+) -> dict:
     from app.core.config import settings
 
     if not settings.DEBUG:

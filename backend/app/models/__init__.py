@@ -1,2 +1,2 @@
 # -*- coding: utf-8 -*-
-"""NEXUS models — Pydantic schemas and SQLAlchemy db_models."""
+"""EDUVERSE models — Pydantic schemas and SQLAlchemy db_models."""

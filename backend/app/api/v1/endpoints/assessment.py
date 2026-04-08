@@ -9,16 +9,17 @@ Assessment Endpoints (v4 — Claude Anthropic Edition)
 
 from __future__ import annotations
 import logging
-import json
 import os
-import asyncio
 from typing import List
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field, AliasChoices
 from fastapi.responses import StreamingResponse, JSONResponse
 
+from app.api.deps import get_current_user
+from app.models.db_models import User
+
 # استيراد المحرك الجديد (Claude-based)
-from app.services.forensic_engine import forensic_grade, forensic_grade_stream
+from app.archive.forensic_engine import forensic_grade, forensic_grade_stream
 from app.services.file_extractor import merge_files
 
 logger = logging.getLogger(__name__)
@@ -40,15 +41,33 @@ class GradePayload(BaseModel):
     student_id: str | None = Field(default=None, description="معرف الطالب (مؤقتاً حتى توفر المصادقة)")
 
 
+MIN_ASSIGNMENT_CHARS = 20
+MIN_STUDENT_CHARS = 20
+
+
+def _assert_grade_payload_lengths(payload: GradePayload) -> None:
+    st = payload.student_text.strip()
+    at = payload.assignment_text.strip()
+    if len(st) < MIN_STUDENT_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"إجابة الطالب قصيرة جداً — الحد الأدنى {MIN_STUDENT_CHARS} حرفاً.",
+        )
+    if len(at) < MIN_ASSIGNMENT_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"نص الواجب قصير جداً — الحد الأدنى {MIN_ASSIGNMENT_CHARS} حرفاً.",
+        )
+
+
 # ==========================================
 # 🔥 Forensic Grade v3 (now powered by Claude)
 # ==========================================
 
 @router.post("/forensic-grade-v3")
-async def grade_v3(payload: GradePayload):
+async def grade_v3(payload: GradePayload, current_user: User = Depends(get_current_user)):
     """تقييم شامل وإرجاع النتيجة دفعة واحدة (Batch) — يعمل بمحرك Claude"""
-    if len(payload.student_text.strip()) < 5:
-        raise HTTPException(status_code=400, detail="إجابة الطالب قصيرة جداً.")
+    _assert_grade_payload_lengths(payload)
 
     try:
         result = await forensic_grade(payload.assignment_text, payload.student_text)
@@ -70,7 +89,7 @@ async def grade_v3(payload: GradePayload):
         try:
             from app.repository.evaluations import get_evaluation_repo, DatabaseUnavailableError
             repo = get_evaluation_repo()
-            student_id = payload.student_id or "anonymous"
+            student_id = payload.student_id or str(current_user.id)
             evaluation_id = repo.create(
                 student_id=student_id,
                 title="BTEC Assessment",
@@ -110,10 +129,10 @@ async def grade_v3(payload: GradePayload):
 
 
 @router.post("/forensic-grade-v3/stream")
-async def grade_v3_stream(payload: GradePayload):
+async def grade_v3_stream(payload: GradePayload, current_user: User = Depends(get_current_user)):
     """تقييم متدفق (Streaming) للواجهة التفاعلية — يعمل بمحرك Claude"""
-    if len(payload.student_text.strip()) < 5:
-        raise HTTPException(status_code=400, detail="إجابة الطالب قصيرة جداً.")
+    _assert_grade_payload_lengths(payload)
+    logger.debug("[Assessment] stream grade | user_id=%s", current_user.id)
 
     return StreamingResponse(
         forensic_grade_stream(payload.assignment_text, payload.student_text),
@@ -130,9 +149,9 @@ async def grade_v3_stream(payload: GradePayload):
 # ==========================================
 
 @router.post("/grade")
-async def grade_legacy(payload: GradePayload):
+async def grade_legacy(payload: GradePayload, current_user: User = Depends(get_current_user)):
     """Legacy endpoint — redirects to v3"""
-    return await grade_v3(payload)
+    return await grade_v3(payload, current_user)
 
 
 # ==========================================
@@ -143,12 +162,15 @@ class PlagiarismPayload(BaseModel):
     text: str
 
 @router.post("/check_plagiarism")
-async def check_plagiarism(payload: PlagiarismPayload):
+async def check_plagiarism(
+    payload: PlagiarismPayload,
+    _user: User = Depends(get_current_user),
+):
     """كشف الانتحال والبصمة الرقمية (مؤشرات أسلوبية)"""
     if not payload.text or len(payload.text.strip()) < 10:
         raise HTTPException(status_code=400, detail="النص قصير جداً للتحليل.")
     try:
-        from app.services.plagiarism_guard import PlagiarismGuard
+        from app.archive.plagiarism_guard import PlagiarismGuard
         guard = PlagiarismGuard()
         result = await guard.evaluate(payload.text)
         # Return in the shape the frontend expects: {score, detail, findings}
@@ -167,6 +189,7 @@ MAX_FILES = 5
 
 @router.post("/extract-text")
 async def extract_text_from_files(
+    _user: User = Depends(get_current_user),
     files: List[UploadFile] = File(..., description="ملفات الطالب (docx, pptx, pdf, txt)"),
 ):
     """
@@ -214,6 +237,7 @@ async def extract_text_from_files(
 
 @router.post("/forensic-grade-v3/stream-files")
 async def grade_v3_stream_files(
+    _user: User = Depends(get_current_user),
     files: List[UploadFile] = File(..., description="ملفات الطالب (docx, pptx, pdf, txt)"),
     assignment_text: str = Form(..., description="نص الواجب / المعايير"),
 ):
@@ -243,8 +267,21 @@ async def grade_v3_stream_files(
         logger.exception("[stream-files] extraction error: %s", e)
         raise HTTPException(status_code=500, detail=f"خطأ في استخراج النص: {e}")
 
-    if not student_text.strip():
+    st = student_text.strip()
+    if not st:
         raise HTTPException(status_code=422, detail="لم يُستخرج أي نص من الملفات المرفقة.")
+    if len(st) < MIN_STUDENT_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"نص الحل المستخرج قصير جداً — الحد الأدنى {MIN_STUDENT_CHARS} حرفاً.",
+        )
+    if len(assignment_text.strip()) < MIN_ASSIGNMENT_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"نص الواجب قصير جداً — الحد الأدنى {MIN_ASSIGNMENT_CHARS} حرفاً.",
+        )
+
+    logger.debug("[Assessment] stream-files | user_id=%s", _user.id)
 
     return StreamingResponse(
         forensic_grade_stream(assignment_text, student_text),

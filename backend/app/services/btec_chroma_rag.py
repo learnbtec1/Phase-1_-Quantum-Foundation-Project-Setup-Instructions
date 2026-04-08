@@ -1,22 +1,28 @@
 # -*- coding: utf-8 -*-
 """
-Retrieve BTEC curriculum chunks from ChromaDB collection ``btec_knowledge_base``.
+Retrieve BTEC curriculum chunks from the configured vector store (ChromaDB by default).
 
 Populated by ``backend/scripts/btec_ingest.py``; uses the same persist directory as
 ``episodic_memory`` and the same embedding model as ingestion (text-embedding-3-small).
+
+Switch backend with env ``VECTOR_STORE_TYPE=chromadb|qdrant`` (Qdrant is stub-only until implemented).
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
+
+from app.services.vector_store import get_btec_vector_store, metadata_filter_to_chroma_where
+from app.services.vector_store.chroma_store import ChromaBtecVectorStore
+from app.services.vector_store.qdrant_store import QdrantBtecVectorStore
 
 logger = logging.getLogger(__name__)
 
 _COLLECTION_NAME = "btec_knowledge_base"
-_EMBED_MODEL = "text-embedding-3-small"
 _DEFAULT_TOP_K = 4
 _MAX_QUERY_CHARS = 8000
 
@@ -35,57 +41,25 @@ def _normalize_query(q: str) -> str:
     return t[:_MAX_QUERY_CHARS]
 
 
-_chroma_client = None
-
-
-def _get_chroma_collection():
-    """Return the BTEC collection, or None if Chroma / collection is missing."""
-    global _chroma_client
-    try:
-        import chromadb  # type: ignore
-    except ImportError:
-        logger.warning("[BtecChromaRAG] chromadb not installed")
-        return None
-    try:
-        if _chroma_client is None:
-            _chroma_client = chromadb.PersistentClient(path=_DATA_DIR)
-        return _chroma_client.get_collection(name=_COLLECTION_NAME)
-    except Exception as e:
-        logger.warning("[BtecChromaRAG] collection %r unavailable: %s", _COLLECTION_NAME, e)
-        return None
-
-
-def _embed_query_sync(query: str) -> Optional[List[float]]:
-    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
-    if not api_key:
-        logger.warning("[BtecChromaRAG] OPENAI_API_KEY missing — skip Chroma query")
-        return None
-    try:
-        from openai import OpenAI
-
-        cli = OpenAI(api_key=api_key)
-        r = cli.embeddings.create(model=_EMBED_MODEL, input=query[:8000])
-        return list(r.data[0].embedding)
-    except Exception as e:
-        logger.warning("[BtecChromaRAG] embedding failed: %s", e)
-        return None
-
-
 def _format_chroma_results(documents: List[str], metadatas: List[dict]) -> str:
     lines: List[str] = []
     for i, (doc, meta) in enumerate(zip(documents, metadatas), start=1):
         src = ""
         page = ""
+        crit = ""
         if isinstance(meta, dict):
             src = str(meta.get("source_file") or meta.get("source") or "").strip()
             pn = meta.get("page_number", meta.get("page"))
             if pn is not None:
                 page = str(pn).strip()
+            crit = str(meta.get("criterion_code") or "").strip()
         head = f"[{i}]"
         if src:
             head += f" source: {src}"
         if page:
             head += f" | page: {page}"
+        if crit:
+            head += f" | criterion: {crit}"
         body = (doc or "").strip()
         if not body:
             continue
@@ -98,6 +72,64 @@ _QUICK_REVIEW_HEADING_RE = re.compile(
     re.I,
 )
 
+# BTEC criterion markers in text or filenames: P1, M2, D3, A.P1, 1.M2 (keep in sync with btec_ingest.py)
+BTEC_CRITERION_CODE_RE = re.compile(
+    r"\b(?:[A-Za-z]\.|[0-9]\.)?([PpMmDd])(\d{1,2})\b",
+)
+
+
+def extract_btec_chroma_filters_from_context(
+    message: str,
+    context: Optional[dict] = None,
+) -> Dict[str, str]:
+    """
+    Build optional metadata filter fields from user text and tutor context (deep_link unit, focus).
+    Returns only non-empty string values. Empty dict means no metadata filter (semantic-only).
+    """
+    context = context or {}
+    parts: List[str] = []
+    if message and str(message).strip():
+        parts.append(str(message).strip())
+    fs = context.get("focus_subject")
+    if fs and str(fs).strip():
+        parts.append(str(fs).strip())
+    dl = context.get("deep_link")
+    if isinstance(dl, dict):
+        du = str(dl.get("unit") or "").strip()
+        if du:
+            parts.append(du)
+    blob = "\n".join(parts)
+
+    out: Dict[str, str] = {}
+    if isinstance(dl, dict):
+        u = str(dl.get("unit") or "").strip()
+        if u:
+            um = re.search(r"(\d+)", u)
+            if um:
+                out["unit_id"] = f"unit_{um.group(1)}"
+
+    cm = BTEC_CRITERION_CODE_RE.search(blob)
+    if cm:
+        pm = cm.group(1).upper()
+        out["criterion_code"] = f"{pm}{cm.group(2)}"
+    return out
+
+
+def _filters_cache_key(filters: Optional[dict[str, str]]) -> str:
+    if not filters:
+        return ""
+    items = sorted((k, str(v).strip()) for k, v in filters.items() if str(v).strip())
+    if not items:
+        return ""
+    return json.dumps(items, ensure_ascii=True)
+
+
+def _chroma_where_clause(filters: Optional[dict[str, str]]) -> Optional[dict[str, Any]]:
+    """Backward-compatible name; delegates to shared helper."""
+    if not filters:
+        return None
+    return metadata_filter_to_chroma_where({k: str(v) for k, v in filters.items()})
+
 
 def retrieve_btec_chroma_block_sync(
     query: str,
@@ -106,56 +138,64 @@ def retrieve_btec_chroma_block_sync(
     top_k: int = _DEFAULT_TOP_K,
     use_cache: bool = True,
     quick_review: bool = False,
+    filters: Optional[dict[str, str]] = None,
 ) -> str:
     """
     Return formatted curriculum text for system prompt, or empty string if none / error.
+
+    Optional ``filters`` (e.g. ``{"criterion_code": "P1", "unit_id": "unit_4"}``) are passed to the
+    vector store. Chroma applies ``where`` metadata filters with semantic fallback when 0 hits.
     """
     nq = _normalize_query(query)
     if len(nq) < 8:
         return ""
 
     sid = (session_id or "default").strip()[:128]
-    _cache_key = f"{nq}\x1fqr={int(bool(quick_review))}"
+    fk = _filters_cache_key(filters)
+    _cache_key = f"{nq}\x1fqr={int(bool(quick_review))}\x1ff={fk}"
     if use_cache and sid in _btec_rag_cache:
         cached_q, block = _btec_rag_cache[sid]
         if cached_q == _cache_key and block:
             logger.debug("[BtecChromaRAG] cache hit session=%s", sid[:32])
             return block
 
-    col = _get_chroma_collection()
-    if col is None:
-        return ""
-
+    store = get_btec_vector_store()
     try:
-        n = col.count()
-        if n == 0:
-            logger.warning("[BtecChromaRAG] collection %r is empty — run btec_ingest.py", _COLLECTION_NAME)
-            return ""
+        n = store.count()
     except Exception as e:
         logger.warning("[BtecChromaRAG] count failed: %s", e)
         return ""
 
-    vec = _embed_query_sync(nq)
-    if not vec:
+    if n == 0:
+        if isinstance(store, QdrantBtecVectorStore):
+            logger.warning("[BtecChromaRAG] Qdrant stub active — no corpus; use VECTOR_STORE_TYPE=chromadb")
+        else:
+            logger.warning("[BtecChromaRAG] collection %r is empty — run btec_ingest.py", _COLLECTION_NAME)
         return ""
 
     k = max(1, min(int(top_k), 12, n))
     fetch_n = min(n, max(k, k * 4 if quick_review else k, 8 if quick_review else k))
-    try:
-        res = col.query(
-            query_embeddings=[vec],
-            n_results=fetch_n,
-            include=["documents", "metadatas", "distances"],
-        )
-    except Exception as e:
-        logger.warning("[BtecChromaRAG] query failed: %s", e)
-        return ""
+    where_clause = _chroma_where_clause(filters)
+    used_filter = bool(where_clause)
 
-    docs = (res.get("documents") or [[]])[0]
-    metas = (res.get("metadatas") or [[]])[0]
+    if isinstance(store, QdrantBtecVectorStore):
+        rows: List[Dict[str, Any]] = []
+    else:
+        rows = store.similarity_search(
+            nq,
+            k=k,
+            filters=filters,
+            n_results=fetch_n,
+        )
+
+    docs = [str(r.get("document") or "") for r in rows]
+    metas = [r.get("metadata") if isinstance(r.get("metadata"), dict) else {} for r in rows]
+
     if not docs:
         logger.warning("[BtecChromaRAG] no documents returned for query (n=%d)", fetch_n)
         return ""
+
+    raw_count = len(docs)
 
     if quick_review:
         pairs = list(zip(docs, metas if metas else [{}] * len(docs)))
@@ -178,10 +218,12 @@ def retrieve_btec_chroma_block_sync(
         return ""
 
     logger.info(
-        "[BtecChromaRAG] retrieved %d chunk(s) from %s (collection docs≈%s)",
+        "[BtecChromaRAG] retrieved %d chunk(s) from %s (collection docs≈%s, metadata_filter=%s, raw_before_trim=%d)",
         len(docs),
         _COLLECTION_NAME,
         n,
+        where_clause if used_filter else None,
+        raw_count,
     )
 
     if use_cache:
@@ -199,6 +241,7 @@ async def retrieve_btec_chroma_block(
     top_k: int = _DEFAULT_TOP_K,
     use_cache: bool = True,
     quick_review: bool = False,
+    filters: Optional[dict[str, str]] = None,
 ) -> str:
     """Async wrapper — runs sync retrieval in the default executor."""
     loop = asyncio.get_event_loop()
@@ -210,22 +253,30 @@ async def retrieve_btec_chroma_block(
             top_k=top_k,
             use_cache=use_cache,
             quick_review=quick_review,
+            filters=filters,
         ),
     )
 
 
 def btec_chroma_rag_status() -> dict[str, Any]:
     """Lightweight health check for ops / debugging."""
-    col = _get_chroma_collection()
+    vt = (os.getenv("VECTOR_STORE_TYPE") or "chromadb").strip().lower()
+    store = get_btec_vector_store()
     out: dict[str, Any] = {
-        "persist_dir": _DATA_DIR,
+        "vector_store_type": vt,
+        "persist_dir": os.path.abspath(_DATA_DIR),
         "collection": _COLLECTION_NAME,
-        "available": col is not None,
+        "available": False,
         "count": None,
     }
-    if col is not None:
+    if isinstance(store, ChromaBtecVectorStore):
+        out["available"] = store.is_healthy()
         try:
-            out["count"] = col.count()
+            out["count"] = store.count()
         except Exception as e:
             out["count_error"] = str(e)
+    else:
+        out["available"] = False
+        out["count"] = store.count()
+        out["note"] = "qdrant stub — no local Chroma corpus attached to this backend"
     return out

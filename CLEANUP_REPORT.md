@@ -68,20 +68,20 @@ Each suspect file was cross-checked with `Select-String` across the entire `src/
 | `src/app/ai-tutor/` | Legacy route — never linked |
 | `src/app/assessments/` | Plural duplicate — real one is `assessment/` |
 | `src/app/auth/` | Auth pages not in core routes |
-| `src/app/competition/` | Nexus Academy legacy |
-| `src/app/competition-dashboard/` | Nexus Academy legacy |
-| `src/app/competition-login/` | Nexus Academy legacy |
-| `src/app/dashboard/` | Nexus Academy legacy |
-| `src/app/dashboard-2d/` | Nexus Academy legacy |
+| `src/app/competition/` | Eduverse Academy legacy |
+| `src/app/competition-dashboard/` | Eduverse Academy legacy |
+| `src/app/competition-login/` | Eduverse Academy legacy |
+| `src/app/dashboard/` | Eduverse Academy legacy |
+| `src/app/dashboard-2d/` | Eduverse Academy legacy |
 | `src/app/evaluate/` | Deprecated — replaced by `/avatar-agent` |
-| `src/app/farm/` | Nexus Academy legacy |
+| `src/app/farm/` | Eduverse Academy legacy |
 | `src/app/login/` | Not in core two routes |
-| `src/app/plagiarism/` | Nexus Academy legacy |
-| `src/app/simulation/` | Nexus Academy legacy |
+| `src/app/plagiarism/` | Eduverse Academy legacy |
+| `src/app/simulation/` | Eduverse Academy legacy |
 | `src/app/strict-evaluation/` | Legacy — no live importers |
-| `src/app/student/` | Nexus Academy legacy |
-| `src/app/unit-1-agriculture/` | Nexus Academy legacy |
-| `src/app/vr-experience/` | Nexus Academy legacy |
+| `src/app/student/` | Eduverse Academy legacy |
+| `src/app/unit-1-agriculture/` | Eduverse Academy legacy |
+| `src/app/vr-experience/` | Eduverse Academy legacy |
 
 ### Dead Files Inside `avatar-agent/` (dead sub-tree)
 | File | Reason |
@@ -95,7 +95,7 @@ Each suspect file was cross-checked with `Select-String` across the entire `src/
 ### Dead Components (flat + sub-folders)
 | File/Folder | Reason |
 |-------------|--------|
-| `components/NexusHero3D.tsx` | Was only in old root page (now replaced) |
+| `components/EduverseHero3D.tsx` | Was only in old root page (now replaced) |
 | `components/DrAhmedOrb.tsx` | Was only in old root page |
 | `components/DrHamzaOrbWrapper.tsx` | Zero importers |
 | `components/AvatarViewer.tsx` | Only used by dead AvatarHumanProUltra chain |
@@ -113,8 +113,8 @@ Each suspect file was cross-checked with `Select-String` across the entire `src/
 | `components/{` | Malformed stray file |
 | `components/audio/` (folder) | Soundscape.tsx — zero live importers |
 | `components/avatar/` (folder) | All dead: AvatarHumanProUltra, DrHamzaOrb, HumanizationRig |
-| `components/boardroom/` (folder) | Entire Nexus boardroom feature |
-| `components/competition/` (folder) | Entire Nexus competition feature |
+| `components/boardroom/` (folder) | Entire Eduverse boardroom feature |
+| `components/competition/` (folder) | Entire Eduverse competition feature |
 | `components/evaluate/EvaluateInterface.tsx` | Dead evaluate route component |
 | `components/layout/EvaluateHeader.tsx` | Dead evaluate route header |
 | `components/mr/` (folder) | MR/AR — zero live importers |
@@ -180,7 +180,7 @@ Each suspect file was cross-checked with `Select-String` across the entire `src/
 ### Dead Services
 | Folder | Reason |
 |--------|--------|
-| `services/nexusApiService.ts` | Zero importers |
+| `services/eduverseApiService.ts` | Zero importers |
 
 ### Dead Types
 | File | Reason |

@@ -28,12 +28,15 @@ export function createSTT(): {
 } {
   let recognition: any = null;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** يمنع فيض السجلات لـ `not-allowed` حتى يُستدعى `start()` من جديد (تفاعل المستخدم). */
+  let notAllowedLogged = false;
 
   const isSupported = () =>
     typeof window !== 'undefined' &&
     ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
 
   const start = (onResult: (r: STTResult) => void, opts: STTOptions = {}) => {
+    notAllowedLogged = false;
     if (!isSupported()) return;
     const SpeechRecognitionAPI =
       (window as unknown as { SpeechRecognition?: new () => unknown }).SpeechRecognition ||
@@ -64,10 +67,27 @@ export function createSTT(): {
     };
 
     recognition.onerror = (e: any) => {
-      console.warn('[STT] error', e?.error || e);
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('stt:error', { detail: { error: e?.error } }));
+      const err = e?.error as string | undefined;
+      if (err === 'not-allowed' || err === 'service-not-allowed') {
+        if (!notAllowedLogged) {
+          notAllowedLogged = true;
+          console.warn(
+            '[STT] not-allowed — allow microphone for this site; auto-retry must be user-initiated. Further identical errors suppressed until next start().',
+          );
+        }
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('stt:error', { detail: { error: err } }));
+        }
+        return;
       }
+      console.warn('[STT] error', err || e);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('stt:error', { detail: { error: err } }));
+      }
+    };
+
+    recognition.onend = () => {
+      /* لا نستدعي start() هنا — يُترك للمتصل بعد تفاعل المستخدم لتجنب حلقات not-allowed */
     };
 
     recognition.onspeechstart = () => {

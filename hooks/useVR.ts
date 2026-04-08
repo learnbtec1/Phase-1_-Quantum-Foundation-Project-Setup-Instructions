@@ -39,7 +39,7 @@ export const useVRStore = create<VRState>()(
         console.log('Progress saved');
       },
     }),
-    { name: 'nexus-vr' }
+    { name: 'eduverse-vr' }
   )
 );
 

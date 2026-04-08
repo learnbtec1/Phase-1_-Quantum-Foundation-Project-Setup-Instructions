@@ -1,4 +1,4 @@
-# 🎴 NEXUS QUICK REFERENCE CARD
+# 🎴 EDUVERSE QUICK REFERENCE CARD
 **Keep this handy during development**
 
 ---
@@ -7,11 +7,11 @@
 
 ### Minimal Context (للمهام البسيطة)
 ```
-Context: Nexus Academy v3.0 - BTEC Platform
+Context: Eduverse Academy v3.0 - BTEC Platform
 • Root: E:\Phase 1_ Quantum Foundation Project Setup Instructions\
 • Next.js: frontend/src/app (App Router)
 • Shared: hooks/, lib/, context/, types/ at root (via @/ alias)
-• State: Zustand + localStorage (nexus-auth, nexus-assessments, nexus-vr)
+• State: Zustand + localStorage (eduverse-auth, eduverse-assessments, eduverse-vr)
 • UI: Arabic RTL + Tailwind + Cairo Font
 • Backend: FastAPI :8000
 
@@ -54,7 +54,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
 export const useStore = create()(
-  persist((set) => ({ data: [] }), { name: 'nexus-key' })
+  persist((set) => ({ data: [] }), { name: 'eduverse-key' })
 );
 ```
 
@@ -82,9 +82,9 @@ import { useAuth } from '../../../hooks/useAuth';  // ❌
 ## 🔐 localStorage Keys (IMMUTABLE)
 
 ```typescript
-'nexus-auth'              // User session
-'nexus-assessments'       // Grading history
-'nexus-vr'                // VR progress (4 evidence items)
+'eduverse-auth'              // User session
+'eduverse-assessments'       // Grading history
+'eduverse-vr'                // VR progress (4 evidence items)
 'btec_platform_progress'  // Gameplay state
 ```
 
@@ -94,8 +94,8 @@ import { useAuth } from '../../../hooks/useAuth';  // ❌
 
 ```css
 /* Glassmorphism */
-.glass-nexus              /* Frosted glass + neon border */
-.card-nexus               /* Glass card + hover scale */
+.glass-eduverse              /* Frosted glass + neon border */
+.card-eduverse               /* Glass card + hover scale */
 
 /* Text */
 .text-gradient            /* Cyan-to-emerald gradient */
@@ -209,8 +209,8 @@ uvicorn app.main:app --reload  # Dev mode
 
 | Resource | Location |
 |----------|----------|
-| Full Context (EN) | `.github/NEXUS_CONTEXT.md` |
-| Full Context (AR) | `.github/NEXUS_CONTEXT_AR.md` |
+| Full Context (EN) | `.github/EDUVERSE_CONTEXT.md` |
+| Full Context (AR) | `.github/EDUVERSE_CONTEXT_AR.md` |
 | Complete Guide | `.github/copilot-instructions.md` |
 | Project Snapshot | `PROJECT_SNAPSHOT_*.txt` |
 | Type Definitions | `types/index.ts` |

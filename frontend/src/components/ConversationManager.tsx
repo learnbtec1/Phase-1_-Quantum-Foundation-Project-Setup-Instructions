@@ -18,6 +18,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { stopTTS } from '@/ai/io/tts';
+import { BodyPortal } from '@/components/portal/BodyPortal';
+import { Z_LAYERS } from '@/lib/z-layers';
 
 export interface ConversationManagerProps {
   /** Callback when initial session starts (AudioContext is unlocked) */
@@ -129,15 +131,23 @@ export default function ConversationManager({
   // ── Session start overlay ────────────────────────────────────────────────
   if (!sessionStarted) {
     return (
-      <div className="fixed inset-0 z-[999] flex items-center justify-center
-        bg-black/80 backdrop-blur-sm">
+      <BodyPortal>
+      <div
+        className="fixed inset-0 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+        style={{ zIndex: Z_LAYERS.MODAL_BACKDROP }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cogni-session-start-title"
+      >
         <div className="flex flex-col items-center gap-6 text-white">
           {/* Animated avatar icon */}
           <div className="text-6xl animate-bounce">🤖</div>
 
           {/* Call to action */}
           <div className="text-center">
-            <h1 className="text-3xl font-bold mb-2">مرحباً بك في Cogni</h1>
+            <h1 id="cogni-session-start-title" className="text-3xl font-bold mb-2">
+              مرحباً بك في Cogni
+            </h1>
             <p className="text-gray-300 text-sm max-w-xs">
               اضغط الزر أدناه لبدء الجلسة التعليمية مع أفاتارك الشخصي
             </p>
@@ -162,6 +172,7 @@ export default function ConversationManager({
           </div>
         </div>
       </div>
+      </BodyPortal>
     );
   }
 

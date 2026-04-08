@@ -12,6 +12,13 @@ Run from repository root (or anywhere) with PYTHONPATH pointing at backend::
     set PYTHONPATH=backend
     python backend/scripts/btec_ingest.py
 
+Override source folder (optional)::
+
+    set BTEC_INGEST_DATA_DIR=E:\\path\\to\\extra\\pdfs
+    python backend/scripts/btec_ingest.py
+
+Or pass ``--data-dir`` once per root; re-run to add another tree to the same Chroma collection.
+
 On Unix::
 
     PYTHONPATH=backend python backend/scripts/btec_ingest.py
@@ -32,6 +39,7 @@ import argparse
 import hashlib
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -41,6 +49,10 @@ from typing import Dict, Iterable, List, Tuple
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
+
+from sqlite_chroma_patch import apply_sqlite_chroma_patch
+
+apply_sqlite_chroma_patch()
 
 try:
     from dotenv import load_dotenv
@@ -53,6 +65,16 @@ logger = logging.getLogger("btec_ingest")
 _CHROMA_PERSIST_DIR = _BACKEND_ROOT / "data" / "chroma_cogni"
 _BTEC_DIR_DEFAULT = _BACKEND_ROOT / "data" / "btec-bus"
 _COLLECTION_NAME = "btec_knowledge_base"
+
+
+def _resolve_ingest_root(cli_path: Path | None) -> Path:
+    """CLI --data-dir wins; else BTEC_INGEST_DATA_DIR; else backend/data/btec-bus."""
+    if cli_path is not None:
+        return cli_path
+    env_dir = (os.getenv("BTEC_INGEST_DATA_DIR") or "").strip()
+    if env_dir:
+        return Path(env_dir)
+    return _BTEC_DIR_DEFAULT
 
 _EMBED_BATCH = 48
 _EMBED_MODEL = "text-embedding-3-small"
@@ -190,6 +212,39 @@ def _stable_chunk_id(source_rel: str, chunk_index: int) -> str:
     return f"btec_{h}_{chunk_index:05d}"
 
 
+# Match btec_chroma_rag.BTEC_CRITERION_CODE_RE (P1, M2, D3, A.P1, …)
+_CRITERION_IN_TEXT_RE = re.compile(
+    r"\b(?:[A-Za-z]\.|[0-9]\.)?([PpMmDd])(\d{1,2})\b",
+)
+
+
+def _unit_id_from_relative_path(rel: str) -> str:
+    if not rel:
+        return "unknown"
+    m = re.search(r"(?:unit|u)[_/\- ](\d+)", rel, re.I)
+    if m:
+        return f"unit_{m.group(1)}"
+    m2 = re.search(r"\bu(\d+)\b", rel, re.I)
+    if m2:
+        return f"unit_{m2.group(1)}"
+    return "unknown"
+
+
+def _criterion_level_from_text(text: str, filename: str = "") -> tuple[str, str]:
+    """Return (criterion_code, level) with level in Pass|Merit|Distinction or ""."""
+    for blob in (text[:8000], filename):
+        if not blob:
+            continue
+        m = _CRITERION_IN_TEXT_RE.search(blob)
+        if m:
+            pm = m.group(1).upper()
+            num = m.group(2)
+            code = f"{pm}{num}"
+            level = {"P": "Pass", "M": "Merit", "D": "Distinction"}.get(pm, "")
+            return code, level
+    return "", ""
+
+
 def _ingest_document_list(
     resolved_path: Path,
     btec_root: Path,
@@ -223,10 +278,15 @@ def _ingest_document_list(
         if not text:
             continue
         page_num = _page_number_for_chunk(ch.metadata or {})
+        unit_id = _unit_id_from_relative_path(rel)
+        crit, level = _criterion_level_from_text(text, resolved_path.name)
         meta = {
             "source_file": rel,
             "page_number": int(page_num),
             "chunk_index": int(logical_index),
+            "unit_id": unit_id,
+            "criterion_code": crit,
+            "level": level,
         }
         metadatas.append(meta)
         documents.append(text)
@@ -235,6 +295,21 @@ def _ingest_document_list(
 
     if not documents:
         return 0
+
+    _unique_ids = len(set(ids))
+    if _unique_ids != len(ids):
+        logger.warning(
+            "Source %s: duplicate chunk ids in batch (total=%d unique=%d) — check splitter / stable id logic",
+            rel,
+            len(ids),
+            _unique_ids,
+        )
+    logger.info(
+        "Ingest prepare %s: chunks=%d unique_ids=%d (replaces prior Chroma rows for this source_file)",
+        resolved_path.name,
+        len(documents),
+        _unique_ids,
+    )
 
     if dry_run:
         logger.info("[dry-run] Would ingest %s — chunks=%d", rel, len(documents))
@@ -261,9 +336,20 @@ def _ingest_document_list(
             embeddings=vectors,
         )
         total_added += len(batch_docs)
+        logger.debug(
+            "Chroma add batch: file=%s batch_size=%d cumulative_added=%d",
+            resolved_path.name,
+            len(batch_docs),
+            total_added,
+        )
         time.sleep(0.02)
 
-    logger.info("Processing: %s — chunks: %d", resolved_path.name, total_added)
+    logger.info(
+        "Processing: %s — chunks_added=%d unique_ids=%d",
+        resolved_path.name,
+        total_added,
+        len(set(ids)),
+    )
     return total_added
 
 
@@ -272,8 +358,8 @@ def main() -> int:
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=_BTEC_DIR_DEFAULT,
-        help="Root folder to scan (default: backend/data/btec-bus)",
+        default=None,
+        help="Root folder to scan (default: env BTEC_INGEST_DATA_DIR or backend/data/btec-bus)",
     )
     parser.add_argument(
         "--chroma-dir",
@@ -295,7 +381,7 @@ def main() -> int:
         logger.error("OPENAI_API_KEY is not set. Add it to .env or the environment.")
         return 1
 
-    btec_root = args.data_dir.resolve()
+    btec_root = _resolve_ingest_root(args.data_dir).resolve()
     if not btec_root.is_dir():
         logger.error("Data directory does not exist: %s", btec_root)
         return 1

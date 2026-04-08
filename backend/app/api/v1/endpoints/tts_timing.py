@@ -32,15 +32,21 @@ from collections import deque
 from threading import Lock
 from typing import Optional, List, Dict, Any, Tuple
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.api.deps import get_current_user, get_teacher_user
+from app.api.v1.dependencies.phase2_gates import gate_tts_user
 from app.core.config import settings
+from app.models.db_models import User
 from app.services.kokoro_tts import is_available, synthesize_with_timing
+from app.archive.dialect_corrector import maybe_correct_egyptian_for_tts
 from app.services.tts_service import (
     DEFAULT_EDGE_TTS_PROSODY as _DEFAULT_PROSODY,
     EDGE_TTS_EMOTION_PROSODY as _EMOTION_PROSODY,
     _locked_jordanian_male_voice,
+    _prepare_tts_text,
+    _xml_escape,
     is_azure_tts_auth_failure,
     synthesize_edge_tts_mp3,
 )
@@ -224,6 +230,36 @@ def _mp3_to_wav_ffmpeg(mp3_bytes: bytes) -> Optional[bytes]:
 
 router = APIRouter()
 
+# ── Lightweight counters for ops (GET /api/v1/tts-observability) ─────────────
+_OBS_LOCK = Lock()
+_tts_obs_counters: Dict[str, int] = {
+    "requests_total": 0,
+    "success_edge": 0,
+    "success_azure": 0,
+    "success_kokoro": 0,
+    "success_gtts": 0,
+    "errors_rate_limited": 0,
+}
+
+
+def _tts_obs_inc(key: str) -> None:
+    with _OBS_LOCK:
+        _tts_obs_counters[key] = _tts_obs_counters.get(key, 0) + 1
+
+
+@router.get("/tts-observability")
+async def tts_observability(_auth: User = Depends(get_current_user)):
+    """TTS path counters + Azure circuit state (no secrets). Poll for dashboards/alerts."""
+    with _OBS_LOCK:
+        snap = dict(_tts_obs_counters)
+    with _CB_LOCK:
+        cb = {
+            "failures": _cb_failures,
+            "open_until_monotonic": _cb_open_until,
+            "circuit_closed": _azure_cb_ok(),
+        }
+    return {"ok": True, "counters": snap, "azure_circuit": cb}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Azure Speech SDK — Priority 1: native WAV 24k + native viseme/word timings
@@ -254,12 +290,9 @@ _AZURE_EMOTION_PROSODY: Dict[str, tuple] = {
 }
 
 
-def _xml_escape_tts(s: str) -> str:
-    return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;').replace("'", '&apos;')
-
 
 def _render_tts_segment(kind: str, content: str) -> str:
-    safe = _xml_escape_tts(content)
+    safe = _xml_escape(content)
     if kind == 'ar':
         return safe
     if _RE_ACRONYM.match(content):
@@ -276,6 +309,11 @@ def _build_azure_ssml(text: str, voice: str, emotion: str = 'neutral') -> str:
     - Other English words rendered in en-GB phonetics
     - Sentence-boundary breath pauses (200-320 ms)
     """
+    cleaned, _slots = _prepare_tts_text((text or "").strip())
+    if not cleaned:
+        cleaned = "."
+    text = cleaned
+
     # Derive xml:lang from the voice name (e.g. ar-JO-TaimNeural → ar-JO)
     lang = "-".join(voice.split("-")[:2]) if "-" in voice else "ar-JO"
     styledegree, rate_pct, pitch = _AZURE_EMOTION_PROSODY.get(
@@ -308,9 +346,9 @@ def _build_azure_ssml(text: str, voice: str, emotion: str = 'neutral') -> str:
         is_q = bool(punct) and ('؟' in punct or '?' in punct)
         if inner:
             if is_q:
-                parts.append(f'<prosody pitch="+8%">{inner}{_xml_escape_tts(punct)}</prosody>')
+                parts.append(f'<prosody pitch="+8%">{inner}{_xml_escape(punct)}</prosody>')
             else:
-                parts.append(inner + (_xml_escape_tts(punct) if punct else ''))
+                parts.append(inner + (_xml_escape(punct) if punct else ''))
         if punct and i < len(tokens):
             pause_ms = 320 if ('.' in punct or '\n' in punct) else 200
             parts.append(f'<break time="{pause_ms}ms"/>')
@@ -480,6 +518,7 @@ async def _edge_mp3_to_tts_response(
                 _resp.audio_wav_base64, _resp.word_timings, _resp.viseme_events,
                 int((time.monotonic() - t_start) * 1000),
             )
+        _tts_obs_inc("success_edge")
         return _resp
     b64 = base64.b64encode(mp3_bytes).decode("ascii")
     ms = int((time.monotonic() - t_start) * 1000)
@@ -508,6 +547,7 @@ async def _edge_mp3_to_tts_response(
             _resp.audio_wav_base64, _resp.word_timings, _resp.viseme_events,
             int((time.monotonic() - t_start) * 1000),
         )
+    _tts_obs_inc("success_edge")
     return _resp
 
 
@@ -636,7 +676,7 @@ async def _synthesize_azure_chunked(
 
 # ── Circuit-breaker reset endpoint ───────────────────────────────────────────
 @router.post("/tts-reset-circuit")
-async def tts_reset_circuit():
+async def tts_reset_circuit(_auth: User = Depends(get_teacher_user)):
     """Reset the Azure TTS circuit breaker (useful after a transient failure)."""
     _azure_cb_record_success()
     return {"ok": True, "message": "Azure TTS circuit breaker reset"}
@@ -648,6 +688,7 @@ async def tts_with_timing(
     payload: TTSRequest,
     request: Request,
     background_tasks: BackgroundTasks,
+    user: User = Depends(gate_tts_user),
 ):
     """
     Synthesize text to speech with word-level timing and viseme events for lip-sync.
@@ -655,20 +696,22 @@ async def tts_with_timing(
     Priority: edge-tts (default) → Azure SDK → Kokoro → last-chance edge (auto) → gTTS (non-Arabic only)
 
     Hardening:
-      - Rate-limited: 3 req/s per IP
+      - Rate-limited: 3 req/s per authenticated user id (burst) + hourly cap in gate_tts_user
       - Texts > 800 chars are auto-chunked with merged timings
       - Azure circuit-breaker: opens after 3 consecutive failures, recovers after 60 s
       - Observability: structured log per request (latency, size, visemes, words, provider)
     """
     text = (payload.text or "").strip()
+    text = maybe_correct_egyptian_for_tts(text, context="tts_with_timing")
     if not text:
         raise HTTPException(status_code=400, detail="Empty text")
 
-    # ── Rate limit ────────────────────────────────────────────────────────────
-    client_ip = (request.client.host if request.client else "unknown")
-    if not _rate_limit_ok(client_ip):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded (3 req/s per client)")
+    # ── Burst rate limit (per user id; hourly quota enforced in gate_tts_user) ─
+    if not _rate_limit_ok(str(user.id)):
+        _tts_obs_inc("errors_rate_limited")
+        raise HTTPException(status_code=429, detail="Rate limit exceeded (3 req/s per user)")
 
+    _tts_obs_inc("requests_total")
     t_start = time.monotonic()
 
     # Resolve prosody from emotion (or use explicit pitch override)
@@ -754,6 +797,7 @@ async def tts_with_timing(
                     _resp.audio_wav_base64, _resp.word_timings, _resp.viseme_events,
                     int((time.monotonic() - t_start) * 1000),
                 )
+            _tts_obs_inc("success_azure")
             return _resp
         except Exception as e:
             _azure_cb_record_failure()
@@ -846,6 +890,7 @@ async def tts_with_timing(
                     _resp.audio_wav_base64, _resp.word_timings, _resp.viseme_events,
                     int((time.monotonic() - t_start) * 1000),
                 )
+            _tts_obs_inc("success_kokoro")
             return _resp
         logger.info("Kokoro returned None (Arabic text) — trying edge-tts again if allowed")
 
@@ -915,6 +960,7 @@ async def tts_with_timing(
                 _resp.audio_wav_base64, _resp.word_timings, _resp.viseme_events,
                 int((time.monotonic() - t_start) * 1000),
             )
+        _tts_obs_inc("success_gtts")
         return _resp
     b64 = base64.b64encode(mp3_bytes).decode("ascii")
     _obs_log("gtts", "mp3", "approx", len(mp3_bytes), len(word_timings), 0)
@@ -936,4 +982,5 @@ async def tts_with_timing(
             _resp.audio_wav_base64, _resp.word_timings, _resp.viseme_events,
             int((time.monotonic() - t_start) * 1000),
         )
+    _tts_obs_inc("success_gtts")
     return _resp

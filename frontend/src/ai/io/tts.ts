@@ -6,6 +6,7 @@
 import type { WordTiming } from '@/ai/lipsync/timing';
 import { azureVisemeToWeights } from '@/ai/lipsync/azureViseme';
 import { COGNI_PERSONA } from '@/config/personality';
+import { authHeaders } from '@/lib/auth';
 import { estimateSpeechDurationMs } from '@/utils/TimingUtils';
 
 export type { WordTiming };
@@ -65,6 +66,46 @@ export function resolveSpeakRate(emotion: string | undefined, personaRateMultipl
 
 let currentAudio: HTMLAudioElement | null = null;
 let currentUrl: string | null = null;
+
+// ─── PAD voice override (from AgentDirector avatar:voice events) ─────────────
+/** Current voice hint from avatar:voice; applied in next speakWithTTS call. */
+let _padVoiceRate:  number | null = null;
+let _padVoicePitch: string | null = null;
+
+/** Called once in app init to listen for avatar:voice directives. */
+export function initAvatarVoiceListener(): void {
+  if (typeof window === 'undefined') return;
+  window.addEventListener('avatar:voice', (e: Event) => {
+    const d = (e as CustomEvent<{ rate?: number; pitch?: number | string }>).detail;
+    if (typeof d?.rate === 'number' && Number.isFinite(d.rate)) {
+      _padVoiceRate = Math.max(0.75, Math.min(1.25, d.rate));
+    }
+    if (d?.pitch !== undefined) {
+      const p = d.pitch;
+      if (typeof p === 'string') _padVoicePitch = p;
+      else if (typeof p === 'number' && Number.isFinite(p)) {
+        // convert numeric PAD pitch (±scale) → Hz offset string
+        const hz = Math.round((p - 1) * 20);
+        _padVoicePitch = hz >= 0 ? `+${hz}Hz` : `${hz}Hz`;
+      }
+    }
+  });
+}
+
+/** Consume pending PAD overrides (called once per speakWithTTS invocation). */
+export function consumePadVoiceHint(): { rate?: number; pitch?: string } {
+  const out: { rate?: number; pitch?: string } = {};
+  if (_padVoiceRate  !== null) { out.rate  = _padVoiceRate;  _padVoiceRate  = null; }
+  if (_padVoicePitch !== null) { out.pitch = _padVoicePitch; _padVoicePitch = null; }
+  return out;
+}
+
+/** Optional: browser Azure Speech SDK path (`useTTSWithVisemes`) — stopped with global TTS interrupt. */
+let _stopAzureClientTTS: (() => void) | null = null;
+
+export function registerAzureClientTTSStop(fn: (() => void) | null): void {
+  _stopAzureClientTTS = fn;
+}
 /** Monotonically-increasing session ID — guards against concurrent speakWithTTS calls. */
 let _ttsSessionId = 0;
 /** Pending viseme setTimeout IDs — cleared on interrupt. */
@@ -191,6 +232,11 @@ function pcmBytesToWavBlob(pcmBytes: Uint8Array, sampleRate: number): Blob {
  */
 export function stopTTS(): void {
   _clientTtsPlaying = false;
+  try {
+    _stopAzureClientTTS?.();
+  } catch {
+    /* */
+  }
   // Cancel pending viseme events
   while (_visemeTimers.length) clearTimeout(_visemeTimers.pop()!);
   if (typeof window !== 'undefined') {
@@ -234,30 +280,30 @@ export async function speakWithTTS(
   try {
     // FIX: voice stability — blend emotion speed with Cogni persona rate/pitch consistently
     const personaRate = COGNI_PERSONA.voiceParameters.rate;
-    const emotionKey = options?.emotion ?? 'neutral';
+    const emotionKey  = options?.emotion ?? 'neutral';
+    // Consume any PAD-driven voice hint emitted by AgentDirector via avatar:voice
+    const padHint     = consumePadVoiceHint();
     const blendedSpeed =
-      options?.rate ?? resolveSpeakRate(emotionKey, personaRate);
+      options?.rate ?? padHint.rate ?? resolveSpeakRate(emotionKey, personaRate);
     const defaultPitchFromPersona =
       COGNI_PERSONA.voiceParameters.pitchScale > 1.005
         ? `+${Math.round((COGNI_PERSONA.voiceParameters.pitchScale - 1) * 45)}Hz`
         : undefined;
+    const resolvedPitch =
+      options?.pitch ?? padHint.pitch ?? defaultPitchFromPersona;
 
     const ttsBody = JSON.stringify({
       text,
       speed: blendedSpeed,
       emotion: emotionKey,
-      ...(options?.pitch
-        ? { pitch: options.pitch }
-        : defaultPitchFromPersona
-          ? { pitch: defaultPitchFromPersona }
-          : {}),
+      ...(resolvedPitch ? { pitch: resolvedPitch } : {}),
       ar_voice: options?.arVoice ?? (_ARABIC_RE.test(text) ? 'male' : undefined),
     });
 
     const doTtsFetch = () =>
       fetch('/api/tts-with-timing', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: ttsBody,
       });
 

@@ -1,9 +1,9 @@
-﻿'use client';
+'use client';
 /**
  * RoomShell.tsx â€” Three walls (back, left, right) + floor.
  *
  * Coordinate system (matches AvatarCanvas):
- *   Y-up, camera at zâ‰ˆ+3.2 looking toward -z.
+ *   Y-up, camera ~z=-2.5 looks toward +Z (typical VRM faces +Z).
  *   Floor at y = floorY (-1.0 by default = AVATAR_BASE_Y).
  *
  * Props:
@@ -249,7 +249,7 @@ export function getDefaultStandXZ(bounds: RoomBounds = ROOM_BOUNDS): { x: number
   };
 }
 
-/** Camera default Z (camera looks toward âˆ’Z from here). */
+/** @deprecated غير مستخدم في المشهد الحالي — موضع الكاميرا الفعلي في `AvatarCanvas` (`CAMERA_POS_Z` ≈ −2.5). */
 export function getCameraPosZ(bounds: RoomBounds = ROOM_BOUNDS): number {
   return bounds.maxZ;
 }

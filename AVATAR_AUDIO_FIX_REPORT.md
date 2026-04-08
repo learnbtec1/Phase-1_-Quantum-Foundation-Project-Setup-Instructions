@@ -29,7 +29,7 @@
 | Check | Result | Detail |
 |-------|--------|--------|
 | Health endpoint `/api/health` | ✅ PASS | `ok=True, env=True, audio=False, reach=True` |
-| Root endpoint | ✅ PASS | `{"status":"Online","engine":"NEXUS Forensic Engine v4.0 (gpt-4o)"}` |
+| Root endpoint | ✅ PASS | `{"status":"Online","engine":"EDUVERSE Forensic Engine v4.0 (gpt-4o)"}` |
 | Azure TTS circuit-breaker | ✅ PASS | provider=azure in TTS smoke (circuit open → success path) |
 | Rate limiter | ✅ PASS | 3 concurrent OK + 2× 429 (per uvicorn access log) |
 | gTTS timeout hardening | ✅ PASS | `asyncio.wait_for(loop.run_in_executor(...), timeout=20.0)` |

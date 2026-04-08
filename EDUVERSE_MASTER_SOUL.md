@@ -46,9 +46,9 @@
 | Frontend port | **3000** | ثابت في `package.json` و `docker-compose.yml` |
 | Backend port | **8000** | FastAPI — لا تغيّر |
 | TTS Voice | `ar-JO-OmarNeural` | صوت ذكري أردني رسمي |
-| localStorage: auth | `nexus-auth` | **لا تغيّر** — يكسر جلسات المستخدمين |
-| localStorage: assessments | `nexus-assessments` | **لا تغيّر** |
-| localStorage: VR | `nexus-vr` | **لا تغيّر** |
+| localStorage: auth | `eduverse-auth` | **لا تغيّر** — يكسر جلسات المستخدمين |
+| localStorage: assessments | `eduverse-assessments` | **لا تغيّر** |
+| localStorage: VR | `eduverse-vr` | **لا تغيّر** |
 | localStorage: progress | `btec_platform_progress` | **لا تغيّر** |
 | VR evidence count | **4** | مُرمَّز في `hooks/useVR.ts` |
 | `v.update(delta)` | قبل bone rotation دائماً | Three.js / VRM rule |
@@ -64,7 +64,7 @@
 │   ├── :3000          dev server (npm run dev)
 │   ├── /avatar-agent  نافذة كوجني الرئيسية (AvatarAgentClient.tsx)
 │   ├── R3F + Three.js  بيئة الأفاتار ثلاثي الأبعاد
-│   └── Zustand        إدارة الحالة (nexus-auth, nexus-assessments, nexus-vr)
+│   └── Zustand        إدارة الحالة (eduverse-auth, eduverse-assessments, eduverse-vr)
 │
 ├── Backend            FastAPI (Python 3.10+)
 │   ├── :8000          WS: ws://localhost:8000/ws/agent
@@ -305,7 +305,7 @@ curl http://127.0.0.1:8000/          # {"status":"Online","engine":"GPT-4o Foren
 
 | المشكلة | السبب | الحل |
 |---------|-------|------|
-| `localStorage` يُفقَد | تغيير أسماء المفاتيح | لا تغيّر: `nexus-auth`, `nexus-assessments`, `nexus-vr`, `btec_platform_progress` |
+| `localStorage` يُفقَد | تغيير أسماء المفاتيح | لا تغيّر: `eduverse-auth`, `eduverse-assessments`, `eduverse-vr`, `btec_platform_progress` |
 | خطأ hydration | نسيان `'use client'` | أضفها لكل component يستخدم hooks |
 | خطأ import | مسار `hooks/` الخاطئ | الجذر، ليس `src/hooks/` |
 | CORS error | الأصل غير مسموح | تحقق من `backend/app/main.py` — origins تتضمن `:3000` |

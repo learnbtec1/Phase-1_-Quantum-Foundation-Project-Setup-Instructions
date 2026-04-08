@@ -1,4 +1,4 @@
-# TROUBLESHOOTING — NEXUS Avatar Agent
+# TROUBLESHOOTING — EDUVERSE Avatar Agent
 
 > Covers `/avatar-agent` and the `/ws/agent` WebSocket backend.  
 > `/evaluate` and `/assessment` are intentionally **not** touched by this system.
@@ -157,7 +157,7 @@ __avatarDebug.testLaugh()    // should see shoulder bounce + happy face
 
 **A. Events not being dispatched from the agent**  
 `director.ts` dispatches these. Check if `directFromAgentFrame` is being called from  
-`useAvatarAgent.ts` (line 326).
+`useAgentAgent.ts` (viseme / server TTS path).
 
 **B. Timer already expired**  
 Walk/nod/laugh use `Date.now()` timestamps. If the event was dispatched in the past, the  
@@ -172,7 +172,7 @@ Walk body bounce still plays regardless.
 ## 6. No TTS / Voice Output
 
 ### Symptoms
-- `useAvatarAgent` receives `tts_unavailable` frames
+- `useAgentAgent` receives `tts_unavailable` frames
 - Avatar moves mouth (Web Speech API fallback active) but no natural voice
 
 ### Causes & Fixes
@@ -223,9 +223,9 @@ All project types live in `types/index.ts` at **repository root** (not `src/`).
 Import using a relative path: `import type { Assessment } from '../../types'`  
 or adjust `tsconfig.json` paths accordingly.
 
-### `useAvatarAgent is not a function`
-Ensure the import is: `import { useAvatarAgent } from '@/hooks/useAvatarAgent'`  
-Do NOT import from `hooks/useAvatarAgent` without the `@/` prefix (it won't resolve in `src/`).
+### `useAgentAgent` import
+Ensure the import is: `import { useAgentAgent } from '@/hooks/useAgentAgent'`  
+Use the `@/` path alias from `src/` (same pattern as other hooks).
 
 ---
 
@@ -258,7 +258,7 @@ frontend/src/
 │   ├── AvatarCanvas.module.css ← loading/error overlay styles
 │   └── page.tsx
 ├── hooks/
-│   └── useAvatarAgent.ts       ← WebSocket client, calls directFromAgentFrame()
+│   └── useAgentAgent.ts        ← WebSocket client, drives avatar + TTS
 ├── ai/
 │   ├── avatar/
 │   │   ├── director.ts         ← orchestrates emotion/gesture/prosody dispatch

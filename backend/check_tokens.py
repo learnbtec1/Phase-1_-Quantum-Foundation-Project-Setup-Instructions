@@ -24,7 +24,7 @@ def extract_full(path):
 brief   = extract_full(r"D:\OneDrive\Desktop\Marj Alhamam secondary..ID 96294 -L3-Y2\Official Assessment  BUS - L3 - Y2 U14 - Part 1\Official Assessment  BUS - L3 - Y2 U14 - Part 1\L3 BUS U14 AAB Learning Aim AB V02 Jun-24 (Arabic).docx")
 student = extract_full(r"D:\OneDrive\Desktop\Marj Alhamam secondary..ID 96294 -L3-Y2\ALL\AMIR ALHERBAWI\خدمه عملاء تعديل2.docx")
 
-from app.services.forensic_engine import extract_relevant_excerpt, sample_document
+from app.archive.forensic_engine import extract_relevant_excerpt, sample_document
 
 # Test excerpt size
 excerpt = extract_relevant_excerpt(student, "خدمة العملاء PESTLE", max_chars=14000)

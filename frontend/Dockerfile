@@ -15,6 +15,8 @@ ENV NODE_ENV=development
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+# deps استخدمت ignore-scripts — ننسخ حزمة Speech للمتصفح قبل البناء (Turbopack يخدمها من public/vendor)
+RUN node scripts/copy-azure-speech-browser-bundle.mjs
 RUN npm run build
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -38,6 +40,8 @@ WORKDIR /app
 ENV NODE_ENV=development
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY package*.json ./
+# postinstall يشغّل scripts/copy-azure-speech-browser-bundle.mjs — يجب وجود المجلد قبل npm install
+COPY scripts ./scripts
 RUN npm install
 EXPOSE 3000
 CMD ["npm","run","dev","--","-H","0.0.0.0","-p","3000"]

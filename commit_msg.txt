@@ -1,6 +1,6 @@
 feat: complete grade-to-avatar bridge + voice fix + smart proactive prompt [2026-03-18]
 
-- _consumeLastGrade(): reads and removes nexus-last-grade one-shot
+- _consumeLastGrade(): reads and removes eduverse-last-grade one-shot
 - sendText() attaches grade_result to WS payload after assessment return
 - Smart PROACTIVE_PROMPT: grade debrief in Jordanian Arabic if grade exists
 - TTS_VOICE fixed: ar-JO-TaimNeural (was ar-JO-SanaNeural)

@@ -143,8 +143,8 @@ export default function ComfortLightingRig({ emotion = 'neutral' }: ComfortLight
         decay={2}
       />
 
-      {/* ── PBR env map */}
-      <Environment preset="city" background={false} environmentIntensity={0.50} />
+      {/* ── PBR env map (HDR) — visible on materials; AvatarCanvas لا يكرّر Environment */}
+      <Environment preset="city" background={false} environmentIntensity={0.72} />
     </>
   );
 }

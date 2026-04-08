@@ -913,7 +913,7 @@ export default function MarketingSimulation() {
         <div className="flex flex-col md:flex-row justify-between items-center gap-4">
           <div>
             <h1 className="text-4xl md:text-5xl font-black mb-2 text-gradient">
-              NEXUS-EDU
+              EDUVERSE
             </h1>
             <p className="text-gray-400">الغرفة الافتراضية للتسويق الاستراتيجي - BTEC المستوى 2</p>
           </div>
@@ -984,7 +984,7 @@ export default function MarketingSimulation() {
 
       {/* تذييل الصفحة */}
       <div className="max-w-7xl mx-auto mt-12 pt-6 border-t border-gray-800 text-center text-gray-500 text-sm">
-        <p>© 2024 NEXUS-EDU - نظام محاكاة BTEC المستوى 2 | وحدة 4: خطة التسويق</p>
+        <p>© 2024 EDUVERSE - نظام محاكاة BTEC المستوى 2 | وحدة 4: خطة التسويق</p>
         <p className="mt-2">تم تصميم هذا النظام لفهم عميق لمعايير التقييم من خلال تجربة تفاعلية غامرة</p>
       </div>
     </div>

@@ -1,39 +1,57 @@
 /**
- * جسر محادثة المعلم — يوجّه الطلبات إلى الباكند (FastAPI) حيث يُستخدم مفتاح OpenAI دون كشفه في الواجهة.
+ * جسر محادثة المعلم — يوجّه الطلبات إلى الباكند (FastAPI).
+ * Requires Authorization: Bearer (validated by Python API).
  */
-import { NextRequest, NextResponse } from "next/server";
-
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
+import { NextRequest, NextResponse } from 'next/server';
+import { backendBaseUrl } from '@/lib/server/bffAuth';
+import {
+  extractUpstreamDetail,
+  requireIncomingBearer,
+  resolveUpstreamErrorStatus,
+} from '@/lib/server/bffProxy';
 
 export async function POST(req: NextRequest) {
+  const bearer = requireIncomingBearer(req);
+  if (!bearer.ok) return bearer.response;
+
   try {
     const body = await req.json();
     const { message, context = {} } = body;
-    if (!message || typeof message !== "string" || message.trim() === "") {
+    if (!message || typeof message !== 'string' || message.trim() === '') {
       return NextResponse.json(
-        { error: "message is required and must be non-empty" },
-        { status: 400 }
+        { error: 'message is required and must be non-empty' },
+        { status: 400 },
       );
     }
-    const res = await fetch(`${BACKEND_URL}/api/v1/tutor/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+    const base = backendBaseUrl();
+    const res = await fetch(`${base}/api/v1/tutor/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: bearer.authHeader,
+      },
       body: JSON.stringify({ message: message.trim(), context }),
     });
     if (!res.ok) {
-      const err = await res.text();
+      const text = await res.text().catch(() => '');
+      const detail = extractUpstreamDetail(text);
       return NextResponse.json(
-        { error: err || "Tutor request failed" },
-        { status: res.status }
+        { error: 'Tutor request failed', detail },
+        { status: resolveUpstreamErrorStatus(res.status) },
       );
     }
-    const data = await res.json();
-    return NextResponse.json({ response: data.response ?? "" });
-  } catch (e: any) {
-    console.error("Tutor chat bridge error:", e);
+    const data = (await res.json().catch(() => ({}))) as { response?: string };
+    return NextResponse.json({ response: data.response ?? '' });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : 'Server error';
+    console.error('Tutor chat bridge error:', e);
     return NextResponse.json(
-      { error: e?.message || "Server error" },
-      { status: 500 }
+      { error: truncateForClient(message) },
+      { status: 500 },
     );
   }
+}
+
+function truncateForClient(s: string, max = 300): string {
+  return s.length <= max ? s : `${s.slice(0, max)}…`;
 }

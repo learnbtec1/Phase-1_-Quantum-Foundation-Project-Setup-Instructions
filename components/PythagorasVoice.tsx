@@ -120,7 +120,7 @@ export default function PythagorasVoiceInterface() {
           initial={{ y: 100, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
           transition={{ duration: 1, type: "spring" }}
-          className="glass-nexus w-full max-w-4xl p-8 rounded-[3rem] border border-white/10 shadow-[0_-10px_40px_rgba(6,182,212,0.1)] backdrop-blur-xl bg-black/60 relative overflow-hidden"
+          className="glass-eduverse w-full max-w-4xl p-8 rounded-[3rem] border border-white/10 shadow-[0_-10px_40px_rgba(6,182,212,0.1)] backdrop-blur-xl bg-black/60 relative overflow-hidden"
         >
           {/* شريط التحميل الهولوغرافي */}
           {loading && (

@@ -40,7 +40,7 @@ from enum import Enum
 # Logging
 # --------------------------------------------------------------------------- #
 
-logger = logging.getLogger("nexus.audit")
+logger = logging.getLogger("eduverse.audit")
 
 # --------------------------------------------------------------------------- #
 # Defaults & Config
@@ -51,7 +51,7 @@ _DEFAULT_AUDIT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data",
 
 # متغيرات البيئة
 SCHEMA_VERSION      = "1.1"
-APP_VERSION         = os.environ.get("NEXUS_APP_VERSION", "unknown")
+APP_VERSION         = os.environ.get("EDUVERSE_APP_VERSION", "unknown")
 AUDIT_DIR           = os.environ.get("AUDIT_LOG_DIR") or _DEFAULT_AUDIT_DIR
 MAX_FIELD_CHARS     = int(os.environ.get("AUDIT_MAX_FIELD_CHARS", "700"))
 ALLOW_COT           = os.environ.get("AUDIT_ALLOW_COT", "0") == "1"   # افتراضيًا: لا نخزن CoT

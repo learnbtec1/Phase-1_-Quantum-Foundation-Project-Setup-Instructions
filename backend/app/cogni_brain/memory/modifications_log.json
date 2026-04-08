@@ -1,0 +1,10 @@
+{
+  "cursor.models": [
+    {
+      "title": "Claude 3.5 Sonnet",
+      "provider": "openrouter",
+      "model": "anthropic/claude-3.5-sonnet",
+      "apiKey": "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"
+    }
+  ]
+}

@@ -9,12 +9,16 @@ import asyncio
 import re
 import logging
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.api.v1.dependencies.phase2_gates import gate_llm_http_user
+from app.models.db_models import User
+
 from app.api.v1.endpoints.tutor import _get_cogni_response as _get_dr_hamza_response
-from app.services.emotional_memory_manager import EmotionalMemoryManager
-from app.services.forensic_engine import forensic_grade
+from app.archive.emotional_memory_manager import EmotionalMemoryManager
+from app.services.user_intent_classify import classify_user_intent as _classify_intent
+from app.archive.forensic_engine import forensic_grade
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -64,7 +68,7 @@ class EvaluationRequest(BaseModel):
 
 class EvaluationSpeakResponse(BaseModel):
     status      : str   # "success" | "error"
-    raw_nexus   : dict  # نتيجة محرك NEXUS الخام
+    raw_eduverse   : dict  # نتيجة محرك EDUVERSE الخام
     cogni_reply : str   # الرد الثلاثي الأجزاء (كوجني)
     dialogue    : str   # النص المنطوق فقط
     action      : str   # الحركة فقط (بدون نجوم)
@@ -111,35 +115,10 @@ def get_distinction_roadmap(unit_id: str) -> list[str]:
     ]
 
 
-# ── Intent classifier (local, zero-cost) ─────────────────────────────────────
-
-_INTENT_RULES: list[tuple[re.Pattern, str]] = [
-    (re.compile(r'\b(btec|p[123]|m[123]|d[123]|distinction|merit|pass|lo\d|criteria|criterion|unit\s*\d)\b', re.I), 'btec_question'),
-    (re.compile(r'\b(\u0645\u0639\u064a\u0627\u0631|\u0645\u0639\u0627\u064a\u064a\u0631|\u062a\u0645\u064a\u064a\u0632|\u062c\u062f\u0627\u0631\u0629|\u0646\u062c\u0627\u062d|\u0648\u062d\u062f\u0629|\u0628\u064a\u062a\u064a\u0633\u064a|\u062a\u0643\u0644\u064a\u0641)\b', re.I), 'btec_question'),
-    (re.compile(r'\b(\u0644\u0645\u0627\u0630\u0627|\u0643\u064a\u0641|\u0645\u0627 \u0647\u0648|\u0645\u0627 \u0647\u064a|\u0627\u0634\u0631\u062d|what|why|how|when|who|explain|define)\b', re.I), 'general_question'),
-    (re.compile(r'\b(\u0627\u0631\u064a\u062f|\u0623\u0631\u064a\u062f|\u0645\u0645\u0643\u0646|please|\u0628\u062f\u064a|\u0633\u0627\u0639\u062f\u0646\u064a|\u0623\u062d\u062a\u0627\u062c|help me|can you|give me)\b', re.I), 'request'),
-    (re.compile(r'\b(\u0645\u0634 \u0641\u0627\u0647\u0645|\u0645\u0627 \u0641\u0647\u0645\u062a|confused|lost|\u0644\u0627 \u0623\u0641\u0647\u0645|\u0634\u0648 \u064a\u0639\u0646\u064a|i don.t get)\b', re.I), 'confusion'),
-    (re.compile(r'\b(\u0634\u0643\u0631|\u064a\u0633\u0644\u0645\u0648\u0627|\u064a\u0633\u0644\u0645|thanks|thank you|\u0645\u0645\u062a\u0627\u0632|\u0628\u0631\u0627\u0641\u0648|\u0631\u0627\u0626\u0639|awesome)\b', re.I), 'gratitude'),
-    (re.compile(r'\b(\u0645\u0631\u062d\u0628\u0627|\u0623\u0647\u0644\u0627|hi|hello|hey|\u0643\u064a\u0641\u0643|\u0634\u0648 \u0627\u062e\u0628\u0627\u0631\u0643)\b', re.I), 'greeting'),
-    (re.compile(r'\b(\u0645\u0639 \u0627\u0644\u0633\u0644\u0627\u0645\u0629|\u0628\u0627\u064a|bye|goodbye|\u064a\u0644\u0627 \u0648\u062f\u0627\u0639)\b', re.I), 'farewell'),
-]
-
-_DISTINCTION_RE = re.compile(
-    r'\b(distinction|تميز|امتياز|مميز|d\d+|وحدة\s*\d+|unit\s*\d+)\b', re.I | re.UNICODE
-)
-
 def _extract_unit_id(text: str) -> str:
     """Extract unit identifier from message text (e.g. 'unit1', 'unit3', 'وحدة 3')."""
     m = re.search(r'\b(?:unit|وحدة)\s*(\d+)\b', text, re.I | re.UNICODE)
     return f"unit{m.group(1)}" if m else "unknown"
-
-def _classify_intent(text: str) -> str:
-    if _DISTINCTION_RE.search(text):
-        return 'distinction_request'
-    for pattern, intent in _INTENT_RULES:
-        if pattern.search(text):
-            return intent
-    return 'idle'
 
 
 # ── Emotion fallback keywords ─────────────────────────────────────────────────
@@ -218,11 +197,11 @@ def _parse_reply(text: str) -> dict:
     return {'dialogue': dialogue, 'action': action, 'emotion': emotion}
 
 
-# ── Verona Bridge: NEXUS → 3-part reply ────────────────────────────────────────
+# ── Verona Bridge: EDUVERSE → 3-part reply ────────────────────────────────────────
 
-def format_cogni_evaluation(nexus_data: dict) -> str:
+def format_cogni_evaluation(eduverse_data: dict) -> str:
     """
-    محوّل بيانات محرك NEXUS إلى رد كوجني الثلاثي الأجزاء.
+    محوّل بيانات محرك EDUVERSE إلى رد كوجني الثلاثي الأجزاء.
     جدول الخمسة صفوف (بترتيب الأولوية):
       1. DISTINCTION أو longitudinal_improvement  → celebrate
       2. confidence < 0.7                         → thinking
@@ -230,13 +209,13 @@ def format_cogni_evaluation(nexus_data: dict) -> str:
       4. REFER أو FAIL                            → encouraging
       5. افتراضي                                  → neutral
     """
-    final_grade  = str(nexus_data.get("final_grade", "")).upper()
-    is_improved  = bool(nexus_data.get("longitudinal_improvement", False))
-    confidence   = float(nexus_data.get("confidence", 1.0))
+    final_grade  = str(eduverse_data.get("final_grade", "")).upper()
+    is_improved  = bool(eduverse_data.get("longitudinal_improvement", False))
+    confidence   = float(eduverse_data.get("confidence", 1.0))
 
     reasoning = (
-        nexus_data.get("reasoning")
-        or nexus_data.get("summary")
+        eduverse_data.get("reasoning")
+        or eduverse_data.get("summary")
         or "لم يتم العثور على تبرير محدد."
     )
 
@@ -276,7 +255,10 @@ def format_cogni_evaluation(nexus_data: dict) -> str:
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
 @router.post("/chat", response_model=SimpleChatResponse)
-async def chat_simple(body: SimpleChatRequest):
+async def chat_simple(
+    body: SimpleChatRequest,
+    _user: User = Depends(gate_llm_http_user),
+):
     """
     Dr. Hamza V200 -- returns structured { reply, dialogue, action, emotion, intent }
     so the avatar system can independently drive gestures and blendshapes.
@@ -289,6 +271,7 @@ async def chat_simple(body: SimpleChatRequest):
     context: dict = {"history": history_list[-6:]}   # last 3 exchanges
 
     _cid = (body.client_id or "default").strip() or "default"
+    _episodic_key = f"http_chat:{_cid}"
     _mm = _http_emotional_memory(_cid)
     try:
         _lt = _mm.get_last_of_type("internal_thought")
@@ -302,6 +285,17 @@ async def chat_simple(body: SimpleChatRequest):
             context["active_lesson_plan"] = str(_ap).strip()[:8000]
     except Exception as _e:
         logger.debug("[chat] active_lesson_plan skipped: %s", _e)
+
+    try:
+        from app.archive.emotional_memory import retrieve_for_prompt
+
+        _eq = body.message.strip()[:2000]
+        if _eq:
+            _mem = retrieve_for_prompt(_episodic_key, _eq, k=4)
+            if _mem:
+                context["episodic_memory"] = _mem
+    except Exception as _mem_exc:
+        logger.debug("[chat] episodic retrieve skipped: %s", _mem_exc)
 
     # Inject secret distinction roadmap when intent matches
     message_with_context = body.message
@@ -348,6 +342,18 @@ async def chat_simple(body: SimpleChatRequest):
             )
         except Exception:
             pass
+        try:
+            from app.archive.emotional_memory import add_episode
+
+            add_episode(
+                _episodic_key,
+                body.message[:800],
+                parsed["dialogue"][:800],
+                parsed.get("emotion", "neutral"),
+                user_mood="neutral",
+            )
+        except Exception as _add_exc:
+            logger.debug("[chat] episodic add skipped: %s", _add_exc)
         return SimpleChatResponse(
             reply    = reply_text,
             dialogue = parsed['dialogue'],
@@ -387,9 +393,12 @@ async def chat_simple(body: SimpleChatRequest):
 
 
 @router.post("/evaluate-and-speak", response_model=EvaluationSpeakResponse)
-async def evaluate_and_speak(payload: EvaluationRequest):
+async def evaluate_and_speak(
+    payload: EvaluationRequest,
+    _user: User = Depends(gate_llm_http_user),
+):
     """
-    يشغّل محرك NEXUS للتحقيق الجنائي في إجابة الطالب ثم يُحوّل النتيجة
+    يشغّل محرك EDUVERSE للتحقيق الجنائي في إجابة الطالب ثم يُحوّل النتيجة
     إلى رد كوجني الثلاثي الأجزاء (حوار | حركة | وسم عاطفة).
 
     POST /api/v1/evaluate-and-speak
@@ -402,20 +411,20 @@ async def evaluate_and_speak(payload: EvaluationRequest):
         )
 
     try:
-        # 1. تشغيل محرك NEXUS الجنائي (30s timeout)
-        nexus_result = await asyncio.wait_for(
+        # 1. تشغيل محرك EDUVERSE الجنائي (30s timeout)
+        eduverse_result = await asyncio.wait_for(
             forensic_grade(payload.assignment, payload.submission), timeout=30.0
         )
 
-        # 2. تحويل نتائج NEXUS إلى رد كوجني الثلاثي
-        cogni_reply = format_cogni_evaluation(nexus_result)
+        # 2. تحويل نتائج EDUVERSE إلى رد كوجني الثلاثي
+        cogni_reply = format_cogni_evaluation(eduverse_result)
 
         # 3. تحليل الرد للواجهة الأمامية
         parsed = _parse_reply(cogni_reply)
 
         return EvaluationSpeakResponse(
             status      = "success",
-            raw_nexus   = nexus_result,
+            raw_eduverse   = eduverse_result,
             cogni_reply = cogni_reply,
             dialogue    = parsed["dialogue"],
             action      = parsed["action"],

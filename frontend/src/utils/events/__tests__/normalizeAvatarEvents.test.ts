@@ -45,6 +45,11 @@ describe('normalizeAvatarEvent — gesture', () => {
     expect((out as { type: string }).type).toBe('wave');
   });
 
+  it('preserves procedural explain (was incorrectly mapped to idle)', () => {
+    const out = normalizeAvatarEvent({ type: 'explain', duration: 3 });
+    expect((out as { type: string }).type).toBe('explain');
+  });
+
   it('fills in defaults for side, duration, intensity, preroll', () => {
     const out = normalizeAvatarEvent({ type: 'openHand' }) as {
       side: string; duration: number; intensity: number; preroll: number;

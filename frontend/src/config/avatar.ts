@@ -8,15 +8,64 @@
  * Feature flags — all default OFF so experimental code is never active in prod.
  */
 
+/** Office GLB under `public/models/office/` — must be a browser-safe URL, never a Windows path. */
+export const OFFICE_GLB_PUBLIC_PATH = '/models/office/office_lite.glb' as const;
+
+/**
+ * Default placement for `office_lite.glb` + VRM in `AvatarCanvas` (metres, Y-up).
+ * Office is scaled (~0.52); avatar Y is lowered so the figure stands on the room floor
+ * (not on the desk mesh), and +Z moves them into the room volume behind the desk
+ * (camera sits on −Z looking toward +Z).
+ *
+ * Override fine-tuning with `NEXT_PUBLIC_AVATAR_STAND_Y_OFFSET` (added to avatar Y).
+ */
+export const AVATAR_OFFICE_SCENE_DEFAULTS = {
+  officePosition: [0, 0, 0.42] as [number, number, number],
+  officeScale: 0.52,
+  avatarPosition: [0, -0.14, 0.26] as [number, number, number],
+  avatarScale: 0.88,
+  cameraPosition: [0, 1.34, -2.62] as [number, number, number],
+  orbitTarget: [0, 1.18, 0.2] as [number, number, number],
+} as const;
+
+/**
+ * Browsers can only load `http(s):`, site-relative `/...`, or same-origin relative paths.
+ * Reject `E:\\...`, `file://`, etc. (they break WebGL loaders and show a black canvas).
+ */
+export function normalizePublicModelUrl(url: string, fallback: string): string {
+  const u = (url || '').trim();
+  if (!u) return fallback;
+  if (/^https?:\/\//i.test(u)) return u;
+  if (/^[a-zA-Z]:[\\/]/.test(u) || /^file:/i.test(u)) {
+    if (typeof console !== 'undefined' && process.env.NODE_ENV === 'development') {
+      console.warn(
+        '[avatar] Ignoring invalid model URL (browsers cannot load local file paths). Use a path under public/, e.g. /models/.... Got:',
+        u,
+      );
+    }
+    return fallback;
+  }
+  const posix = u.replace(/\\/g, '/');
+  if (posix.startsWith('/')) return posix;
+  return `/${posix}`;
+}
+
 // ── VRM URL chain ─────────────────────────────────────────────────────────────
+const _envVrm = (
+  typeof process !== 'undefined' && process.env.NEXT_PUBLIC_AVATAR_VRM_URL?.trim()
+    ? normalizePublicModelUrl(process.env.NEXT_PUBLIC_AVATAR_VRM_URL.trim(), '')
+    : ''
+);
+
+/** Tried in order after `pickVrmUrl()` inside AvatarCanvas (deduped). */
 export const VRM_FALLBACKS: readonly string[] = [
-  ...(
-    typeof process !== 'undefined' &&
-    process.env.NEXT_PUBLIC_AVATAR_VRM_URL?.trim()
-      ? [process.env.NEXT_PUBLIC_AVATAR_VRM_URL.trim()]
-      : []
-  ),
-  '/models/cogni_final.vrm',   // T-pose rig — physical filename avoids stale cogni.vrm cache
+  ...(_envVrm ? [_envVrm] : []),
+  '/models/cogni_final.vrm',
+  '/models/cogni.vrm',
+  '/models/teach.vrm',
+  '/models/teacher-final.vrm',
+  '/models/cogni-avatar.vrm',
+  '/models/teacher.vrm',
 ];
 
 /** Returns the primary VRM URL. All components must call this — never hardcode paths. */
@@ -25,7 +74,10 @@ export function pickVrmUrl(): string {
     typeof process !== 'undefined' &&
     process.env.NEXT_PUBLIC_AVATAR_VRM_URL?.trim()
   ) {
-    return process.env.NEXT_PUBLIC_AVATAR_VRM_URL.trim();
+    return normalizePublicModelUrl(
+      process.env.NEXT_PUBLIC_AVATAR_VRM_URL.trim(),
+      '/models/cogni_final.vrm',
+    );
   }
   return '/models/cogni_final.vrm';
 }
@@ -55,6 +107,57 @@ export const USE_VISEME_PREDICT =
 export const ENABLE_MIME_MODE: boolean =
   typeof process !== 'undefined' &&
   process.env.NEXT_PUBLIC_MIME_MODE === 'true';
+
+/**
+ * طبقة الحركة الإجرائية في `AvatarCanvas` / `VRMSkeletonManager`: تنفّس، ميل رقبة/رأس، إيماءات idle للذراعين، نظر سكادي.
+ */
+export const ENABLE_PROCEDURAL_LIFE = true as boolean;
+
+/** Root Y rotation (rad) so the avatar faces the camera — π if the model exports facing +Z. */
+export const FORWARD_ROTATION_Y = Math.PI;
+
+/** Ignore duplicate WS speech audio starts within this window (ms) — reduces echo from double dispatch. */
+export const AUDIO_DEDUP_WINDOW_MS = 300 as const;
+
+/** World-space vertical breathe amplitude (m) — used by `VRMSkeletonManager` (+ optional Canvas tuning). */
+export const BREATHING_AMPLITUDE = 0.004;
+/** Breathe phase speed (rad/s along time `t`). */
+export const BREATHING_SPEED = 1.8;
+/** ARM_RELAX quaternion slerp weight scale per frame (0–1؛ أقل = أنعم مقارنة بـ bind pose). */
+export const ARM_RELAX_BLEND = 0.35;
+
+export const ENABLE_SACCADIC_EYES = true as boolean;
+export const ENABLE_MICRO_EXPRESSIONS = true as boolean;
+/** Expression lerp factor per frame for micro-gesture morphs (0.05–0.2 typical). */
+export const MICRO_EXPR_BLEND_SPEED = 0.08;
+
+// ── Auto blink (VRMSkeletonManager + expressionManager) ─────────────────────
+export const ENABLE_AUTO_BLINK = true as boolean;
+export const BLINK_INTERVAL_MIN_S = 2.5;
+export const BLINK_INTERVAL_MAX_S = 6.0;
+export const BLINK_DURATION_S = 0.15;
+
+// ── Auto micro-expressions while idle/listening ──────────────────────────────
+export const ENABLE_AUTO_MICRO_EXPR = true as boolean;
+export const AUTO_MICRO_INTERVAL_MIN_S = 4.0;
+export const AUTO_MICRO_INTERVAL_MAX_S = 9.0;
+
+/**
+ * Whole-group Y breathing applied in VRMSkeletonManager (useFrame -1).
+ * When true, AvatarCanvas skips its own `groupBreatheY` to avoid doubling.
+ */
+export const ENABLE_GROUP_Y_BREATHING = true as boolean;
+/** Aliased to spine/root tuning — keep in sync with `BREATHING_*` unless you split intentionally. */
+export const GROUP_Y_BREATH_AMPLITUDE = BREATHING_AMPLITUDE;
+export const GROUP_Y_BREATH_SPEED = BREATHING_SPEED;
+
+/** Head + neck procedural layers run even if `ENABLE_PROCEDURAL_LIFE` is false. */
+export const ALWAYS_ENABLE_HEAD_NECK = true as boolean;
+
+/**
+ * تحريك جسدي كامل إضافي (ورك/أكتاف في طبقة §6-B) — **معطّل ثابتاً** (الكتلة معطّلة في `VRMSkeletonManager`).
+ */
+export const ENABLE_FULL_BODY_PROCEDURAL = false as boolean;
 
 // ── Humanization tuning ───────────────────────────────────────────────────────
 
@@ -91,11 +194,8 @@ export const FOOT_IDLE_YAW_RAD = 0.014;
 export const MICRO_EXPR_MIN_MS = 6_000;
 export const MICRO_EXPR_MAX_MS = 12_000;
 
-/** V30 — idle VRMA swap cadence (standing / seated subtle motion) */
-export const IDLE_VRMA_MIN_MS = 10_000;
-export const IDLE_VRMA_MAX_MS = 15_000;
-/** V30 — multiply procedural life layers while a VRMA gesture clip is playing (0–1) */
-export const PROC_LIFE_DURING_VRMA_GESTURE = 0.52;
+/** مضاعف طبقة الحياة الإجرائية أثناء نافذة إيماءة نشطة (مؤقتات الوكيل / co-speech)، 0–1 */
+export const PROC_LIFE_GESTURE_OVERLAY = 0.52;
 /** V30 — clap / cheer temporary elbow spread multiplier duration (ms) */
 export const HAND_SEPARATION_PULSE_MS = 520;
 /** V30 — require this much calm idle time before first auto micro-gesture */
@@ -201,6 +301,12 @@ export function readAvatarStandYOffsetEnv(): number {
   return Number.isFinite(v) ? v : 0;
 }
 
+/** World position for VRM root in office scene; includes `NEXT_PUBLIC_AVATAR_STAND_Y_OFFSET`. */
+export function getAvatarOfficeScenePosition(): [number, number, number] {
+  const [x, y, z] = AVATAR_OFFICE_SCENE_DEFAULTS.avatarPosition;
+  return [x, y + readAvatarStandYOffsetEnv(), z];
+}
+
 /** Radians added to body yaw for VRM 0.x vs 1.0 rigs; null = auto from meta. */
 export function readAvatarFacingYawBaseEnv(): number | null {
   if (typeof process === 'undefined') return null;
@@ -260,19 +366,25 @@ export const ENV_MODELS: Record<
     rugExtra: 0,
   },
   OFFICE: {
-    path: '/models/office/office.glb',
+    path: OFFICE_GLB_PUBLIC_PATH,
     physicsY: 0,
     rugExtra: 0.05,
   },
 };
 
 /**
- * FORCED office scene — does not read `process.env` (exorcist patch).
- * Restore env-driven selection: `ACTIVE_ENV_RAW` from `NEXT_PUBLIC_ACTIVE_ENV`, then `ACTIVE_ENV` from that.
+ * Build-time: `NEXT_PUBLIC_ACTIVE_ENV` → DEFAULT (سجادة `/assets/carpet.glb`) أو OFFICE (`OFFICE_GLB_PUBLIC_PATH`).
+ * فارغ أو غير معروف → OFFICE (سلوك سابق).
  */
-export const ACTIVE_ENV_RAW = 'OFFICE' as const;
+const ACTIVE_ENV_FROM_BUILD = (() => {
+  if (typeof process === 'undefined') return '';
+  return (process.env.NEXT_PUBLIC_ACTIVE_ENV || '').trim().toUpperCase();
+})();
 
-export const ACTIVE_ENV: ActiveEnvKey = 'OFFICE';
+export const ACTIVE_ENV_RAW = ACTIVE_ENV_FROM_BUILD;
+
+export const ACTIVE_ENV: ActiveEnvKey =
+  ACTIVE_ENV_FROM_BUILD === 'DEFAULT' ? 'DEFAULT' : 'OFFICE';
 
 export function getActiveEnvKey(): ActiveEnvKey {
   return ACTIVE_ENV;

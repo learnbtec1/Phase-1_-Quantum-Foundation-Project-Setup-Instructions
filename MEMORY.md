@@ -1,6 +1,6 @@
 # Project Memory
 
-This file serves as a memory repository for the NEXUS platform project. It contains summaries of key files, problems encountered, and solutions implemented. Use this as a reference for understanding past challenges and their resolutions.
+This file serves as a memory repository for the EDUVERSE platform project. It contains summaries of key files, problems encountered, and solutions implemented. Use this as a reference for understanding past challenges and their resolutions.
 
 ## Summaries of Key Files
 

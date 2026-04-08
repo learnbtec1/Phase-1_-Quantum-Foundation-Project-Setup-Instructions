@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-SQLAlchemy models for NEXUS — users, assignments, evaluations
+SQLAlchemy models for EDUVERSE — users, assignments, evaluations
 """
 
 from __future__ import annotations

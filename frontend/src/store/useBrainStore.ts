@@ -51,7 +51,42 @@ export interface BrainState {
   // Physical / UI state
   talking:            boolean;
   thinking:           boolean;
+  /** True while a `transcript` frame is being processed (user's speech detected) */
+  isUserSpeaking:     boolean;
   physical:           { isListening: boolean };
+
+  // ── Awareness / Teacher consciousness layer ──────────────────────────────
+  currentTeachingGoal:      string | null;
+  latestInternalMonologue:  string | null;
+  latestAwarenessCues:      AgentFrame['awareness_cues'] | null;
+
+  // ── Intuition layer (IntuitionEngine) ────────────────────────────────────
+  /** نمط تعلم الطالب المُكتشَف */
+  studentPattern:           string | null;
+  /** نقطة الضعف الخفية */
+  hiddenWeakness:           string | null;
+  /** الحاجة الحقيقية للطالب */
+  studentRealNeed:          string | null;
+  /** درجة ثقة الفهم (0–1) */
+  comprehensionConfidence:  number;
+  /** علامات الضغط المكتشفة */
+  stressSignals:            string[];
+
+  // ── Persuasion layer ─────────────────────────────────────────────────────
+  /** آخر توجيه إقناعي */
+  lastPersuasionMode:       string | null;
+
+  // ── Temporal awareness layer ──────────────────────────────────────────────
+  /** مرحلة الجلسة الحالية */
+  sessionPhase:             string;
+  /** مستوى الطاقة المُقدَّر */
+  estimatedEnergyLevel:     number;
+  /** أيام حتى الامتحان */
+  daysToExam:               number | null;
+
+  // ── Post-session reflection ───────────────────────────────────────────────
+  /** ملخص التأمل بعد الجلسة */
+  lastSessionReflection:    string | null;
 
   // Memory
   conversationHistory: ConversationTurn[];
@@ -59,9 +94,34 @@ export interface BrainState {
   longTermMemory:     LongTermMemory;
 
   // ── Actions ────────────────────────────────────────────────────────────────
-  setTalking:  (v: boolean) => void;
-  setThinking: (v: boolean) => void;
+  setTalking:       (v: boolean) => void;
+  setThinking:      (v: boolean) => void;
+  setUserSpeaking:  (v: boolean) => void;
+  /** Explicitly set currentAction (used by AgentDirector._reactToPAD after decideBehaviorFromPAD) */
+  setCurrentAction: (action: BehaviorOutput | null) => void;
   setPhysical: (v: Partial<{ isListening: boolean }>) => void;
+  /** Update teacher's current goal from Thinker goal_update */
+  setTeachingGoal:  (goal: string | null) => void;
+  setAwarenessCues: (cues: AgentFrame['awareness_cues'] | null, monologue?: string | null) => void;
+  /** Update intuition reading from IntuitionEngine */
+  setIntuitionReading: (reading: {
+    studentPattern?: string;
+    hiddenWeakness?: string | null;
+    studentRealNeed?: string | null;
+    comprehensionConfidence?: number;
+    stressSignals?: string[];
+  }) => void;
+  /** Update temporal awareness */
+  setTemporalContext: (ctx: {
+    sessionPhase?: string;
+    estimatedEnergyLevel?: number;
+    daysToExam?: number | null;
+  }) => void;
+  /** Update persuasion mode */
+  setPersuasionMode: (mode: string) => void;
+  /** Store post-session reflection */
+  setSessionReflection: (reflection: string) => void;
+  setUserPad:  (pad: PADVector | null) => void;
 
   /** Push a conversation turn (user or avatar). */
   pushTurn: (turn: { role: string; text: string; emotion?: EmotionLabel }) => void;
@@ -128,6 +188,20 @@ const EMOTION_TO_LABEL: Record<string, EmotionLabel> = {
   sleepy:           'sleepy',
   bored:            'bored',
   anxious:          'anxious',
+  // Previously missing — caused empathy emotion to map to 'neutral' silently
+  empathetic:       'empathetic',
+  empathy:          'empathetic',
+  // Teaching-specific emotions from backend
+  motivating:       'encouraging',
+  motivated:        'encouraging',
+  supportive:       'encouraging',
+  confused:         'thinking',
+  confused_student: 'concerned',
+  proud_student:    'proud',
+  celebrating:      'excited',
+  warm:             'calm',
+  playful:          'happy',
+  inquisitive:      'curious',
 };
 
 /** Map EmotionLabel to approximate PAD coordinates. */
@@ -173,21 +247,41 @@ function blendPad(a: PADVector, b: PADVector, wB: number): PADVector {
 // ─── Initial state ────────────────────────────────────────────────────────────
 
 const INITIAL: Omit<BrainState,
-  | 'setTalking' | 'setThinking' | 'setPhysical' | 'setUserPad'
+  | 'setTalking' | 'setThinking' | 'setUserSpeaking' | 'setCurrentAction'
+  | 'setPhysical' | 'setUserPad' | 'setTeachingGoal' | 'setAwarenessCues'
+  | 'setIntuitionReading' | 'setTemporalContext' | 'setPersuasionMode' | 'setSessionReflection'
   | 'pushTurn' | 'processFrame' | 'interrupt' | 'reset' | 'applyStreamingEmbodiment'
   | 'recordEmotionalMoment' | 'addImportantMoment' | 'learnInterest'
 > = {
-  emotionLabel:       'neutral',
-  pad:                { ...DEFAULT_PAD },
-  userPad:            null,
-  lastFrame:          null,
-  currentAction:      null,
-  talking:            false,
-  thinking:           false,
-  physical:           { isListening: false },
-  conversationHistory: [],
-  emotionalMemory:    [],
-  longTermMemory:     { userInterests: [], importantMoments: [] },
+  emotionLabel:             'neutral',
+  pad:                      { ...DEFAULT_PAD },
+  userPad:                  null,
+  lastFrame:                null,
+  currentAction:            null,
+  talking:                  false,
+  thinking:                 false,
+  isUserSpeaking:           false,
+  physical:                 { isListening: false },
+  currentTeachingGoal:      null,
+  latestInternalMonologue:  null,
+  latestAwarenessCues:      null,
+  // Intuition
+  studentPattern:           null,
+  hiddenWeakness:           null,
+  studentRealNeed:          null,
+  comprehensionConfidence:  0.5,
+  stressSignals:            [],
+  // Persuasion
+  lastPersuasionMode:       null,
+  // Temporal
+  sessionPhase:             'warmup',
+  estimatedEnergyLevel:     0.7,
+  daysToExam:               null,
+  // Reflection
+  lastSessionReflection:    null,
+  conversationHistory:      [],
+  emotionalMemory:          [],
+  longTermMemory:           { userInterests: [], importantMoments: [] },
 };
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -196,9 +290,29 @@ export const useBrainStore = create<BrainState>()(
   subscribeWithSelector((set, get) => ({
     ...INITIAL,
 
-    setTalking: (v) => set({ talking: v }),
-
-    setThinking: (v) => set({ thinking: v }),
+    setTalking:      (v) => set({ talking: v }),
+    setThinking:     (v) => set({ thinking: v }),
+    setUserSpeaking: (v) => set({ isUserSpeaking: v }),
+    setCurrentAction:(a) => set({ currentAction: a }),
+    setTeachingGoal: (g) => set({ currentTeachingGoal: g }),
+    setAwarenessCues: (cues, monologue) => set({
+      latestAwarenessCues: cues ?? null,
+      ...(monologue !== undefined ? { latestInternalMonologue: monologue ?? null } : {}),
+    }),
+    setIntuitionReading: (r) => set({
+      ...(r.studentPattern       !== undefined ? { studentPattern: r.studentPattern ?? null }           : {}),
+      ...(r.hiddenWeakness       !== undefined ? { hiddenWeakness: r.hiddenWeakness ?? null }           : {}),
+      ...(r.studentRealNeed      !== undefined ? { studentRealNeed: r.studentRealNeed ?? null }         : {}),
+      ...(r.comprehensionConfidence !== undefined ? { comprehensionConfidence: r.comprehensionConfidence } : {}),
+      ...(r.stressSignals        !== undefined ? { stressSignals: r.stressSignals }                     : {}),
+    }),
+    setTemporalContext: (ctx) => set({
+      ...(ctx.sessionPhase          !== undefined ? { sessionPhase: ctx.sessionPhase }                 : {}),
+      ...(ctx.estimatedEnergyLevel  !== undefined ? { estimatedEnergyLevel: ctx.estimatedEnergyLevel } : {}),
+      ...(ctx.daysToExam            !== undefined ? { daysToExam: ctx.daysToExam }                     : {}),
+    }),
+    setPersuasionMode: (mode) => set({ lastPersuasionMode: mode }),
+    setSessionReflection: (r) => set({ lastSessionReflection: r }),
 
     setPhysical: (v) => set(s => ({
       physical: { ...s.physical, ...v },
@@ -281,17 +395,20 @@ export const useBrainStore = create<BrainState>()(
       };
     }),
 
-    interrupt: () => set({ talking: false, thinking: false, currentAction: null }),
+    interrupt: () => set({ talking: false, thinking: false, isUserSpeaking: false, currentAction: null, latestAwarenessCues: null }),
 
     reset: () => set({
       ...INITIAL,
-      // Re-create objects so references change (triggers subscriptions)
-      pad:                { ...DEFAULT_PAD },
-      userPad:            null,
-      physical:           { isListening: false },
-      conversationHistory: [],
-      emotionalMemory:    [],
-      longTermMemory:     { userInterests: [], importantMoments: [] },
+      pad:                    { ...DEFAULT_PAD },
+      userPad:                null,
+      physical:               { isListening: false },
+      conversationHistory:    [],
+      emotionalMemory:        [],
+      longTermMemory:         { userInterests: [], importantMoments: [] },
+      isUserSpeaking:         false,
+      currentTeachingGoal:    null,
+      latestInternalMonologue: null,
+      latestAwarenessCues:    null,
     }),
   })),
 );

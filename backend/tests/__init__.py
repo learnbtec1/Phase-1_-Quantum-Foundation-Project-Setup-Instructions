@@ -1,1 +1,1 @@
-# Tests package for NEXUS backend.
+# Tests package for EDUVERSE backend.

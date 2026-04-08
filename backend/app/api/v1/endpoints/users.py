@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
@@ -71,13 +72,13 @@ def list_my_memories(
     ]
 
 
-@router.delete("/me/memory", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/me/memory", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 def delete_my_memories_filtered(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     memory_type: str | None = Query(None),
     topic_substring: str | None = Query(None, description="Delete emotional/goal rows whose content contains this text"),
-) -> None:
+) -> Response:
     q = db.query(UserMemory).filter(UserMemory.user_id == user.id)
     if memory_type:
         q = q.filter(UserMemory.memory_type == memory_type)
@@ -87,6 +88,7 @@ def delete_my_memories_filtered(
             continue
         db.delete(r)
     db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/me/export")
@@ -121,12 +123,12 @@ def export_my_data_json(
     }
 
 
-@router.delete("/me/data", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/me/data", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 def delete_my_data(
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
-) -> None:
+) -> Response:
     """Remove personal data for the current user; keep anonymized analytics where possible."""
     uid = user.id
     rid = getattr(request.state, "request_id", None)
@@ -178,3 +180,4 @@ def delete_my_data(
         logger.exception("GDPR delete failed: %s", e)
         db.rollback()
         raise
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

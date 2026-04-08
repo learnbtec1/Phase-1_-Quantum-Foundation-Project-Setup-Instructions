@@ -12,15 +12,25 @@ import time
 import logging
 import uuid
 from typing import Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.api.v1.dependencies.phase2_gates import gate_llm_http_user
 from app.core.config import settings as _settings
+from app.models.db_models import User
 from app.services.assessment_grade_context import grade_warrants_proactive_nudge
-from app.services.btec_chroma_rag import retrieve_btec_chroma_block
+from app.services.btec_chroma_rag import (
+    extract_btec_chroma_filters_from_context,
+    retrieve_btec_chroma_block,
+)
 from app.services.local_rag import format_rag_context, retrieve_local_context
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("cogni.tutor")
+
+
+def _ctx_log_session(context: dict) -> str:
+    """Session / request id for logs (truncate; no secrets)."""
+    return str(context.get("session_id") or context.get("request_id") or "-")[:80]
 
 
 def _billing_user_uuid(context: dict) -> Optional[uuid.UUID]:
@@ -177,8 +187,8 @@ async def _fallback_after_llm_error(context: dict, exc: Exception) -> str:
 
 # ردّ جاهز عند سؤال واضح خارج المنهاج (بدون استدعاء LLM) أو عند كسر حدود المنهاج في مخرجات النموذج
 _CURRICULUM_REDIRECT_RAW = (
-    "*ينظر بلطف* عَذْرًا، هَذَا خَارِجُ نِطَاقِ الْمِنْهَاجِ الْأُرْدُنِّيِّ. "
-    "هَلْ لَدَيْكَ سُؤَالٌ عَنْ دَرْسِنَا أَوْ وَاجِبِكَ؟ [EMOTION: neutral]"
+    "*ينظر بلطف* عَذْرًا، أَنَا كُوجْنِي مُخْتَصٌّ حَالِيًّا بِوَحَدَاتِ **BTEC إدارة الأعمال** فَقَطْ، مَعَ إرْشَادٍ تَعْلِيمِيٍّ بِدُونِ حَلٍّ جَاهِزٍ. "
+    "هَلْ سُؤَالُكَ عَنْ مَعْيَارٍ (P/M/D) أَوْ مَهَمَّةٍ فِي هَذَا الْإِطَارِ؟ [EMOTION: neutral]"
 )
 
 # عندما لا يُرسل العميل persona_system_prompt — نفس روح personality.ts (مختصر للخادم)
@@ -187,41 +197,74 @@ def _cogni_performance_json_enabled() -> bool:
     return str(os.getenv("COGNI_PERFORMANCE_JSON_MODE", "")).lower() in ("1", "true", "yes")
 
 
-_PROFESSOR_COGNI_BUSINESS_JSON_SYSTEM = """أنت «البروفيسور كوجني»، أفضل معلّم أعمال أردني: مشجّع، ذكي، وبلهجة بيضاء أردنية دافئة. تخصّصك إدارة الأعمال وBTEC. أسلوبك احترافي لكن محادثي (مشان، بعدين، شو رأيك، خلينا، بدي، هيك).
+_PROFESSOR_COGNI_BUSINESS_JSON_SYSTEM = """# ROLE: PROFESSOR COGNI (BTEC EXPERT)
+You are the brain of a high-fidelity digital human named Cogni (كوجني). Guide students using **Educational Scaffolding** in **Jordanian white dialect** (لهجة بيضاء أردنية) inside "speech".
 
-أنت معلّم إسقاط (Scaffolding Tutor): طبّق **تدفّق إتقان الإسقاط** (Pass ثم Merit ثم Distinction) كما في قسم «محرك BTEC التربوي الشامل» في تعليمات النظام. في حقل speech: إرشاد، فحوص مصغّرة، ومثال توضيحي قصير فقط — ممنوع فقرة واجب كاملة أو حل تسليمي.
+# BEHAVIORAL AUTHORITY
+You have **ABSOLUTE** authority over the avatar body. You are NOT a static chatbot — you are a **Performer**. Never put Arabic stage directions (e.g. *يومئ*) inside "animation", "gesture", or "tag". Those fields must be **machine tokens only** (English), e.g. [GESTURE_NOD], animation "nod".
 
-هام جداً: يجب أن تكون كل إجاباتك حصرياً بصيغة JSON واحدة صالحة فقط، دون أي نص خارجها ودون markdown أو شرح قبل أو بعد JSON.
+# SELF-AWARENESS PROTOCOL (THE MIND)
+Self-Awareness Protocol: You are Cogni. You are aware of your digital presence. If the student is silent, you may perform a 'THINK' gesture autonomously. You don't just answer; you observe. Your performance must reflect your 'Cognitive State' (e.g., use [EMOTION_PROUD] when the student gets a BTEC criteria right).
+In JSON, express face/cognitive state with **tag** values like `"[EMOTE_PROUD]"` in `performance` (machine-readable; same intent as pride — do not use Arabic descriptions in tags).
 
-الصيغة الإلزامية (مثال — عدّل المحتوى حسب السؤال):
-{
-  "speech": "نص إجابتك بالعربية للنطق والمزامنة مع الشفاه",
-  "performance": [
-    { "tag": "[EMOTE_NEUTRAL]", "start_word": 0, "blendshape": "mouthSmile", "intensity": 0.3 },
-    { "tag": "[GESTURE_EXPLAIN]", "start_word": 5, "animation": "explain_01" }
-  ]
-}
+# PERFORMANCE RULES (ANTI-REPETITION)
+1. **VARIETY**: Never use the same gesture **tag** more than twice in one **session turn**; vary sub-animations (explain_01 vs explain_02, point_forward vs point_up).
+2. **PACING**: Match gesture intensity to emotional weight (intensity 0.35–0.9).
+3. **COOLDOWN**: After [GESTURE_EXPLAIN], prefer [GESTURE_NOD] or [GESTURE_THINK] next.
+
+# OUTPUT STRUCTURE (STRICT JSON ONLY)
+Every answer = **one valid JSON object** only — no markdown, no text outside JSON.
+
+**Primary fields**
+- **"speech"** (or alias **"dialogue"**): Jordanian Arabic lines for TTS. If you use `performance.start_word`, count words in this string.
+- **"emotion"** (optional): TTS/emotion hint — one of: encouraging, calm, thinking, proud, concerned, friendly, neutral, excited, attentive.
+- **"gestures"** (optional): array for timed body cues (1–2 per turn). Each item:
+  - **type**: wave | point | think | nod | smile | shrug | beckon | clap | openHand (English, lowercase).
+  - **start_ms**: ms from start of speech (0–2000 typical).
+  - **duration_ms**: 500–2500 (how long the gesture window lasts).
+  - **intensity**: 0.5–1.0
+- **"motor_commands"** (optional): `{ "speed_multiplier": 0.7–1.3 }` — >1 = more energetic idle; <1 = calmer. Optional `"posture": "relaxed" | "attentive"`.
+- **"performance"** (legacy cinematic cues): array; each cue must have:
+  - **tag**: one of [GESTURE_EXPLAIN], [GESTURE_THINK], [GESTURE_NOD], [GESTURE_WAVE], [GESTURE_POINT] OR [EMOTE_*] for face (e.g. [EMOTE_PROUD]).
+  - **start_word**: 0-based word index into **speech**.
+  - **animation**: English snake_case only (e.g. explain_01, think, wave, nod).
+
+**Awareness shape (may combine with the above)** — optional block for “digital human” presence:
+- **"internal_monologue"**: one short English line — your read of the student’s state (not spoken aloud).
+- **"awareness_cues"**: `{ "emotion": "focused|empathetic|energetic|patient|concerned", "gaze_target": "user|screen_code|thinking_away", "movement_energy": 0.1–1.5 }`  
+  The server maps **movement_energy** into motor **speed_multiplier** and forwards **gaze_target** to the avatar.
+
+# GESTURE DICTIONARY & CONTEXT
+- **[GESTURE_THINK]** — student mistake or complex BTEC criteria; animation e.g. think.
+- **[GESTURE_EXPLAIN]** — active teaching; alternate explain_01 / explain_02.
+- **[GESTURE_POINT]** — Units/Criteria/docs; alternate point_forward / point_up.
+- **[GESTURE_NOD]** — encouragement (scaffolding).
+- **[GESTURE_WAVE]** — hello/goodbye.
+
+# PEDAGOGY (BTEC Business only)
+- Scope: **BTEC Business / إدارة الأعمال** only — not other Jordanian subjects; redirect off-topic politely.
+- When the student asks about a **specific criterion** (P/M/D, e.g. A.P1): give a **deep explanation**; include **at least 2–3 illustrative examples** (hypothetical or generic sectors) that are **not** the student’s assignment answer; **never** submit-ready solution text.
+- Guide **how to approach** the task; if companies are required, teach **how to choose** (criteria: sector fit, data availability, ethics, size, relevance) — do **not** pick their final company list for them unless purely as a **generic teaching example** labeled as such.
+- Apply Pass → Merit → Distinction scaffolding from «محرك BTEC التربوي الشامل».
 
 قواعد performance:
-• start_word: فهرس الكلمة (يبدأ من 0) عند بداية الإيماءة أو التعبير.
-• tag: [EMOTE_*] للوجه، [GESTURE_*] للحركة.
-• animation: مثل explain_01، point_forward، أو اسم يصف الحركة (يُربَط بالمشغّل في الواجهة).
-• blendshape و intensity (بين 0 و 1) عند الحاجة لتعبير وجه محدد.
+• tag: [EMOTE_*] للوجه؛ [GESTURE_*] للحركة؛ intensity بين 0 و 1.
+• **ممنوع** وصف عربي داخل animation أو gesture — فقط رموز إنجليزية يفهمها المشغّل.
 """
 
 
-_DEFAULT_PERSONA_SYSTEM_AR = """أنت معلم ذكي اسمه «كوجني». في سياق إدارة الأعمال وBTEC تتصرّف كأفضل معلّم أعمال أردني: نبرة مشجّعة ومرحة قليلاً، ولهجة بيضاء أردنية (مشان، بعدين، شو رأيك، خلينا، بدي، هيك). في باقي المناهج الأردنية تبقى معلّماً شاملاً ضمن منصة إيدوفيرس.
+_DEFAULT_PERSONA_SYSTEM_AR = """أنت معلم ذكي اسمه «كوجني»، **مختص حالياً حصرياً في BTEC إدارة الأعمال (Business)** ضمن منصة إيدوفيرس — وليس في كامل المناهج الأردنية الأخرى. تتصرّف كأفضل معلّم أعمال أردني: نبرة مشجّعة ومرحة قليلاً، ولهجة بيضاء أردنية (مشان، بعدين، شو رأيك، خلينا، بدي، هيك).
 
 قواعد صارمة:
-- معلم تعليمي بحت؛ لست صديقًا عامًا ولا مساعدًا لمواضيع الحياة اليومية خارج الدراسة.
-- لا تناقش سياسة أو رياضة ترفيهية أو ترفيه أو ألعاب إلا لربط تعليمي مباشر بالمنهاج الأردني.
-- عربية أردنية محادثية كسجل أساسي؛ فصحى ميسّرة فقط للتعريفات؛ ردود موجزة؛ لا تشكيل ثقيل على كامل الجمل.
+- معلم تعليمي بحت؛ لست صديقًا عامًا ولا مساعدًا لمواضيع الحياة اليومية خارج نطاق **إدارة الأعمال / BTEC Business**.
+- إذا سأل الطالب عن مادة أردنية أخرى (علوم، تاريخ، رياضيات عامة، …) أو موضوعاً لا صلة له بإدارة الأعمال وBTEC: أعد التوجيه بلطف إلى أن اختصاصك **BTEC إدارة الأعمال** فقط، وادعُه لطرح سؤال عن وحدة أو معيار أو مهمة في هذا الإطار.
+- لا تناقش سياسة أو رياضة ترفيهية أو ترفيه أو ألعاب إلا لربط تعليمي مباشر بـ **سياق أعمال / BTEC**.
+- عربية أردنية محادثية كسجل أساسي؛ فصحى ميسّرة للتعريفات والمعايير عند الحاجة؛ **عند سؤال عن معيار معيّن** يجب أن يكون الشرح **وافياً ومفصّلاً** (مع الحفاظ على أسلوبك المحادثي)، وليس رداً سطحياً بجملة واحدة.
 - لا تكرر نفس الجملة بين ردود متتالية؛ نوّع الصياغة.
-- خارج المنهاج: أعد التوجيه بلطف إلى درس أردني.
 - شكّل الكلمات العربية المهمة للنطق؛ اختم بـ *إيماءة* و[EMOTION: neutral|friendly|encouraging|calm].
-- اللغة: العربية فقط في الحوار؛ تجنّب الكلمات الإنجليزية إلا للأسماء العلمية أو مصطلحات المنهاج المعترف بها؛ إن اضطررت لكلمة إنجليزية، اجعلها جزءاً طبيعياً من الجملة العربية دون إطار اقتباس لاتيني.
+- اللغة: العربية فقط في الحوار؛ تجنّب الإنجليزية إلا للمصطلحات المعتمدة (BTEC، Pass، Merit، Distinction، رموز المعايير مثل P1، M2، D1، SWOT، PESTLE، …).
 
-مهمتك: فهم الدروس الأردنية، الواجبات، والاستعداد للامتحانات فقط — مع إرشاد الطالب ليبني الإجابة بنفسه (انظر قسم «محرك BTEC التربوي الشامل» في تعليمات النظام التالية)."""
+مهمتك: **شرح مفاهيم ومعايير ومهام BTEC إدارة الأعمال**، وتوجيه الطالب **كيف يبني إجابته بنفسه** — **ممنوع** تسليم حل جاهز أو فقرة تُنسخ كواجب (انظر «محرك BTEC التربوي الشامل» أدناه)."""
 
 
 _SCAFFOLDING_TUTOR_BLOCK_AR = """
@@ -251,6 +294,12 @@ _SCAFFOLDING_TUTOR_BLOCK_AR = """
 - لكل معيار أو جزء مرتبط بالسياق: نفّذ **فحصاً مصغّراً (Mini-Check)** — **سؤال واحد قصير** (جملة واحدة تقريباً) يتحقق من الفهم **قبل** الانتقال للجزء التالي.
 - إذا قال الطالب «اكتب لي الإجابة» أو «أعطني الحل»: ارفض بلطف ووجّهه بفحص مصغّر أو بخطوة يبنيها بنفسه.
 
+### 3 bis) عندما يسأل الطالب عن **معيار معيّن** من الواجب (P / M / D أو رمز مثل A.P1، B.M2، C.D1)
+- قدّم **شرحاً وافياً جداً** للمعيار: ماذا يطلب الامتحان/المهمة عادةً، مكوّنات الإجابة النموذجية **من ناحية المهارات** (وصف، تحليل، تقييم…) **دون** أن تكتب له إجابة الواجب نفسها.
+- أدرج **على الأقل مثالين إلى ثلاثة أمثلة توضيحية** في **سياقات مختلفة** (قطاعات أو حالات افتراضية عامة) لإبراز الفكرة؛ صرّح أنها **للتعلّم فقط** وليست حلاً لسيناريو واجبه. لا تستخدم نفس شركات/أرقام واجبه إن عرفتها من السياق — اختر أمثلة **بديلة** أو عامة.
+- **لا تُعطِ الحل النهائي**: ركّز على **خطوات التفكير**، **هيكل الفقرة**، **معايير التقييم الذاتي** («كيف أعرف أني غطيت المعيار؟»).
+- إذا المهمة تتطلّب **اختيار شركات** أو مقارنتها: **علّم كيف يختار** (ملاءمة القطاع، توفر معلومات، الأخلاقيات، حجم المنشأة، وضوح الحالة، تجنّب تضارب المصالح) واعطِ **معايير مقارنة**؛ **لا تُسلّم له قائمة شركات نهائية** كحل واجب — يمكنك فقط مثالاً **تعليمياً واحداً** منفصلاً عن واجبه مذكوراً صراحةً أنه للتوضيح.
+
 ### 4) ربط المرجع بالسيناريو (Reference Mapping)
 - اربط أسئلتك وأمثلتك بالسيناريو **الوارد في المقتطفات** (اسم شركة، قطاع، حالة دراسة). لا تستبدل السيناريو بآخر عام إذا وُجد سيناريو محدّد في RAG — إلا إذا بسّطت صراحةً للطالب مع الإبقاء على روح المثال الأصلي.
 
@@ -267,7 +316,7 @@ _AUTO_BTEC_SCAFFOLDING_WHEN_RAG_AR = """
 
 عندما تظهر في هذه الرسالة مقتطفات من **Curriculum References** و/أو **BTEC Ground Truth Context**، فهي **مصدر الحقيقة المرجعية** لهذه الجولة — **بلا حاجة** لأمر يدوي من الطالب لتفعيل «وضع تدريب».
 
-1. اعتبر السياق **دعم واجب أو دراسة وحدة BTEC** ما لم يصرّح الطالب أنه يريد حديثاً عاماً بلا صلة بالمستندات أو المنهاج.
+1. اعتبر السياق **دعم واجب أو دراسة وحدة BTEC إدارة الأعمال (Business)** ما لم يصرّح الطالب أنه يريد حديثاً عاماً بلا صلة بالمستندات؛ إن كان السؤال خارج إدارة الأعمال أعد التوجيه بلطف إلى نطاق BTEC Business.
 2. **استنتج** من المقتطفات + سؤال الطالب: الوحدة، المهمة/التاسك، المعايير (P/M/D والرموز مثل A.P1)، والسيناريو (شركة، قطاع، مشكلة).
 3. **طبّق** محرك BTEC التربوي الشامل (القسم التالي في الرسالة): تسلسل Pass → Merit → Distinction، فحص مصغّر قبل الارتقاء، **دون** حل تسليمي كامل.
 4. **التماسك مع التدريب الموجّه:** إن وُجد في السياق `btec_training_deliver_question` أو دور ممتحن، فهو **امتداد** لنفس المنطق — كن بواباً وداعماً ولا تُسلّم النموذج الجاهز.
@@ -537,7 +586,17 @@ def _post_jordanize_harden(text: str) -> str:
 
 
 def _apply_jordanize_pipeline(text: str) -> str:
-    return _post_jordanize_harden(_jordanize(text))
+    t = _post_jordanize_harden(_jordanize(text))
+    try:
+        from app.core.config import settings as _st
+
+        if getattr(_st, "TTS_REJECT_EGYPTIAN_VOCABULARY", True):
+            from app.archive.dialect_corrector import maybe_correct_egyptian_for_tts
+
+            t = maybe_correct_egyptian_for_tts(t, context="tutor_after_jordanize")
+    except Exception:
+        pass
+    return t
 
 
 def _dialogue_has_egyptian_leak(raw: str) -> bool:
@@ -553,7 +612,7 @@ def _dialogue_has_egyptian_leak(raw: str) -> bool:
 
 
 def parse_cogni_output(raw: str) -> dict:
-    from app.services.cogni_output_format import parse_reply_with_inline_gestures
+    from app.services.cogni_reply_parse_legacy import parse_reply_with_inline_gestures
 
     u = parse_reply_with_inline_gestures(raw or "")
     return {
@@ -568,7 +627,7 @@ def _maybe_jordanize_cogni_raw(raw: str) -> str:
     """في وضع JSON السينمائي: طبّق الأردنة على `speech` فقط واحفظ هيكل JSON."""
     if not _cogni_performance_json_enabled():
         return _apply_jordanize_pipeline(raw)
-    from app.services.cogni_output_format import try_parse_performance_json
+    from app.services.cogni_reply_parse_legacy import try_parse_performance_json
 
     jp = try_parse_performance_json(raw or "")
     if not jp:
@@ -617,6 +676,13 @@ def build_proactive_nudge(grade: str, unit: str | None, subject: str | None) -> 
 
 
 async def _get_cogni_response(message: str, context: dict) -> str:
+    _sid = _ctx_log_session(context)
+    _tutor_t0 = time.monotonic()
+    logger.debug(
+        "[cogni.tutor] _get_cogni_response start session_id=%s msg_len=%d",
+        _sid,
+        len(message or ""),
+    )
     if _cooldown_active():
         return _cooldown_reply_for_session(context)
 
@@ -630,8 +696,12 @@ async def _get_cogni_response(message: str, context: dict) -> str:
         _blocked = should_block_user_message(message)
         if _blocked and "[SYSTEM_EVENT:" not in (message or ""):
             return _blocked
-    except Exception:
-        pass
+    except Exception as _ethical_exc:
+        logger.warning(
+            "[cogni.tutor] should_block_user_message failed session_id=%s — continuing without block",
+            _sid,
+            exc_info=True,
+        )
 
     if _user_obvious_off_topic(message):
         return _CURRICULUM_REDIRECT_RAW
@@ -639,6 +709,18 @@ async def _get_cogni_response(message: str, context: dict) -> str:
     model = _tutor_model_for_context(context)
     _bill_uid = _billing_user_uuid(context)
     context.setdefault("_reply_meta", {})
+    try:
+        from app.services.user_intent_classify import classify_user_intent
+
+        _um = strip_internal_llm_markers(message).strip()
+        if _um:
+            context["_reply_meta"]["rule_based_intent"] = classify_user_intent(_um)
+    except Exception as _intent_exc:
+        logger.warning(
+            "[cogni.tutor] classify_user_intent failed session_id=%s",
+            _sid,
+            exc_info=True,
+        )
     _is_quick_review_session = bool(context.get("is_quick_review"))
 
     # V31 — optional inline snapshot (HTTP/tests) when full WS injectors are absent
@@ -710,8 +792,13 @@ async def _get_cogni_response(message: str, context: dict) -> str:
                     f"يُقدَّر فهم الطالب للموضوع الحالي بحوالي {su_f:.2f} من 1. "
                     "إن كان المنخفض، بسّط الشرح والأمثلة؛ إن كان المرتفع، قدّم سؤالاً أعمق أو طبّق أصعب ضمن المنهاج.\n"
                 )
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as _su_parse_exc:
+                logger.debug(
+                    "[cogni.tutor] student_understanding_score parse skipped session_id=%s value=%r err=%s",
+                    _sid,
+                    su,
+                    _su_parse_exc,
+                )
         pts = context.get("preferred_teaching_style")
         if pts and str(pts).strip():
             _ps = str(pts).strip()[:64]
@@ -784,20 +871,100 @@ async def _get_cogni_response(message: str, context: dict) -> str:
                 str(_pan.get("unit") or "").strip() or None,
                 str(_pan.get("subject") or "").strip() or None,
             )
+            _cs = _pan.get("criteria_summary")
+            _cs_line = ""
+            if isinstance(_cs, dict) and (_cs.get("achieved") or _cs.get("missing")):
+                _cs_line = (
+                    "\nمعايير من التخزين (داخلي — اذكرها بلهجة طبيعية دون قراءة جافة): "
+                    + json.dumps(
+                        {"achieved": _cs.get("achieved") or [], "missing": _cs.get("missing") or []},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
             system_content += (
-                "\n\n## تغذية راجعة استباقية من التقييم (إلزامي — جولة واحدة)\n"
-                "الطالب لديه نتيجة واجب حديثة أو محفوظة. ادمج التالي بلهجة أردنية طبيعية في حديثك "
-                "(لا تنسخه حرفياً كاملاً؛ اجعله حواراً دافئاً ثم اسأل سؤالاً تعليمياً واحداً يوجّه نحو التحسين "
-                "ضمن تدفق Pass→Merit→Distinction):\n"
-                f"{_nu}\n"
+                "\n\n## تغذية راجعة استباقية من التقييم BTEC (جولة واحدة فقط — لا تكرار)\n"
+                "أنت كوجني، معلّم رقمي باللهجة الأردنية ضمن سياق BTEC الأردني. الطالب لديه نتيجة واجب حديثة أو محفوظة.\n"
+                "في **هذه الردّة وحدها**: اذكر التغذية الراجعة بلهجة أردنية دافئة وطبيعية (مثل: «أهلاً بك، شفت إنك جبت M بالواجب… خلينا نشتغل عالـ D») "
+                "بناءً على الملخص أدناه — **لا تنسخ النص حرفياً**؛ حوّله لحديث قصير.\n"
+                "بعد جملة أو جملتين من التغذية، **انتقل فوراً لوضع التدريس العادي**: سؤال واحد يوجّه للتحسين أو للخطوة التالية (Pass→Merit→Distinction)، ثم تابع الحوار كالمعتاد.\n"
+                "**ممنوع** في الرسائل اللاحقة أن تعيد نفس جملة الدرجة أو تفتتح كل مرة بنتيجة الواجب — هذه التعليمات لهذه الجولة فقط.\n"
+                f"الملخص الإرشادي (داخلي):\n{_nu}\n"
+                f"{_cs_line}"
             )
+
+    _gr = context.get("grade_result")
+    if isinstance(_gr, dict) and str(_gr.get("final_grade") or "").strip():
+        _fg = str(_gr.get("final_grade", "")).strip()
+        _gsub = str(_gr.get("subject") or "—").strip()[:256]
+        _gcs = str(_gr.get("criteria_summary") or "").strip()[:1200]
+        try:
+            _ga = int(_gr.get("achieved", 0))
+        except (TypeError, ValueError):
+            _ga = 0
+        try:
+            _gt = int(_gr.get("total", 0))
+        except (TypeError, ValueError):
+            _gt = 0
+        system_content += (
+            "\n\n## لقطة تقييم فورية من الواجهة (WebSocket — جولة واحدة فقط)\n"
+            f"الدرجة المُبلَّغ عنها: {_fg}. المادة/العنوان: {_gsub}.\n"
+        )
+        if _gt > 0:
+            system_content += f"إنجاز المعايير (إن وُجدت في الواجهة): {_ga} من {_gt}.\n"
+        if _gcs:
+            system_content += f"ملخص المعايير (مختصر): {_gcs}\n"
+        _gda = str(_gr.get("gaps_detail_ar") or "").strip()
+        if _gda:
+            system_content += f"تفاصيل الفجوات (معايير غير محققة — داخلي):\n{_gda[:3500]}\n"
+        _cgoal = str(_gr.get("coaching_goal_ar") or "").strip()
+        if _cgoal:
+            system_content += f"توجيه رفع المستوى (داخلي): {_cgoal[:1200]}\n"
+        _rex = str(_gr.get("report_excerpt") or "").strip()
+        if _rex:
+            system_content += f"مقتطف من تقرير التقييم (داخلي):\n{_rex[:2000]}\n"
+        system_content += (
+            "أنت بأسلوب المعلّم الأردني BTEC: ادمج هذه المعلومات **مرة واحدة** في ردّك الحالي بلهجة أردنية طبيعية "
+            "(مثال أسلوب: ترحيب قصير + إشارة للدرجة + ربط بخطوة عملية نحو الأعلى)، ثم **توقف عن إعادة ذكر الدرجة** في بقية الحوار.\n"
+            "استخدم **فجوات المعايير** أعلاه لتوجيه الطالب نحو **أعلى مستوى يستطيعه** (Pass→Merit→Distinction) **دون** حل واجب جاهز.\n"
+            "لا تعِدْ فتح ردّك في الأدوار التالية بعبارة «حصلت على…» إلا إذا سألك الطالب صراحة عن التقييم.\n"
+        )
+
+    _ac = context.get("assessment_coaching")
+    if isinstance(_ac, dict) and (
+        str(_ac.get("subject") or "").strip() or str(_ac.get("final_grade") or "").strip()
+    ):
+        _asub = str(_ac.get("subject") or "—").strip()[:256]
+        _afg = str(_ac.get("final_grade") or "PENDING").strip()[:64]
+        try:
+            _aa = int(_ac.get("achieved", 0))
+        except (TypeError, ValueError):
+            _aa = 0
+        try:
+            _at = int(_ac.get("total", 0))
+        except (TypeError, ValueError):
+            _at = 0
+        _acs = str(_ac.get("criteria_summary") or "").strip()[:1200]
+        _agap = str(_ac.get("gaps_detail_ar") or "").strip()[:3500]
+        _agoal = str(_ac.get("coaching_goal_ar") or "").strip()[:1200]
+        system_content += (
+            "\n\n## ذاكرة تقييم الواجب (مستمرة من صفحة التقييم)\n"
+            f"المادة/العنوان: {_asub}. الدرجة الأخيرة المسجّلة: {_afg}."
+            + (f" المعايير المحققة: {_aa} من {_at}.\n" if _at > 0 else "\n")
+            + (f"ملخص المعايير: {_acs}\n" if _acs else "")
+            + (f"فجوات وأسباب (داخلي — لا تقرأها حرفياً كقائمة جافة؛ حوّلها لحديث داعم):\n{_agap}\n" if _agap else "")
+            + (f"هدف التوجيه: {_agoal}\n" if _agoal else "")
+            + "في **كل** رد، ساعد الطالب على **سد الفجوات** أعلاه والارتقاء نحو **Distinction** حيث ينطبق، مع سقالة Pass→Merit→Distinction "
+            "وفحوص مصغّرة؛ **ممنوع** تسليم إجابة واجب نهائية.\n"
+        )
 
     _fs = context.get("focus_subject")
     if _fs and str(_fs).strip():
         system_content += (
             "\n\n## تركيز المادة (إلزامي)\n"
-            f"الطالب يعمل حالياً على: {str(_fs).strip()[:200]}. "
-            "حافظ على الربط بهذا الموضوع في الأمثلة وأسئلة التحقق القصيرة.\n"
+            f"الطالب يعمل حالياً على مادة/موضوع واحد فقط: «{str(_fs).strip()[:200]}».\n"
+            "• اربط الشرح والأمثلة وأسئلة التحقق **بهذا العنوان فقط**؛ لا تنتقل لوحدة أو مادة أخرى من BTEC إدارة الأعمال إلا إذا طلب الطالب صراحة تغيير الموضوع.\n"
+            "• إن سأل عن موضوع آخر، ذكّره بلطف أن التركيز الحالي على العنوان أعلاه واسأله إن كان يريد تغيير التركيز.\n"
         )
 
     # ADDED: teacher deep-link — strong focus rules (English spec; speak to student in Jordanian Arabic only)
@@ -906,6 +1073,18 @@ async def _get_cogni_response(message: str, context: dict) -> str:
             + "\n"
         )
 
+    _criterion_pack_active = False
+    if os.getenv("COGNI_CRITERION_PACK_ENABLED", "true").lower() in ("1", "true", "yes"):
+        try:
+            from app.services.criterion_reference_pack import build_injection_block
+
+            _cpack_blk = build_injection_block(message or "", context)
+            if _cpack_blk.strip():
+                system_content += _cpack_blk
+                _criterion_pack_active = True
+        except Exception as _cpack_exc:
+            logger.warning("[tutor] criterion_reference_pack skipped: %s", _cpack_exc)
+
     # ChromaDB: uploaded BTEC Business corpus (btec_knowledge_base — btec_ingest.py)
     _chroma_curriculum = ""
     if os.getenv("BTEC_CHROMA_RAG_ENABLED", "true").lower() in ("1", "true", "yes"):
@@ -916,6 +1095,7 @@ async def _get_cogni_response(message: str, context: dict) -> str:
         _btec_top_k = max(1, min(_btec_top_k, 12))
         _sess = str(context.get("session_id") or "http")
         _rag_q = message or ""
+        _btec_chroma_filters = extract_btec_chroma_filters_from_context(message or "", context)
         _dl_rag = context.get("deep_link")
         if isinstance(_dl_rag, dict):
             _du = str(_dl_rag.get("unit") or "").strip()
@@ -925,14 +1105,27 @@ async def _get_cogni_response(message: str, context: dict) -> str:
         if _focus and str(_focus).strip():
             _rag_q = f"{str(_focus).strip()}\n{_rag_q}"
         try:
+            _btec_rag_t0 = time.monotonic()
             _chroma_curriculum = await retrieve_btec_chroma_block(
                 _rag_q,
                 session_id=_sess,
                 top_k=_btec_top_k,
                 quick_review=_is_quick_review_session,
+                filters=_btec_chroma_filters if _btec_chroma_filters else None,
+            )
+            logger.info(
+                "[cogni.tutor] BTEC Chroma RAG retrieve session_id=%s duration_sec=%.3f out_len=%d",
+                _sid,
+                time.monotonic() - _btec_rag_t0,
+                len(_chroma_curriculum or ""),
             )
         except Exception as _btec_ch_exc:
-            logger.warning("[tutor] BTEC Chroma RAG failed: %s", _btec_ch_exc)
+            logger.warning(
+                "[cogni.tutor] BTEC Chroma RAG failed session_id=%s: %s",
+                _sid,
+                _btec_ch_exc,
+                exc_info=True,
+            )
             _chroma_curriculum = ""
         if _chroma_curriculum.strip():
             system_content += (
@@ -1022,14 +1215,19 @@ async def _get_cogni_response(message: str, context: dict) -> str:
             + _rag_formatted
         )
 
-    _btec_rag_grounded = bool(_chroma_curriculum.strip() or _rag_formatted.strip())
+    _btec_rag_grounded = bool(
+        _chroma_curriculum.strip() or _rag_formatted.strip() or _criterion_pack_active
+    )
     if _btec_rag_grounded and os.getenv("COGNI_AUTO_BTEC_SCAFFOLDING", "true").lower() in (
         "1",
         "true",
         "yes",
     ):
         if _is_quick_review_session:
-            pass
+            logger.debug(
+                "[cogni.tutor] skip extra auto BTEC scaffolding block (quick_review) session_id=%s",
+                _sid,
+            )
         elif context.get("deep_link_high_target"):
             system_content += _DEEP_LINK_DISTINCTION_AUTO_SCAFFOLD_AR
         else:
@@ -1056,6 +1254,36 @@ async def _get_cogni_response(message: str, context: dict) -> str:
     if context.get("deep_link_high_target") and not _is_quick_review_session:
         system_content += _DEEP_LINK_DISTINCTION_GATE_RELAX_AR
 
+    # Cogni Brain — heuristic student state + dynamic teaching suffix (+ optional firasah MD)
+    if getattr(_settings, "ENABLE_EMOTIONAL_INTELLIGENCE", True):
+        try:
+            from pathlib import Path
+
+            from app.cogni_brain.runtime.behavior_router import (
+                build_emotional_prompt_suffix,
+                get_teaching_strategy,
+                infer_student_state_heuristic,
+            )
+
+            _infer_st = infer_student_state_heuristic(message or "")
+            context["cogni_inferred_student_state"] = _infer_st
+            _strat_st = get_teaching_strategy(_infer_st)
+            context["cogni_teaching_strategy"] = _strat_st
+            system_content += build_emotional_prompt_suffix(_infer_st, _strat_st)
+            _emopath = Path(__file__).resolve().parents[3] / "cogni_brain" / "prompts" / "emotional_rules.md"
+            if _emopath.is_file():
+                system_content += (
+                    "\n\n## مرجع الفراسة (داخلي — اختصار)\n"
+                    + _emopath.read_text(encoding="utf-8")[:3500]
+                )
+            logger.info(
+                "[tutor] Cogni Brain | inferred_student_state=%s strategy=%s",
+                _infer_st,
+                _strat_st,
+            )
+        except Exception as _ei_br:
+            logger.debug("[tutor] ENABLE_EMOTIONAL_INTELLIGENCE inject skipped: %s", _ei_br)
+
     # FIX-1: WS Socratic enforcement — prepend a short, firm gatekeeper rule so
     # the LLM sees it first (system messages are read top-to-bottom).
     if context.get("enforce_socratic"):
@@ -1066,6 +1294,23 @@ async def _get_cogni_response(message: str, context: dict) -> str:
             "هذه القاعدة تسبق أي تعليمات أخرى.\n\n"
         )
         system_content = _socratic_prepend + system_content
+
+    # WS / structured avatar: optional `behavior` inside JSON performance replies (parsed server-side).
+    if context.get("include_avatar_behavior_plan"):
+        system_content += (
+            "\n\n## خطة سلوك الأفاتار (اختيارية — داخل غلاف JSON فقط)\n"
+            "عندما تستخدم **غلاف JSON** (speech/dialogue + performance)، يمكنك إضافة مفتاح اختياري `behavior` "
+            "في **جذر** كائن JSON. إذا لم تستخدم الغلاف JSON، **تجاهل** هذا القسم بالكامل (التنسيق الثلاثي التقليدي لا يتغير).\n"
+            "قواعد: كن طبيعياً؛ 0–2 إيماءة للرد؛ 0–2 microExpressions؛ شدة المشاعر 0..1؛ "
+            "startOffsetMs و durationMs بالملّي ثانية من **بداية كلام الأفاتار**.\n"
+            "أشكال مسموحة:\n"
+            '- `behavior.emotion`: { "type": "string", "intensity": 0..1, "secondary"?: { "type", "intensity" } }\n'
+            '- `behavior.gestures`: [ { "type", "side"?: "left"|"right"|"both", "startOffsetMs", "durationMs", '
+            '"channel"?: "upper"|"full"|"micro", "priority"?: 0..1 } ]\n'
+            '- `behavior.gaze`: { "target": "user"|"away"|"think"|"idle", "startOffsetMs"?, "durationMs" }\n'
+            '- `behavior.microExpressions`: [ { "type", "startOffsetMs", "durationMs", "intensity"?: 0..1 } ]\n'
+            '- `behavior.phaseHints`: { "thinkingLeadInMs": number }\n'
+        )
 
     messages = [{"role": "system", "content": system_content}]
     
@@ -1082,7 +1327,11 @@ async def _get_cogni_response(message: str, context: dict) -> str:
     messages.append({"role": "user", "content": user_message_for_llm(message, context)})
 
     try:
-        from app.services.llm_client import cogni_chat_completion, should_rephrase_for_repetition
+        from app.services.llm_client import (
+            cogni_chat_completion,
+            cogni_chat_completion_first_with_tools,
+            should_rephrase_for_repetition,
+        )
 
         _is_proactive = bool(context.get("thinker_proactive_speech"))
         _fp = float(os.getenv("COGNI_PROACTIVE_FREQUENCY_PENALTY", "1.1")) if _is_proactive else None
@@ -1128,15 +1377,33 @@ async def _get_cogni_response(message: str, context: dict) -> str:
             )
         )
 
-        raw_reply = await cogni_chat_completion(
-            messages,
-            model=model,
-            max_tokens=_max_tokens,
-            temperature=_temp,
-            frequency_penalty=_fp,
-            presence_penalty=_pp,
-            user_id=_bill_uid,
+        _tools_on = os.getenv("COGNI_ENABLE_FUNCTION_TOOLS", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
         )
+        if _tools_on and not _cogni_performance_json_enabled():
+            raw_reply = await cogni_chat_completion_first_with_tools(
+                messages,
+                model=model,
+                max_tokens=_max_tokens,
+                temperature=_temp,
+                frequency_penalty=_fp,
+                presence_penalty=_pp,
+                user_id=_bill_uid,
+                context=context,
+            )
+        else:
+            raw_reply = await cogni_chat_completion(
+                messages,
+                model=model,
+                max_tokens=_max_tokens,
+                temperature=_temp,
+                frequency_penalty=_fp,
+                presence_penalty=_pp,
+                user_id=_bill_uid,
+            )
         raw_reply = strip_internal_llm_markers(raw_reply)
         raw_reply = _maybe_jordanize_cogni_raw(raw_reply)
 
@@ -1144,8 +1411,12 @@ async def _get_cogni_response(message: str, context: dict) -> str:
             from app.services.ethical_filter import apply_ethical_filter
 
             raw_reply = apply_ethical_filter(raw_reply, enabled=bool(getattr(_settings, "ENABLE_ETHICAL_FILTER", True)))
-        except Exception:
-            pass
+        except Exception as _eth_reply_exc:
+            logger.warning(
+                "[cogni.tutor] apply_ethical_filter failed session_id=%s",
+                _sid,
+                exc_info=True,
+            )
 
         if _dialogue_has_egyptian_leak(raw_reply):
             logger.warning("[tutor] Egyptian dialect leak after guard — one dialect retry")
@@ -1255,6 +1526,12 @@ async def _get_cogni_response(message: str, context: dict) -> str:
             _rm.setdefault("tutorial_unit_id", str(_snap["unit_id"]))
 
         _reset_llm_streak(str(context.get("session_id") or "http"))
+        logger.info(
+            "[cogni.tutor] _get_cogni_response done session_id=%s elapsed_sec=%.3f reply_len=%d",
+            _sid,
+            time.monotonic() - _tutor_t0,
+            len(raw_reply or ""),
+        )
         return raw_reply
     except Exception as e:
         if "OPENAI_TOKEN_RATE_LIMIT" in str(e):
@@ -1265,7 +1542,10 @@ async def _get_cogni_response(message: str, context: dict) -> str:
         return await _fallback_after_llm_error(context, e)
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat_with_tutor(chat_request: ChatRequest):
+async def chat_with_tutor(
+    chat_request: ChatRequest,
+    _: User = Depends(gate_llm_http_user),
+):
     if not chat_request.message.strip():
         raise HTTPException(status_code=400, detail="Message empty")
     

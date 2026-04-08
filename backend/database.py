@@ -4,7 +4,7 @@ database.py — SQLAlchemy async-compatible engine and session factory.
 
 Environment variables:
   DATABASE_URL  PostgreSQL DSN, e.g.
-                postgresql://nexus:nexus_pass@localhost:5432/nexus_db
+                postgresql://eduverse:eduverse_pass@localhost:5432/eduverse_db
                 Falls back to an in-process SQLite file for local development
                 without Docker.
   USE_DB        Set to "true" to activate the Postgres path; default "false".
@@ -25,7 +25,7 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session
 logger = logging.getLogger(__name__)
 
 # ── DSN resolution ───────────────────────────────────────────────────────────
-_DEFAULT_SQLITE = "sqlite:///./nexus_dev.db"
+_DEFAULT_SQLITE = "sqlite:///./eduverse_dev.db"
 DATABASE_URL: str = os.getenv("DATABASE_URL", _DEFAULT_SQLITE)
 
 # Convert async DSN variants to sync (SQLAlchemy sync engine is used here).

@@ -10,7 +10,7 @@ import uuid
 from typing import Any, Dict, Optional, Tuple
 
 from app.services import tutorial_progress_store as tps
-from app.services.mini_check_evaluator import evaluate_mini_check
+from app.archive.mini_check_evaluator import evaluate_mini_check
 
 logger = logging.getLogger(__name__)
 

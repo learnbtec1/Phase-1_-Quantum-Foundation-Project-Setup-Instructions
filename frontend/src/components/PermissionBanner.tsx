@@ -2,6 +2,8 @@
 
 import React from 'react';
 import { ensureMicOpen } from '@/utils/micManager';
+import { BodyPortal } from '@/components/portal/BodyPortal';
+import { Z_LAYERS } from '@/lib/z-layers';
 
 type PermState = 'granted' | 'prompt' | 'denied' | 'unknown';
 
@@ -11,6 +13,7 @@ export default function PermissionBanner(): React.ReactElement | null {
   const [busy,    setBusy   ] = React.useState(false);
 
   React.useEffect(() => {
+    if (typeof window === 'undefined') return;
     let mounted = true;
 
     (async () => {
@@ -44,7 +47,11 @@ export default function PermissionBanner(): React.ReactElement | null {
   if (!visible) return null;
 
   return (
-    <div className="fixed inset-x-0 bottom-0 z-50 pointer-events-none">
+    <BodyPortal>
+    <div
+      className="fixed inset-x-0 bottom-0 pointer-events-none"
+      style={{ zIndex: Z_LAYERS.PERMISSION_STRIP }}
+    >
       <div className="mx-auto max-w-3xl m-3 rounded-xl bg-slate-900/95 ring-1 ring-slate-600 p-4 text-white shadow-2xl pointer-events-auto backdrop-blur-sm">
         <div className="flex items-start gap-3">
           {/* Icon */}
@@ -97,5 +104,6 @@ export default function PermissionBanner(): React.ReactElement | null {
         </div>
       </div>
     </div>
+    </BodyPortal>
   );
 }

@@ -40,7 +40,7 @@ print(f"[INFO] Brief: {len(brief_text):,} chars", flush=True)
 print(f"[INFO] Amir answer: {len(student_text):,} chars", flush=True)
 
 # ─── Run the full forensic grader ──────────────────────────────────────
-from app.services.forensic_engine import forensic_grade
+from app.archive.forensic_engine import forensic_grade
 
 async def run():
     print("\n[INFO] Running full evaluation (may take 2-4 minutes)...\n", flush=True)

@@ -7,6 +7,14 @@ import mammoth from 'mammoth';
 import JSZip from 'jszip';
 import { ACADEMIC_DATA } from '@/lib/academicSubjects';
 import { normalizeIntegratedResult, type EvaluationResult } from '@/lib/assessmentNormalize';
+import {
+  buildAssessmentCoachingPayload,
+  persistAssessmentCoaching,
+  setCogniFocusSubject,
+} from '@/lib/cogniSessionContext';
+import { getStudentIdForEvaluation } from '@/lib/studentDeviceId';
+import { authHeaders } from '@/lib/auth';
+import BusinessSubjectChips from '@/components/student/BusinessSubjectChips';
 
 // --- Interfaces ---
 
@@ -100,7 +108,7 @@ export default function AssessmentPage() {
   const [showPolicyPanel, setShowPolicyPanel] = useState(false);
   useEffect(() => {
     try {
-      const stored = localStorage.getItem('nexus-assessment-history');
+      const stored = localStorage.getItem('eduverse-assessment-history');
       if (stored) setHistory(JSON.parse(stored));
     } catch { /* empty */ }
   }, []);
@@ -120,6 +128,30 @@ export default function AssessmentPage() {
     () => (selectedClass && selectedSection) ? ACADEMIC_DATA[selectedClass][selectedSection] || [] : [],
     [selectedClass, selectedSection]
   );
+
+  const pickSubjectFromChip = (label: string) => {
+    const v = label.trim();
+    if (!v) return;
+    for (const cls of Object.keys(ACADEMIC_DATA)) {
+      for (const sec of Object.keys(ACADEMIC_DATA[cls] || {})) {
+        const subs = ACADEMIC_DATA[cls][sec] || [];
+        if (subs.includes(v)) {
+          setSelectedClass(cls);
+          setSelectedSection(sec);
+          setSelectedSubject(v);
+          setCogniFocusSubject(v);
+          return;
+        }
+      }
+    }
+    setSelectedSubject(v);
+    setCogniFocusSubject(v);
+  };
+
+  useEffect(() => {
+    const s = selectedSubject.trim();
+    if (s) setCogniFocusSubject(s);
+  }, [selectedSubject]);
 
   const dropdownFields: {
     label: string;
@@ -161,7 +193,11 @@ export default function AssessmentPage() {
     try {
       const fd = new FormData();
       fd.append('files', file, file.name);
-      const res = await fetch('/api/extract-text', { method: 'POST', body: fd });
+      const res = await fetch('/api/extract-text', {
+        method: 'POST',
+        headers: { ...authHeaders() },
+        body: fd,
+      });
       if (!res.ok) {
         // fallback to mammoth if backend unavailable
         console.warn('[extractDocxText] backend failed, falling back to mammoth');
@@ -294,30 +330,31 @@ export default function AssessmentPage() {
     };
     const next = [entry, ...history].slice(0, 20);
     setHistory(next);
-    try { localStorage.setItem('nexus-assessment-history', JSON.stringify(next)); } catch { /* empty */ }
+    try { localStorage.setItem('eduverse-assessment-history', JSON.stringify(next)); } catch { /* empty */ }
   };
 
   /**
    * Persist a compact, avatar-ready grade snapshot to localStorage so that
-   * useAvatarAgent.ts can inject it into the next WebSocket message as
+   * useAgentAgent can inject it into the next WebSocket message as
    * `grade_result: { final_grade, subject, criteria_summary }`.
    * This lets Dr. Hamza say things like "أرى إنك حصلت على Merit…" naturally.
    */
   const saveLastGrade = (evalResult: EvaluationResult) => {
     try {
-      const criteria = evalResult.data.criteria ?? [];
-      const criteriaSummary = criteria
-        .map(c => `${c.code}: ${c.verdict === 'Achieved' ? '✓ Achieved' : '✗ Not Achieved'}`)
-        .join(' | ');
+      const coach = buildAssessmentCoachingPayload(evalResult, selectedSubject || '—');
+      persistAssessmentCoaching(coach);
       const snapshot = {
-        final_grade:       evalResult.data.final_grade || 'PENDING',
-        subject:           selectedSubject || '—',
-        criteria_summary:  criteriaSummary,
-        achieved:          evalResult.data.summary.achievedCount,
-        total:             evalResult.data.summary.totalCriteria,
-        ts:                new Date().toISOString(),
+        final_grade: coach.final_grade,
+        subject: coach.subject,
+        criteria_summary: coach.criteria_summary,
+        achieved: coach.achieved,
+        total: coach.total,
+        gaps_detail_ar: coach.gaps_detail_ar,
+        coaching_goal_ar: coach.coaching_goal_ar,
+        ...(coach.report_excerpt ? { report_excerpt: coach.report_excerpt } : {}),
+        ts: coach.ts,
       };
-      localStorage.setItem('nexus-last-grade', JSON.stringify(snapshot));
+      localStorage.setItem('eduverse-last-grade', JSON.stringify(snapshot));
     } catch { /* ignore storage errors */ }
   };
 
@@ -344,11 +381,12 @@ export default function AssessmentPage() {
       if (studentSolutions.length > 0) {
         const res = await fetch('/api/evaluate-multi-file', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify({
             assignment_text: assignmentBrief,
             solutions: studentSolutions,
             unit_id: '14',
+            student_id: getStudentIdForEvaluation(),
           }),
         });
 
@@ -368,11 +406,12 @@ export default function AssessmentPage() {
 
       const res = await fetch('/api/evaluate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({
           student_text: studentAnswer,
           assignment_text: assignmentBrief,
-          unit_id: '14'
+          unit_id: '14',
+          student_id: getStudentIdForEvaluation(),
         })
       });
       const data = await res.json();
@@ -400,7 +439,7 @@ export default function AssessmentPage() {
     try {
       const res = await fetch('/api/plagiarism', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ text: studentAnswer })
       });
       const raw = await res.json();
@@ -487,6 +526,11 @@ export default function AssessmentPage() {
               </div>
             </div>
           ))}
+        </section>
+
+        <section className="mb-10 rounded-2xl border border-white/10 bg-gray-900/50 p-4 backdrop-blur-sm">
+          <h2 className="mb-2 text-sm font-bold text-cyan-200/90">تركيز كوجني على مادة واحدة</h2>
+          <BusinessSubjectChips selectedSubject={selectedSubject} onPick={pickSubjectFromChip} />
         </section>
 
         {/* 2. Upload Section */}

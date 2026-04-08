@@ -1,19 +1,38 @@
 name: E2E
-on: [push, pull_request]
+on:
+  push:
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/e2e.yml'
+  pull_request:
+    paths:
+      - 'frontend/**'
+
 jobs:
   e2e:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest   # faster + cheaper than windows-latest for headless
+    defaults:
+      run:
+        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
       - name: Install deps
-        run: |
-          cd frontend
-          npm ci
-          npm run playwright:install
-      - name: Dev E2E (Chromium)
-        run: |
-          cd frontend
-          npx playwright test
+        run: npm ci
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+      - name: Type-check
+        run: npm run type-check
+      - name: Build production bundle
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+          NEXT_PUBLIC_AGENT_WS: ws://localhost:8000/ws/agent
+      - name: Run Playwright E2E (Chromium)
+        run: npx playwright test --project=chromium
+        env:
+          CI: true

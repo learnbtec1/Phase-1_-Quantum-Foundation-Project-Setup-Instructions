@@ -110,14 +110,23 @@ let _voicesHookAttached = false;
 /** Re-pick after the browser lazy-loads voices (deterministic → same voice again). */
 export function ensureWebSpeechVoicesChangeHook(): void {
   if (typeof window === 'undefined' || _voicesHookAttached) return;
-  _voicesHookAttached = true;
   const synth = window.speechSynthesis;
+  // Some embedded / privacy / headless contexts expose no synthesis API (null) — avoid null.addEventListener.
+  if (!synth) return;
+
+  _voicesHookAttached = true;
   const onChange = () => invalidateStableWebSpeechVoiceCache();
   try {
-    synth.addEventListener('voiceschanged', onChange);
+    if (typeof synth.addEventListener === 'function') {
+      synth.addEventListener('voiceschanged', onChange);
+      return;
+    }
   } catch {
+    /* fall through to legacy */
+  }
+  try {
     synth.onvoiceschanged = onChange;
+  } catch {
+    /* no hook — non-fatal */
   }
 }
-
-ensureWebSpeechVoicesChangeHook();

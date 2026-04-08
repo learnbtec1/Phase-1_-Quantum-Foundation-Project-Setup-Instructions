@@ -18,11 +18,11 @@ export const useAuthStore = create<AuthState>()(
       isAuthenticated: false,
       login: async (email: string, password: string) => {
         // Simple mock authentication
-        if (email === 'student@nexus.edu' && password === 'password123') {
+        if (email === 'student@eduverse.edu' && password === 'password123') {
           const user: User = {
             id: 'student-001',
             name: 'محمد أحمد',
-            email: 'student@nexus.edu',
+            email: 'student@eduverse.edu',
             role: 'student',
           };
           set({ user, isAuthenticated: true });
@@ -32,7 +32,7 @@ export const useAuthStore = create<AuthState>()(
       },
       logout: () => set({ user: null, isAuthenticated: false }),
     }),
-    { name: 'nexus-auth' }
+    { name: 'eduverse-auth' }
   )
 );
 

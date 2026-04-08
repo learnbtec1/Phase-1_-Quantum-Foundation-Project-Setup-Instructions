@@ -1,4 +1,4 @@
-# NEXUS Avatar — Phase Status
+# EDUVERSE Avatar — Phase Status
 
 | Phase | Title | Status | Completed |
 |-------|-------|--------|-----------|

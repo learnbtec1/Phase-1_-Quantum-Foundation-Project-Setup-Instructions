@@ -14,7 +14,7 @@ import asyncio
 import logging
 from typing import Dict, Any, Tuple
 
-from app.services.forensic_engine import (
+from app.archive.forensic_engine import (
     evaluate_one,
     MODEL,
     anthropic_client,
@@ -24,7 +24,7 @@ from app.services.forensic_engine import (
     GRADER_DELAY_SEC,
 )
 
-logger = logging.getLogger("nexus.verifier")
+logger = logging.getLogger("eduverse.verifier")
 
 # Hallucination threshold: re-evaluate if score >= this
 HALLUCINATION_THRESHOLD = 0.50

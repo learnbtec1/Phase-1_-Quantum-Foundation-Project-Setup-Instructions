@@ -4,7 +4,7 @@ import json
 import os
 from typing import List, Optional, Union
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from dotenv import load_dotenv
 
 # Load .env from current working directory (backend root)
@@ -12,18 +12,41 @@ load_dotenv()
 
 class Settings(BaseSettings):
     # ----------------------------
+    # Environment (Phase 4 — production guards)
+    # ----------------------------
+    ENVIRONMENT: str = Field(
+        "development",
+        validation_alias=AliasChoices("ENVIRONMENT", "ENV"),
+    )
+
+    # ----------------------------
     # FastAPI server configuration
     # ----------------------------
     API_V1_STR: str = Field("/api/v1", env="API_V1_STR")
     BACKEND_CORS_ORIGINS: Union[List[str], str] = Field(
-        default_factory=lambda: ["http://localhost:3000"],
-        env="BACKEND_CORS_ORIGINS"
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+        ],
+        env="BACKEND_CORS_ORIGINS",
     )
+    # Phase 5 — TrustedHostMiddleware in production (comma-separated hostnames, no scheme/port).
+    ALLOWED_HOSTS: str = Field("", env="ALLOWED_HOSTS")
 
     # ----------------------------
     # Database configuration
     # ----------------------------
     DATABASE_URL: str = Field("sqlite:///./test.db", env="DATABASE_URL")
+
+    # ----------------------------
+    # JWT (Phase A — Cogni accounts) + schema auto-create (Phase 4)
+    # ----------------------------
+    JWT_SECRET: str = Field("change_this_in_production", env="JWT_SECRET")
+    JWT_ALGORITHM: str = Field("HS256", env="JWT_ALGORITHM")
+    JWT_EXPIRES_MINUTES: int = Field(60 * 24 * 7, env="JWT_EXPIRES_MINUTES")
+    # When None: True in development, False in production (use Alembic migrations in prod).
+    AUTO_CREATE_TABLES: Optional[bool] = Field(default=None, env="AUTO_CREATE_TABLES")
 
     # ----------------------------
     # LLM / Grader configuration
@@ -79,13 +102,6 @@ class Settings(BaseSettings):
         return s in ("1", "true", "yes", "on")
 
     # ----------------------------
-    # JWT (Phase A — Cogni accounts)
-    # ----------------------------
-    JWT_SECRET: str = Field("change_this_in_production", env="JWT_SECRET")
-    JWT_ALGORITHM: str = Field("HS256", env="JWT_ALGORITHM")
-    JWT_EXPIRES_MINUTES: int = Field(60 * 24 * 7, env="JWT_EXPIRES_MINUTES")
-
-    # ----------------------------
     # V28 Digital Human — feature flags (staged rollout)
     # ----------------------------
     ENABLE_CAMERA_FEED: bool = Field(default=True, env="ENABLE_CAMERA_FEED")
@@ -101,6 +117,8 @@ class Settings(BaseSettings):
     ENABLE_RL_POLICY: bool = Field(default=False, env="ENABLE_RL_POLICY")
     ENABLE_REDIS_SESSION_SYNC: bool = Field(default=True, env="ENABLE_REDIS_SESSION_SYNC")
     ENABLE_ETHICAL_FILTER: bool = Field(default=True, env="ENABLE_ETHICAL_FILTER")
+    # Cogni Brain — dynamic prompt suffix from behavior_router + firasah reference
+    ENABLE_EMOTIONAL_INTELLIGENCE: bool = Field(default=True, env="ENABLE_EMOTIONAL_INTELLIGENCE")
     ENABLE_LAYERED_TTS: bool = Field(default=False, env="ENABLE_LAYERED_TTS")
     EMOTIONAL_CONTAGION_INTENSITY: float = Field(0.65, env="EMOTIONAL_CONTAGION_INTENSITY")
 
@@ -138,9 +156,11 @@ class Settings(BaseSettings):
     # Authentication failures (401/403) still fall back so Cogni can speak.
     # Default False keeps edge-tts available as a resilient path after Azure errors.
     TTS_DISABLE_NON_AZURE_FALLBACK: bool = Field(False, env="TTS_DISABLE_NON_AZURE_FALLBACK")
-    # HTTP + WebSocket synthesis: "edge" tries Microsoft Edge online TTS first (free, no Azure key).
-    # "azure" preserves legacy Azure-first ordering when credentials are configured.
-    TTS_PRIMARY_PROVIDER: str = Field("edge", env="TTS_PRIMARY_PROVIDER")
+    # HTTP + WebSocket synthesis: "azure" tries Azure Speech first (default for Cogni WS).
+    # "edge" uses edge-tts first when set explicitly.
+    TTS_PRIMARY_PROVIDER: str = Field("azure", env="TTS_PRIMARY_PROVIDER")
+    # When True, skip Azure and use edge-tts only (diagnostics / broken Azure environments).
+    TTS_FORCE_FALLBACK: bool = Field(False, env="TTS_FORCE_FALLBACK")
     # Retries inside AzureTTSService.synthesize on transient 429 / rate-limit errors
     TTS_AZURE_RETRY_COUNT: int = Field(3, env="TTS_AZURE_RETRY_COUNT")
     TTS_AZURE_RETRY_DELAY_SEC: float = Field(2.5, env="TTS_AZURE_RETRY_DELAY_SEC")
@@ -148,13 +168,77 @@ class Settings(BaseSettings):
     # Ignored if TTS_DISABLE_NON_AZURE_FALLBACK is True.
     TTS_AZURE_429_FALLBACK_EDGE: bool = Field(False, env="TTS_AZURE_429_FALLBACK_EDGE")
 
+    # Jordanian dialect lock (TTS + optional text pass)
+    TTS_FORCE_JORDANIAN: bool = Field(True, env="TTS_FORCE_JORDANIAN")
+    TTS_ARABIC_VOICE_FALLBACK: str = Field("ar-JO-TaimNeural", env="TTS_ARABIC_VOICE_FALLBACK")
+    TTS_REJECT_EGYPTIAN_VOCABULARY: bool = Field(True, env="TTS_REJECT_EGYPTIAN_VOCABULARY")
+    TTS_EDGE_FALLBACK_VOICE: str = Field("ar-JO-TaimNeural", env="TTS_EDGE_FALLBACK_VOICE")
+    TTS_LOG_DIALECT_CORRECTIONS: bool = Field(True, env="TTS_LOG_DIALECT_CORRECTIONS")
+
+    @field_validator(
+        "TTS_FORCE_JORDANIAN",
+        "TTS_REJECT_EGYPTIAN_VOCABULARY",
+        "TTS_LOG_DIALECT_CORRECTIONS",
+        mode="before",
+    )
+    @classmethod
+    def _parse_tts_dialect_bools(cls, v: object) -> bool:
+        if v is None:
+            return True
+        if isinstance(v, bool):
+            return v
+        s = str(v).strip().lower()
+        if s in ("", "0", "false", "no", "off"):
+            return False
+        return s in ("1", "true", "yes", "on")
+
+    @field_validator("AUTO_CREATE_TABLES", mode="before")
+    @classmethod
+    def _parse_auto_create_tables(cls, v: object) -> Optional[bool]:
+        if v is None or v == "":
+            return None
+        if isinstance(v, bool):
+            return v
+        s = str(v).strip().lower()
+        if s in ("0", "false", "no", "off"):
+            return False
+        if s in ("1", "true", "yes", "on"):
+            return True
+        return None
+
+    @model_validator(mode="after")
+    def _phase4_production_defaults(self) -> Settings:
+        from app.core.production_guards import (
+            environment_is_production,
+            validate_jwt_secret_for_production,
+        )
+
+        is_prod = environment_is_production(self.ENVIRONMENT)
+        if self.AUTO_CREATE_TABLES is None:
+            self.AUTO_CREATE_TABLES = False if is_prod else True
+        if is_prod:
+            validate_jwt_secret_for_production(self.JWT_SECRET)
+            ws_anon = os.getenv("COGNI_WS_ALLOW_ANONYMOUS", "false").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+            if ws_anon:
+                raise ValueError(
+                    "COGNI_WS_ALLOW_ANONYMOUS must be false in production; "
+                    "use JWT subprotocol or an auth frame for /ws/agent."
+                )
+        return self
+
+    @property
+    def is_production(self) -> bool:
+        from app.core.production_guards import environment_is_production
+
+        return environment_is_production(self.ENVIRONMENT)
+
     # ----------------------------
     # Helper for OpenAI API Key Validation
     # ----------------------------
-    def validate_openai_key(self):
-        if not self.OPENAI_API_KEY:
-            raise ValueError("OPENAI_API_KEY is not set. Please configure it in the .env file.")
-
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

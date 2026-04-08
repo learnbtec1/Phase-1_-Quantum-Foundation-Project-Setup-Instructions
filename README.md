@@ -1,6 +1,6 @@
 # مشروع "المعلم الرقمي الأردني الخارق" — الإصدار الجامع النهائي
 
-> **NEXUS Platform v3.0** | Next.js 14+ · FastAPI · Python Tkinter · Three.js · VRM Avatar
+> **EDUVERSE Platform v3.0** | Next.js 16 · FastAPI · Python Tkinter · Three.js · VRM Avatar
 
 ---
 
@@ -186,6 +186,44 @@ npm run dev
 ```
 
 الواجهة على **http://localhost:3000**.
+
+## 🐳 تشغيل المشروع باستخدام Docker (الإنتاج / سطح المكتب)
+
+المستودع يتضمن [`docker-compose.yml`](docker-compose.yml) في الجذر: **Redis** (`redis`)، **Postgres** (`db`)، **FastAPI** (`backend`)، **Next.js** (`frontend`). ChromaDB للفهرسة متّصل افتراضياً بمسار داخل حاوية الـ backend (`/app/data/chroma_cogni`). خدمة **ChromaDB منفصلة** اختيارية تحت profile اسمه `chroma` (منفذ المضيف `8001`).
+
+### خطوات سريعة
+
+1. من **جذر المشروع** (حيث يوجد `docker-compose.yml`):
+   ```bash
+   cp backend/.env.example .env
+   ```
+2. عدّل `.env` في الجذر: ضع على الأقل `OPENAI_API_KEY` أو `ANTHROPIC_API_KEY` حسب المحرك، و`JWT_SECRET` قوياً للإنتاج.
+3. تشغيل الخدمات:
+   ```bash
+   docker compose up -d
+   ```
+4. الواجهة: **http://localhost:3000** — الخلفية: **http://localhost:8000** — وثائق API: **http://localhost:8000/docs**
+
+### ChromaDB الاختياري (خادم مستقل)
+
+```bash
+docker compose --profile chroma up -d chromadb
+```
+
+يمكن توجيه تكاملات المستقبل عبر متغيرات مثل `CHROMA_HOST` / منفذ الخدمة (حسب إعداد التطبيق). حتى ذلك، يبقى الاستيعاب المحلي عبر `docker compose --profile ingest run --rm btec-ingest` كما في الملف.
+
+### جدول متغيرات البيئة الأساسية (الجذر `.env` مع Compose)
+
+| المتغير | الوصف |
+|--------|--------|
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | مفاتيح نماذج التقييم والمساعد (حسب `GRADER_MODEL`) |
+| `DATABASE_URL` | في Compose يُضبط تلقائياً على Postgres الداخلي؛ محلياً قد يكون SQLite |
+| `REDIS_URL` | في Compose: `redis://redis:6379/0` — جلسة Redis وتتبع nudge التقييم |
+| `USE_DB` | **⚠️ ملاحظة:** في بيئة التطوير المحلية (بدون Docker) غالباً `USE_DB=false` (InMemory). **في الإنتاج ومع Docker يُفضَّل `USE_DB=true` مع Postgres** حتى تُحفظ التقييمات ويرتبط الأفاتار بنفس الطالب بعد إعادة التحميل. |
+| `JWT_SECRET` | توقيع رموز الدخول — غيّره في الإنتاج |
+| `CHROMA_HOST` | (اختياري) عند استخدام خدمة Chroma منفصلة بدل التخزين المحلي داخل الـ backend |
+
+تفاصيل إضافية واستكشاف الأخطاء: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 ## متغيرات البيئة
 

@@ -20,12 +20,12 @@ import asyncio
 import logging
 from typing import Dict, Any, Optional, List
 
-from app.services.forensic_engine import (
+from app.archive.forensic_engine import (
     evaluate_one,
     MODEL,
 )
 
-logger = logging.getLogger("nexus.appeal")
+logger = logging.getLogger("eduverse.appeal")
 
 # ─── In-memory job store ──────────────────────────────────────────────────────
 # Maps job_id → { assignment_text, student_text, adv_constraints, criteria_results }

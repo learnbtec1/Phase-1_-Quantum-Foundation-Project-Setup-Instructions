@@ -1,4 +1,4 @@
-# NEXUS Platform — Daily Work Log
+# EDUVERSE Platform — Daily Work Log
 
 ---
 
@@ -33,9 +33,9 @@
   - إضافة `DOCKER_API_VERSION=1.44` كـ fallback
   - إصلاح `docker-compose.yml` — healthcheck كان يضرب `/health` (404) بدل `/api/health` (200)
 - **النتيجة:** Stack يعمل بالكامل:
-  - `nexus_db` → healthy ✓
-  - `nexus_backend` → healthy ✓
-  - `nexus_frontend` → running ✓
+  - `eduverse_db` → healthy ✓
+  - `eduverse_backend` → healthy ✓
+  - `eduverse_frontend` → running ✓
 
 ### فحص API النهائي
 
@@ -65,7 +65,7 @@
 - Docker Desktop exe: `C:\Program Files\Docker\Docker\frontend\Docker Desktop.exe`
 - WSL data: `D:\DockerData` (فارغ — Docker يستخدم default LocalAppData)
 - `audio=false` في health → مفتاح Azure Speech غير مضبوط في `backend/.env`
-- `nexus_frontend` مشكلة node_modules volume فاسد → يحتاج `docker volume rm` وإعادة build
+- `eduverse_frontend` مشكلة node_modules volume فاسد → يحتاج `docker volume rm` وإعادة build
 
 ---
 
@@ -222,9 +222,9 @@ AUDIO_DIR=./data/audio   # مسار WAV
 | `AUDIO_DIR` | `./data/audio` |
 
 ### مفاتيح localStorage الثابتة (لا تتغير أبداً)
-- `nexus-auth`
-- `nexus-assessments`
-- `nexus-vr`
+- `eduverse-auth`
+- `eduverse-assessments`
+- `eduverse-vr`
 - `btec_platform_progress`
 
 ### Docker

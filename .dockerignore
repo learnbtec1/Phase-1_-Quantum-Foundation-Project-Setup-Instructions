@@ -1,0 +1,30 @@
+# الملفات الكبيرة غير الضرورية
+**/node_modules
+**/.next
+**/data/postgres
+**/data/audio
+**/data/store
+**/data/analytics
+**/data/audit_logs
+**/data/student_memory
+**/data/chroma_cogni
+**/*.log
+**/*.mp3
+**/*.wav
+**/*.mp4
+**/*.mov
+**/New folder/
+**/btec-bus/
+**/btec_specs/
+**/cogni_reference_packs/
+
+# ملفات نظام التشغيل
+**/.DS_Store
+**/Thumbs.db
+**/.git
+**/.vscode
+**/.idea
+
+# ملفات البيئة
+**/.env.local
+**/.env.development.local

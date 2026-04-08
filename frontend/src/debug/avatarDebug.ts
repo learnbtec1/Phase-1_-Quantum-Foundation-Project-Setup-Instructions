@@ -19,7 +19,7 @@ if (typeof window !== 'undefined') {
   w.__avatarDebug.testGesture = (type: string, detail: any = {}) =>
     window.dispatchEvent(new CustomEvent('avatar:gesture', { detail: { type, ...detail } }));
 
-  // Dispatch a speak-text event (triggers Web Speech synthesis via avatar event bus).
+  // Local avatar TTS only (avatar:speak:text → Web Speech or speakWithTTS). Does NOT send to the agent WebSocket; use window.__cogniSendText in dev for that.
   w.__avatarDebug.testSpeak = (txt: string) =>
     window.dispatchEvent(new CustomEvent('avatar:speak:text', { detail: { text: txt } }));
 }

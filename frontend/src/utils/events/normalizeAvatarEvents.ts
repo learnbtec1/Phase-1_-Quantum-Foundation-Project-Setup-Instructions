@@ -4,14 +4,15 @@
  * PERMANENT NORMALIZER — Full Human Persona Kernel / Avatar Event Schema
  *
  * Maps BehaviorRulesEngine + AgentDirector gesture aliases → rig tokens consumed
- * by AvatarCanvas.onGesture (VRMA + procedural paths).
+ * by AvatarCanvas.onGesture (procedural rig + gesture normalisation).
  */
 
 // ─── Gesture token canonicalisation ─────────────────────────────────────────
 
-/** Tokens AvatarCanvas.onGesture handles (VRMA keys + procedural aliases). */
+/** Tokens AvatarCanvas.onGesture handles (procedural + legacy gesture aliases). */
 export type GestureToken =
   | 'wave'
+  | 'explain'
   | 'openHand'
   | 'point'
   | 'beat'
@@ -49,6 +50,10 @@ const BEHAVIOR_TO_RIG: Record<string, GestureToken> = {
   Point: 'point',
   POINT: 'point',
   pointing: 'point',
+  /** إيماءة إجرائية VRM (VRMSkeletonManager) — كانت تُسقَط سابقاً إلى idle لغيابها هنا */
+  explain: 'explain',
+  Explain: 'explain',
+  EXPLAIN: 'explain',
   beat: 'beat',
   Beat: 'beat',
   BEAT: 'beat',
@@ -74,11 +79,11 @@ const BEHAVIOR_TO_RIG: Record<string, GestureToken> = {
 
   // Director / co-speech
   think: 'think',
-  peace: 'peace',
+  peace: 'wave',
   agree: 'agree',
   clap: 'clap',
-  cheer: 'cheer',
-  look: 'look',
+  cheer: 'clap',
+  look: 'wave',
 };
 
 function canonicalGestureToken(raw: string | undefined): GestureToken {
@@ -103,6 +108,8 @@ function canonicalGestureToken(raw: string | undefined): GestureToken {
 export interface GestureEventInput {
   type?: string;
   name?: string;
+  /** Some pipelines only set `gesture` (e.g. ad-hoc CustomEvent) — treat like type/name. */
+  gesture?: string;
   side?: 'left' | 'right' | 'both';
   duration?: number;
   intensity?: number;
@@ -114,6 +121,8 @@ export interface EmotionEventInput {
   emotion?: string;
   tag?: string;
   strength?: number;
+  /** يُعادل `strength` لتوافق أحداث `avatar:emotion` اليدوية */
+  intensity?: number;
   duration?: number;
 }
 
@@ -127,6 +136,8 @@ export interface ListeningEventInput {
 
 export interface GestureEventDetail {
   type: GestureToken;
+  /** Mirrors `type` when it is also a VRMSkeletonManager GestureId — helps listeners that read `gesture` first. */
+  gesture?: GestureToken;
   side: 'left' | 'right' | 'both';
   duration: number;
   intensity: number;
@@ -153,17 +164,22 @@ export function normalizeAvatarEvent(detail: ListeningEventInput): ListeningEven
 export function normalizeAvatarEvent(
   detail: GestureEventInput | EmotionEventInput | ListeningEventInput,
 ): GestureEventDetail | EmotionEventDetail | ListeningEventDetail {
-  if ('type' in detail || 'name' in detail) {
+  if ('type' in detail || 'name' in detail || 'gesture' in detail) {
     const g = detail as GestureEventInput;
-    const rawToken = g.type ?? g.name;
-    return {
-      type:      canonicalGestureToken(rawToken),
+    const rawToken = g.type ?? g.name ?? g.gesture;
+    const type = canonicalGestureToken(rawToken);
+    const out: GestureEventDetail = {
+      type,
       side:      (g.side ?? 'right') as 'left' | 'right' | 'both',
       duration:  g.duration  ?? 2.0,
       intensity: g.intensity ?? 0.8,
       variance:  g.variance  ?? Math.random(),
       preroll:   g.preroll   ?? 0,
     };
+    if (type === 'idle' || type === 'explain' || type === 'point' || type === 'think' || type === 'wave' || type === 'clap' || type === 'agree') {
+      out.gesture = type;
+    }
+    return out;
   }
 
   if ('emotion' in detail || 'tag' in detail) {
@@ -171,7 +187,8 @@ export function normalizeAvatarEvent(
     const result: EmotionEventDetail = {
       emotion: (em.emotion ?? em.tag ?? 'neutral').toLowerCase(),
     };
-    if (em.strength !== undefined) result.strength = em.strength;
+    const s = em.strength ?? em.intensity;
+    if (s !== undefined) result.strength = s;
     if (em.duration !== undefined) result.duration = em.duration;
     return result;
   }

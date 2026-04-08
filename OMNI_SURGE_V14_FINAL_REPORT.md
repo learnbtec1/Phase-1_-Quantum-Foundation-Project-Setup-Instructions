@@ -164,9 +164,9 @@ src/app/simulation/page.tsx(265,74): error TS2322:
 
 | Key | Value |
 |-----|-------|
-| `nexus-auth` | User session (unchanged) |
-| `nexus-assessments` | Grading results (unchanged) |
-| `nexus-vr` | VR progress (unchanged) |
+| `eduverse-auth` | User session (unchanged) |
+| `eduverse-assessments` | Grading results (unchanged) |
+| `eduverse-vr` | VR progress (unchanged) |
 | `btec_platform_progress` | Gameplay state (unchanged) |
 | `avatarSettings` | **NEW** v14 avatar configuration |
 

@@ -1,2 +1,2 @@
 # -*- coding: utf-8 -*-
-"""Repository layer for NEXUS evaluations."""
+"""Repository layer for EDUVERSE evaluations."""

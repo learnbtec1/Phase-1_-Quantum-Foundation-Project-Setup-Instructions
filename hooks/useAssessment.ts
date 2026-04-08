@@ -47,7 +47,7 @@ export const useAssessmentStore = create<AssessmentState>()(
       },
       getAssessments: () => get().assessments,
     }),
-    { name: 'nexus-assessments' }
+    { name: 'eduverse-assessments' }
   )
 );
 

@@ -22,8 +22,11 @@ import re
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
+
+from app.api.deps import get_current_user, get_teacher_user
+from app.models.db_models import User
 
 from app.services.btec_knowledge import (
     list_units,
@@ -124,7 +127,10 @@ async def get_unit(unit_id: str) -> dict:
 
 
 @router.post("/units", status_code=status.HTTP_201_CREATED, summary="Ingest a new BTEC unit spec")
-async def ingest_unit(payload: UnitIn) -> dict:
+async def ingest_unit(
+    payload: UnitIn,
+    _: User = Depends(get_teacher_user),
+) -> dict:
     """Upload and persist a new BTEC unit specification.
 
     The spec is saved as JSON in backend/data/btec_specs/{unit_id}.json.
@@ -173,7 +179,10 @@ async def ingest_unit(payload: UnitIn) -> dict:
 
 
 @router.post("/progress", summary="Resolve teaching level from student progress")
-async def resolve_progress(payload: ProgressIn) -> ProgressOut:
+async def resolve_progress(
+    payload: ProgressIn,
+    _: User = Depends(get_current_user),
+) -> ProgressOut:
     """Given a unit_id and list of achieved criteria, return:
     - current_level (pass / merit / distinction)
     - next_criterion (the next criterion Cogni should scaffold toward)
@@ -181,6 +190,8 @@ async def resolve_progress(payload: ProgressIn) -> ProgressOut:
 
     This endpoint is called by the frontend before/during a tutoring session
     to give Cogni the adaptive teaching context.
+
+    Requires a valid Bearer token (any authenticated role). Rate limiting is handled by global API middleware.
     """
     unit_id_clean = payload.unit_id.strip().lower()
     if not _UNIT_ID_RE.match(unit_id_clean):

@@ -9,27 +9,35 @@ test.describe('API Endpoints', () => {
     expect(body.reqId || body.timestamp).toBeTruthy();
   });
 
-  test('/api/chat should include reqId in response', async ({ request }) => {
+  test('/api/chat returns 401 without Authorization Bearer', async ({ request }) => {
     const response = await request.post('/api/chat', {
       data: { message: 'test' },
     });
-    
+    expect(response.status()).toBe(401);
     const body = await response.json();
-    expect(body.reqId || body.error).toBeTruthy();
-    
-    if (response.status() === 200) {
-      expect(body.reply).toBeTruthy();
-    }
+    expect(body.error).toBeTruthy();
+  });
+
+  test('/api/chat with E2E_JWT may reach upstream (optional)', async ({ request }) => {
+    const token = process.env.E2E_JWT;
+    test.skip(!token, 'Set E2E_JWT to exercise authenticated BFF → backend');
+    const response = await request.post('/api/chat', {
+      data: { message: 'test' },
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const body = await response.json();
+    expect(body.reqId || body.error || body.reply).toBeTruthy();
+    expect([200, 401, 403, 429, 502, 503]).toContain(response.status());
   });
 
   test('/api/tts should include reqId and proper error codes', async ({ request }) => {
     const response = await request.post('/api/tts', {
       data: { text: 'test' },
     });
-    
+
     const headers = response.headers();
     expect(headers['x-request-id'] || response.status() === 503).toBeTruthy();
-    
+
     if (response.status() !== 200) {
       const body = await response.json();
       expect(body.reqId).toBeTruthy();

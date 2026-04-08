@@ -221,12 +221,12 @@ Filter by source:
 ### Application Tab (localStorage)
 ```
 1. افتح DevTools → Application → Local Storage
-2. ابحث عن nexus-* keys
+2. ابحث عن eduverse-* keys
 
 Expected keys:
-✅ nexus-auth          (user session)
-✅ nexus-assessments   (grades/submissions)
-✅ nexus-vr            (VR progress)
+✅ eduverse-auth          (user session)
+✅ eduverse-assessments   (grades/submissions)
+✅ eduverse-vr            (VR progress)
 
 لاحظ:
 - لا تحذفها (data loss!)

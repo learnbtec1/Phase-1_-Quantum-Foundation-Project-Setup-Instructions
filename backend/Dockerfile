@@ -12,7 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install/pkgs -r requirements.txt
+# Includes pysqlite3-binary (SQLite >= 3.35 for Chroma) and edge-tts>=7.x
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir --prefix=/install/pkgs -r requirements.txt
 
 
 # ── Stage 2: runtime image ───────────────────────────────────────────────────

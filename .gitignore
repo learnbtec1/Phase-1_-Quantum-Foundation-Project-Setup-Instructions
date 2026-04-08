@@ -32,6 +32,8 @@ tts.wav
 
 # Local / vendor bundles (do not ship in repo)
 HabibiJordan/
+# Deprecated Electron shell — product scope is web + API only
+cogni-desktop-companion/
 frontend/public/assets/*.exe
 *.winmd
 # Too large for GitHub (>100MB); host separately or use Git LFS

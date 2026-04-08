@@ -36,10 +36,13 @@ import {
 import { useVAD }                          from '@/hooks/useVAD';
 import { useBrainStore }                   from '@/store/useBrainStore';
 import { agentDirector }                   from '@/ai/avatar/AgentDirector';
+import { unifiedGestureEngine, initGestureNormalizer } from '@/ai/cognitive/UnifiedGestureEngine';
+import { PRIORITY } from '@/constants/gestures';
 import { emotionalMemoryManager }          from '@/ai/avatar/EmotionalMemoryManager';
 import type { EmotionLabel, AgentFrame } from '@/types/ai';
-import { COGNI_PERSONA }                   from '@/config/personality';
+import { COGNI_PERSONA, COGNI_JSON_BRAIN_SYSTEM_APPEND } from '@/config/personality';
 import { buildDeviceContextPayload }       from '@/lib/deviceContext';
+import { authHeaders }                     from '@/lib/auth';
 import { resolveSpeakRate, stopTTSGlobally } from '@/ai/io/tts';
 import {
   getStableWebSpeechVoice,
@@ -53,10 +56,35 @@ import {
 import { normalizeSpeechFrame, toAgentFrame } from '@/lib/frameNormalizer';
 import { dispatchAvatar } from '@/utils/events/normalizeAvatarEvents';
 import {
+  analyzeIntent,
+  intentToEmotionOverlay,
+  intentToGestureHint,
+} from '@/ai/intentAnalyzer';
+import {
+  getNextStrategy,
+  buildStrategySystemSuffix,
+  getStrategyAvatarBehavior,
+  type StrategyContext,
+  type StudentLevel,
+  type StudentState,
+  type BtecTarget,
+  type LearningMoment,
+} from '@/ai/teaching/TeachingStrategyEngine';
+import { intuitionEngine, getPhysiognomySummary } from '@/ai/cognitive/IntuitionEngine';
+import { persuasionEngine } from '@/ai/cognitive/PersuasionEngine';
+import { temporalAwareness } from '@/ai/cognitive/TemporalAwareness';
+import {
+  normalizeGesturesArrayFromWs,
   normalizePerformanceList,
   schedulePerformanceCues,
   type PerformanceCue,
 } from '@/ai/avatar/performanceTags';
+import {
+  COGNI_FOCUS_SUBJECT_EVENT,
+  getCogniFocusSubject,
+  readAssessmentCoaching,
+  type AssessmentCoachingPayload,
+} from '@/lib/cogniSessionContext';
 
 /**
  * True while HTMLAudioElement from a WS `speech` frame is playing.
@@ -73,7 +101,7 @@ export interface SendTextOptions {
 }
 
 export interface AgentAgentOptions {
-  /** WebSocket endpoint URL. Default: ws://localhost:8000/ws/agent */
+  /** WebSocket endpoint URL. Default: من `NEXT_PUBLIC_API_URL` أو `ws://127.0.0.1:8000/ws/agent` */
   wsUrl?:         string;
   /** Attempt automatic reconnect after disconnect. Default: true */
   autoReconnect?: boolean;
@@ -270,6 +298,23 @@ function pcmToWavBlob(pcm: Uint8Array, sampleRate: number): Blob {
   return new Blob([buf], { type: 'audio/wav' });
 }
 
+/**
+ * Normalise a raw time value to **seconds** for LipSyncManager.
+ * - If the field is `offset_ms` or `time_ms` → divide by 1000.
+ * - If the field is `t` (Azure/server convention already in seconds) → keep.
+ * - Auto-detect: if value > 300 assume ms and convert.
+ */
+function toVisemeSec(
+  e: Record<string, unknown>,
+  key: string,
+  isExplicitMs: boolean,
+): number {
+  const raw = Number(e[key] ?? 0);
+  if (!Number.isFinite(raw)) return 0;
+  if (isExplicitMs || raw > 300) return raw / 1000;
+  return raw;
+}
+
 /** Normalize viseme arrays from Next `/api/tts-with-timing` → FastAPI (viseme_events) or legacy shapes. */
 function normalizeVisemeEventsPayload(data: unknown): Array<{ t: number; id: number }> | null {
   if (!data || typeof data !== 'object') return null;
@@ -284,32 +329,53 @@ function normalizeVisemeEventsPayload(data: unknown): Array<{ t: number; id: num
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue;
     const e = item as Record<string, unknown>;
-    const t = Number(e.offset_ms ?? e.t ?? e.time_ms ?? 0);
+    // Priority: offset_ms (explicit ms) → time_ms (explicit ms) → t (seconds)
+    let tSec: number;
+    if ('offset_ms' in e) {
+      tSec = toVisemeSec(e, 'offset_ms', true);
+    } else if ('time_ms' in e) {
+      tSec = toVisemeSec(e, 'time_ms', true);
+    } else {
+      tSec = toVisemeSec(e, 't', false);
+    }
     const id = Number(e.viseme_id ?? e.id ?? e.visemeId ?? 0);
     cues.push({
-      t: Math.max(0, Number.isFinite(t) ? t : 0),
-      id: Math.min(21, Math.max(0, Number.isFinite(id) ? id : 0)),
+      t:  Math.max(0, tSec),
+      id: Math.min(21, Math.max(0, Number.isFinite(id) ? Math.round(id) : 0)),
     });
   }
-  return cues.length ? cues : null;
+  if (!cues.length) return null;
+  // Sort ascending (API may return unsorted)
+  cues.sort((a, b) => a.t - b.t);
+  return cues;
 }
 
-/** Normalize viseme arrays from Agent WS `speech` frames (Azure: { t, id }). */
+/** Normalize viseme arrays from Agent WS `speech` frames. */
 function normalizeAgentWsVisemeCues(raw: unknown): Array<{ t: number; id: number }> | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const cues: Array<{ t: number; id: number }> = [];
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue;
     const o = item as Record<string, unknown>;
-    const t = Number(o.t ?? o.offset_ms ?? o.time_ms ?? 0);
+    // WS convention varies: prefer offset_ms if present (explicit ms), else t (seconds)
+    let tSec: number;
+    if ('offset_ms' in o) {
+      tSec = toVisemeSec(o, 'offset_ms', true);
+    } else if ('time_ms' in o) {
+      tSec = toVisemeSec(o, 'time_ms', true);
+    } else {
+      tSec = toVisemeSec(o, 't', false);
+    }
     const id = Number(o.id ?? o.viseme_id ?? o.visemeId ?? 0);
-    if (!Number.isFinite(t) || !Number.isFinite(id)) continue;
+    if (!Number.isFinite(tSec) || !Number.isFinite(id)) continue;
     cues.push({
-      t: Math.max(0, t),
+      t:  Math.max(0, tSec),
       id: Math.min(21, Math.max(0, Math.round(id))),
     });
   }
-  return cues.length ? cues : null;
+  if (!cues.length) return null;
+  cues.sort((a, b) => a.t - b.t);
+  return cues;
 }
 
 /**
@@ -326,7 +392,7 @@ async function fetchVisemeCuesFromTtsApi(
   try {
     const res = await fetch('/api/tts-with-timing', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({
         text: trimmed,
         emotion: 'neutral',
@@ -380,21 +446,41 @@ function stripInternalSystemEvents(raw: string): string {
 function _consumeLastGrade(): Record<string, unknown> | null {
   if (typeof window === 'undefined') return null;
   try {
-    const raw = localStorage.getItem('nexus-last-grade');
+    const raw = localStorage.getItem('eduverse-last-grade');
     if (!raw) return null;
     const snapshot = JSON.parse(raw) as Record<string, unknown>;
     // Consume immediately — one-shot delivery to the avatar.
-    localStorage.removeItem('nexus-last-grade');
+    localStorage.removeItem('eduverse-last-grade');
     return snapshot;
   } catch {
     return null;
   }
 }
 
+function trimAssessmentCoachingForWs(p: AssessmentCoachingPayload): Record<string, unknown> {
+  return {
+    final_grade: p.final_grade,
+    subject: p.subject,
+    achieved: p.achieved,
+    total: p.total,
+    criteria_summary: (p.criteria_summary || '').slice(0, 1200),
+    gaps_detail_ar: (p.gaps_detail_ar || '').slice(0, 3500),
+    coaching_goal_ar: (p.coaching_goal_ar || '').slice(0, 800),
+    ts: p.ts,
+    ...(p.report_excerpt ? { report_excerpt: String(p.report_excerpt).slice(0, 1200) } : {}),
+  };
+}
+
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
+/** يطابق AvatarAgentClient: `NEXT_PUBLIC_API_URL` → WebSocket `/ws/agent` */
+const DEFAULT_WS_AGENT_URL =
+  typeof process !== 'undefined' && process.env.NEXT_PUBLIC_API_URL?.trim()
+    ? `${process.env.NEXT_PUBLIC_API_URL.trim().replace(/\/$/, '').replace(/^https:\/\//i, 'wss://').replace(/^http:\/\//i, 'ws://')}/ws/agent`
+    : 'ws://127.0.0.1:8000/ws/agent';
+
 export function useAgentAgent({
-  wsUrl         = 'ws://localhost:8000/ws/agent',
+  wsUrl         = DEFAULT_WS_AGENT_URL,
   autoReconnect = true,
   lang          = 'ar-JO',   // Jordanian Arabic dialect — Dr. Hamza
 }: AgentAgentOptions = {}): AgentAgentState {
@@ -443,13 +529,29 @@ export function useAgentAgent({
   const isProcessingRef = useRef(isProcessing);
   const isRecordingRef = useRef(false);
   /** Timers for co-speech keyword gestures — cleared on new reply / barge-in */
-  const coSpeechTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const coSpeechTimersRef = useRef<number[]>([]);
   /** Performance Tag System — word-synced cues from backend `performance` array */
-  const performanceTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const performanceTimersRef = useRef<number[]>([]);
   /** Abort in-flight viseme fetch from `/api/tts-with-timing` when a new speech frame arrives. */
   const visemeFetchAbortRef = useRef<AbortController | null>(null);
   /** Last inferred user mood for emotional memory (not avatar reply emotion). */
   const lastUserMoodRef = useRef<EmotionLabel>('neutral');
+
+  // ── Teaching Strategy Engine ────────────────────────────────────────────────
+  const teachingCtxRef = useRef<StrategyContext>({
+    studentLevel:     'developing',
+    studentState:     'neutral',
+    btecTarget:       'unknown',
+    learningMoment:   'session_start',
+    sessionTurnCount: 0,
+  });
+  /** Strategy suffix sent with each LLM request as extra system context */
+  const activeStrategySuffixRef = useRef<string>('');
+  const sessionTurnCountRef = useRef(0);
+  /** Keep-alive ping interval — cleared on WS close / unmount. */
+  const keepAliveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Connection-open timeout — cleared in onopen; fires close() if server never opens. */
+  const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearCoSpeechTimers = useCallback((): void => {
     coSpeechTimersRef.current.forEach(clearTimeout);
@@ -507,7 +609,7 @@ export function useAgentAgent({
     }
     serverTtsPlaybackActive = false;
     stopTTSGlobally();
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
       try {
         window.speechSynthesis.cancel();
       } catch { /* ignore */ }
@@ -537,6 +639,10 @@ export function useAgentAgent({
       coSpeechDialogue?: string;
       /** When true, never schedule co-speech gestures (structured `performance` owns the turn). */
       coSpeechDisabled?: boolean;
+      /**
+       * يُستدعى مرة واحدة عند بدء التشغيل الفعلي (onplay) — لمزامنة تعبير الوجه و performance مع الصوت.
+       */
+      onAudibleAnchor?: () => void;
     },
   ): Promise<void> => {
     stopAllAudio();
@@ -561,6 +667,8 @@ export function useAgentAgent({
 
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
+      // crossOrigin MUST be set before src is used for MediaElementSource (wireAnalyser)
+      audio.crossOrigin = 'anonymous';
       currentAudioRef.current = audio;
 
       const serverCues = normalizeAgentWsVisemeCues(opts?.visemeCues);
@@ -575,37 +683,48 @@ export function useAgentAgent({
       let coSpeechScheduled = false;
       const tryScheduleCoSpeech = (): void => {
         if (coSpeechDisabled || !coDialogue || coSpeechScheduled || !mountedRef.current) return;
-        const fromAudio =
-          audio.duration > 0 && Number.isFinite(audio.duration) ? audio.duration * 1000 : 0;
-        const fromVis = durationMsFromVisemeCues(serverCues);
-        const est = estimateDialogueDurationMs(fallbackText);
-        const eff = Math.max(fromAudio, fromVis, est * 0.55);
+        // Prefer actual audio duration (most accurate); fall back to viseme timeline end, then estimate
+        const fromAudio  = audio.duration > 0 && Number.isFinite(audio.duration) ? audio.duration * 1000 : 0;
+        const fromVis    = durationMsFromVisemeCues(serverCues); // now correctly converts seconds → ms
+        const fromEst    = estimateDialogueDurationMs(fallbackText);
+        // Take the best available source; estimate is a last resort floor
+        const eff = fromAudio > 0 ? fromAudio : fromVis > 0 ? fromVis : Math.max(fromEst, 4000);
         scheduleCoSpeechForDialogue(coDialogue, eff);
         coSpeechScheduled = true;
       };
       audio.addEventListener('loadedmetadata', tryScheduleCoSpeech, { once: true });
+      // Fallback if loadedmetadata fires before we register (rare in Safari)
       window.setTimeout(() => {
         if (coDialogue && !coSpeechScheduled && mountedRef.current) tryScheduleCoSpeech();
-      }, 500);
+      }, 350);
 
       let playbackStarted = false;
+      let audibleStartFired = false;
 
       audio.onplay = () => {
         playbackStarted = true;
         serverTtsPlaybackActive = true;
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('avatar:speak:start'));
+        if (!audibleStartFired) {
+          audibleStartFired = true;
+          try {
+            opts?.onAudibleAnchor?.();
+          } catch (cbErr) {
+            console.warn('[useAgentAgent] onAudibleAnchor error:', cbErr);
+          }
         }
         useBrainStore.getState().setTalking(true);
+        if (typeof window !== 'undefined') {
+          // Dispatch avatar:audio:element FIRST so AvatarCanvas wires the analyser ref
+          // before avatar:speak:start sets isTalkingRef.current = true in the same turn.
+          window.dispatchEvent(new CustomEvent('avatar:audio:element', { detail: { audio } }));
+          window.dispatchEvent(new CustomEvent('avatar:speak:start'));
+        }
         console.log('[useAgentAgent] Server TTS play:start', { format: fmt || 'pcm-wrap', blobType: blob.type });
         void visemeCuePromise.then((cues) => {
           if (!mountedRef.current || !cues?.length || typeof window === 'undefined') return;
-          window.dispatchEvent(new CustomEvent('avatar:viseme:start'));
+          // Dispatch timeline after audio:element is already bound
           window.dispatchEvent(
             new CustomEvent('avatar:visemes:timeline', { detail: { cues } }),
-          );
-          window.dispatchEvent(
-            new CustomEvent('avatar:audio:element', { detail: { audio } }),
           );
           console.log(
             '[useAgentAgent] Lip-sync timeline bound —',
@@ -636,6 +755,14 @@ export function useAgentAgent({
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('avatar:visemes:clear'));
           window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+        }
+        if (!audibleStartFired) {
+          audibleStartFired = true;
+          try {
+            opts?.onAudibleAnchor?.();
+          } catch {
+            /* ignore */
+          }
         }
         console.warn(
           '[useAgentAgent] Server TTS decode/play error — no Web Speech fallback (unified pipeline)',
@@ -685,7 +812,10 @@ export function useAgentAgent({
     const frame = raw as Record<string, unknown>;
     const type  = (frame.type ?? '') as string;
 
-    console.log(`[useAgentAgent] WS frame type="${type}"`, frame);
+    // pong: keep silent — avoid console spam from 28s keep-alive
+    if (type !== 'pong') {
+      console.log(`[useAgentAgent] 📨 Received:`, type, frame);
+    }
 
     switch (type) {
 
@@ -695,10 +825,185 @@ export function useAgentAgent({
         if (!transcript) break;
         setLastTranscript(transcript);
         useBrainStore.getState().pushTurn({ role: 'user', text: transcript });
+        useBrainStore.getState().setUserSpeaking(true);
+        setTimeout(() => useBrainStore.getState().setUserSpeaking(false), 800);
         const um = (frame.user_mood ?? frame.userMood) as string | undefined;
         lastUserMoodRef.current = um?.trim() ? toEmotionLabel(um.trim()) : 'neutral';
-        console.log('[useAgentAgent] Transcript:', transcript.slice(0, 80));
+
+        // ── All intelligence layers: intuition + strategy + persuasion + temporal ──
+        sessionTurnCountRef.current += 1;
+        temporalAwareness.incrementTurn();
+
+        const lowerTx = transcript.toLowerCase();
+        const learningMoment: LearningMoment = (() => {
+          if (/ما فهمت|مش واضح|مش فاهم|confused|don.t understand|لا أفهم/.test(lowerTx)) return 'confusion_signal';
+          if (/[؟?]/.test(transcript) && /كيف|ليش|ما|شو|وين|why|how|what|explain/.test(lowerTx)) return 'question_asked';
+          if (/غلط|خطأ|error|wrong|incorrect/.test(lowerTx)) return 'error_made';
+          if (/صح|فهمت|تمام|أوكي|okay|got it|understand|مفهوم/.test(lowerTx)) return 'correct_answer';
+          if (/p1|p2|p3|m1|m2|d1|d2|معيار|criterion|pass|merit|distinction/.test(lowerTx)) return 'criterion_attempt';
+          if (sessionTurnCountRef.current === 1) return 'session_start';
+          if (sessionTurnCountRef.current % 5 === 0) return 'revision_needed';
+          return 'question_asked';
+        })();
+
+        // Infer student state from mood/content
+        const studentState: StudentState = (() => {
+          const mood = lastUserMoodRef.current;
+          if (mood === 'anxious' || mood === 'sad') return 'frustrated';
+          if (learningMoment === 'confusion_signal') return 'confused';
+          if (learningMoment === 'correct_answer' || mood === 'excited') return 'progressing';
+          if (mood === 'bored' || mood === 'sleepy') return 'bored';
+          if (mood === 'curious' || mood === 'attentive') return 'engaged';
+          return 'neutral';
+        })();
+
+        // Infer student level from history
+        const recentHistory = useBrainStore.getState().conversationHistory.slice(-10);
+        const studentLevel: StudentLevel = (() => {
+          const correctCount = recentHistory.filter(t => t.role === 'user' &&
+            /صح|فهمت|تمام|correct|understand/.test(t.text)).length;
+          const confusionCount = recentHistory.filter(t => t.role === 'user' &&
+            /ما فهمت|مش واضح|confused/.test(t.text)).length;
+          if (confusionCount >= 3) return 'struggling';
+          if (confusionCount >= 1 || correctCount < 2) return 'developing';
+          if (correctCount >= 5) return 'excelling';
+          return 'achieving';
+        })();
+
+        // Infer BTEC target level from context
+        const btecTarget: BtecTarget = (() => {
+          const dlState = useBrainStore.getState();
+          // Check if deep link has target
+          if (lowerTx.includes('distinction') || lowerTx.includes('امتياز')) return 'distinction';
+          if (lowerTx.includes('merit') || lowerTx.includes('ميريت')) return 'merit';
+          if (lowerTx.includes('pass') || lowerTx.includes('نجاح')) return 'pass';
+          return 'unknown';
+        })();
+
+        // Update teaching context
+        teachingCtxRef.current = {
+          studentLevel,
+          studentState,
+          btecTarget,
+          learningMoment,
+          sessionTurnCount: sessionTurnCountRef.current,
+          topicKeyword: (() => {
+            const match = lowerTx.match(/\b(swot|pestle|marketing mix|financial|human resources|operations|unit \d+)\b/i);
+            return match ? match[0] : undefined;
+          })(),
+          criterionCode: (() => {
+            const match = lowerTx.match(/\b([pmd]\d+)\b/i);
+            return match ? match[0].toUpperCase() : undefined;
+          })(),
+        };
+
+        // ── Layer 1: Intuition Engine ──────────────────────────────────────────
+        const recentHistoryTexts = useBrainStore.getState().conversationHistory
+          .slice(-6).map(t => t.text);
+        const intuitionReading = intuitionEngine.read(transcript, recentHistoryTexts);
+        useBrainStore.getState().setIntuitionReading({
+          studentPattern:          intuitionReading.studentPattern,
+          hiddenWeakness:          intuitionReading.hiddenWeakness,
+          studentRealNeed:         intuitionReading.realNeed,
+          comprehensionConfidence: intuitionReading.comprehensionConfidence,
+          stressSignals:           intuitionReading.stressSignals,
+        });
+
+        // ── Layer 2: Temporal Awareness ────────────────────────────────────────
+        const temporalCtx = temporalAwareness.getContext();
+        useBrainStore.getState().setTemporalContext({
+          sessionPhase:         temporalCtx.sessionPhase,
+          estimatedEnergyLevel: temporalCtx.energyLevel,
+          daysToExam:           temporalCtx.daysToExam,
+        });
+
+        // ── Layer 3: Strategy Engine ───────────────────────────────────────────
+        const strategy = getNextStrategy(teachingCtxRef.current);
+        const strategySuffix = buildStrategySystemSuffix(strategy, teachingCtxRef.current);
+
+        // ── Layer 4: Persuasion Engine ─────────────────────────────────────────
+        const persuasionMode = persuasionEngine.selectMode(
+          teachingCtxRef.current.studentLevel,
+          intuitionReading.studentPattern,
+          intuitionReading.inferredEmotion,
+          sessionTurnCountRef.current,
+        );
+        const persuasionDirective = persuasionEngine.buildDirective(
+          teachingCtxRef.current.topicKeyword ?? 'BTEC',
+          persuasionMode,
+          intuitionReading.studentPattern,
+          intuitionReading,
+          teachingCtxRef.current.btecTarget,
+        );
+        const persuasionSuffix = persuasionEngine.buildPersuasionSuffix(persuasionDirective, intuitionReading);
+        const temporalSuffix = temporalAwareness.buildTemporalSuffix(temporalCtx);
+        useBrainStore.getState().setPersuasionMode(persuasionMode);
+
+        // ── Compose full system suffix ─────────────────────────────────────────
+        activeStrategySuffixRef.current =
+          `${strategySuffix}\n${persuasionSuffix}\n${temporalSuffix}`;
+
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`[TeachingStrategy] 📚 ${strategy.name} (d=${strategy.effectSize}) | ${learningMoment} | ${studentLevel}`);
+          console.log(`[Intuition] 🔮 Pattern: ${intuitionReading.studentPattern} | Weakness: ${intuitionReading.hiddenWeakness ?? 'none'}`);
+          console.log(`[Persuasion] 🎯 Mode: ${persuasionMode} | Hook: ${persuasionDirective.hook}`);
+          console.log(`[Temporal] ⏱ Phase: ${temporalCtx.sessionPhase} | Energy: ${Math.round(temporalCtx.energyLevel * 100)}%`);
+        }
+
+        // ── Drive avatar body language per strategy ────────────────────────────
+        const avatarBehavior = getStrategyAvatarBehavior(strategy);
         if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('avatar:emotion', {
+            detail: { emotion: avatarBehavior.emotion, strength: 0.7 },
+          }));
+          window.dispatchEvent(new CustomEvent('avatar:gaze', {
+            detail: { yaw: avatarBehavior.gazeTarget === 'think' ? -0.18 : 0,
+                      pitch: avatarBehavior.gazeTarget === 'think' ? -0.12 : 0,
+                      durationMs: 2000 },
+          }));
+          void unifiedGestureEngine.play(avatarBehavior.gesture, { priority: PRIORITY.NORMAL });
+          // Extra: if hidden weakness detected, trigger concerned look
+          if (intuitionReading.hiddenWeakness && typeof window !== 'undefined') {
+            setTimeout(() => {
+              window.dispatchEvent(new CustomEvent('avatar:micro:gesture', { detail: { kind: 'nod', durationMs: 400 } }));
+            }, 800);
+          }
+        }
+        console.log('[useAgentAgent] Transcript:', transcript.slice(0, 80));
+
+        // ── Intent-driven avatar pre-reaction (before LLM reply arrives) ────
+        // NOTE: serialised to avoid multiple avatar:gesture in same tick competing
+        if (typeof window !== 'undefined') {
+          const intent = analyzeIntent(transcript);
+          const emoOverlay = intentToEmotionOverlay(intent);
+          const gestureHint = intentToGestureHint(intent);
+
+          // 1. Emotion overlay first — sets face before body language
+          if (emoOverlay) {
+            dispatchAvatar('avatar:emotion', { emotion: emoOverlay.emotion, strength: emoOverlay.strength });
+          }
+
+          // 2. Strategy-based gesture (high priority) — from intuition engine
+          // Already dispatched in the strategy block above (unifiedGestureEngine.play)
+
+          // 3. Intent gesture hint — only if no strategy gesture was fired
+          //    Delayed 80ms to avoid same-tick collision with strategy gesture
+          if (gestureHint) {
+            setTimeout(() => {
+              window.dispatchEvent(new CustomEvent('avatar:gesture', {
+                detail: { gesture: gestureHint, duration: 2200 },
+              }));
+            }, 80);
+          }
+
+          // 4. Acknowledging nod — delayed further to sequence correctly
+          //    Uses avatar:nod (now wired in VRMSkeletonManager) for micro nod
+          setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('avatar:nod', {
+              detail: { intensity: 0.12, duration: 0.5 },
+            }));
+          }, 200);
+
           window.dispatchEvent(new CustomEvent('agent:user-activity'));
         }
         break;
@@ -728,6 +1033,10 @@ export function useAgentAgent({
           window.dispatchEvent(
             new CustomEvent('avatar:thinking', { detail: { active: true } }),
           );
+          window.dispatchEvent(
+            new CustomEvent('avatar:emotion', { detail: { emotion: 'thinking', strength: 0.6 } }),
+          );
+          void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.HIGH });
         }
         break;
       }
@@ -762,10 +1071,42 @@ export function useAgentAgent({
         setLastDialogue(dialogue);
         setEmotion(rawEmotion);
 
+        // Clear thinking state as soon as reply arrives
+        useBrainStore.getState().setThinking(false);
+
+        // ── Awareness layer: internal monologue + awareness cues ───────────────
+        const internalMonologue = (frame.internal_monologue ?? '') as string;
+        const awarenessCues = frame.awareness_cues as AgentFrame['awareness_cues'] | undefined;
+        if (internalMonologue || awarenessCues) {
+          useBrainStore.getState().setAwarenessCues(awarenessCues ?? null, internalMonologue || null);
+          // Awareness cues → drive avatar gaze/energy
+          if (awarenessCues?.gaze_target && typeof window !== 'undefined') {
+            const gazeMap: Record<string, { yaw: number; pitch: number }> = {
+              user:  { yaw: 0,    pitch: 0 },
+              away:  { yaw: 0.28, pitch: 0.08 },
+              think: { yaw: -0.22, pitch: -0.15 },
+            };
+            const gz = gazeMap[awarenessCues.gaze_target] ?? gazeMap['user'];
+            window.dispatchEvent(new CustomEvent('avatar:gaze', {
+              detail: { yaw: gz.yaw, pitch: gz.pitch, durationMs: 2800 },
+            }));
+          }
+          if (typeof awarenessCues?.movement_energy === 'number' && typeof window !== 'undefined') {
+            // Translate movement_energy (0–1) to a PAD arousal hint
+            const energyArousal = (awarenessCues.movement_energy - 0.5) * 1.5; // map 0–1 → -0.75..0.75
+            const brainState = useBrainStore.getState();
+            if (Math.abs(energyArousal) > 0.2) {
+              const newArousal = Math.max(-1, Math.min(1, brainState.pad.arousal * 0.7 + energyArousal * 0.3));
+              useBrainStore.getState().setUserPad({ ...brainState.userPad, arousal: newArousal, pleasure: brainState.pad.pleasure, dominance: brainState.pad.dominance } as import('@/types/ai').PADVector);
+            }
+          }
+        }
+
         const emotionLabel = norm.emotionLabel;
 
-        // V20 — embodiment before audio: emotion on canvas + PAD immediately (no TTS wait)
-        if (typeof window !== 'undefined') {
+        // Canvas emotion: مع صوت الخادم نؤجّل حتى onplay (تزامن وجه/صوت). بدون صوت خادم نُرسِل فوراً.
+        const deferCanvasEmotionUntilPlay = hasServerAudio;
+        if (typeof window !== 'undefined' && !deferCanvasEmotionUntilPlay) {
           dispatchAvatar('avatar:emotion', { emotion: rawEmotion });
         }
         useBrainStore.getState().applyStreamingEmbodiment(emotionLabel);
@@ -777,8 +1118,15 @@ export function useAgentAgent({
         const perf = normalizePerformanceList(
           (frame as Record<string, unknown>).performance,
         );
-        // Merge: inline cues first (start_word=0 = immediate), then structured perf
-        const perfMerged = [..._clientInlineCues, ...perf];
+        const gesturesNorm = normalizeGesturesArrayFromWs(
+          (frame as Record<string, unknown>).gestures,
+        );
+        // Inline cues first; then server performance[]. If that is empty, use gestures[]
+        // (backend augment_ws_reply_gestures often fills gestures while JSON leaves performance []).
+        const perfMerged =
+          perf.length > 0
+            ? [..._clientInlineCues, ...perf]
+            : [..._clientInlineCues, ...gesturesNorm];
         const structuredPerformanceTurn = perfMerged.length > 0;
 
         // 1. Update BrainStore via processFrame — drives AgentDirector subscriptions
@@ -804,28 +1152,15 @@ export function useAgentAgent({
           emotion: emotionLabel,
         });
 
-        // 3b. Performance Tag System — word-synced cues (optional; replaces co-speech when present)
+        // 3b. Performance word-sync — مع صوت الخادم: الجدولة داخل onAudibleAnchor. وإلا: فوراً.
         clearPerformanceTimers();
-        if (perfMerged.length && typeof window !== 'undefined') {
-          const wcRaw = (frame as { word_cues?: unknown }).word_cues;
-          const wc = Array.isArray(wcRaw)
-            ? wcRaw.filter(
-                (x): x is { t: number; w?: string } =>
-                  !!x && typeof x === 'object' && typeof (x as { t?: unknown }).t === 'number',
-              )
-            : undefined;
-          const est = estimateDialogueDurationMs(dialogue);
-          performanceTimersRef.current = schedulePerformanceCues(
-            dialogue,
-            perfMerged,
-            wc,
-            est,
-            (cue) => {
-              if (!mountedRef.current) return;
-              window.dispatchEvent(new CustomEvent('avatar:performance', { detail: cue }));
-            },
-          );
-        }
+        const wcRawForPerf = (frame as { word_cues?: unknown }).word_cues;
+        const wcForPerf = Array.isArray(wcRawForPerf)
+          ? wcRawForPerf.filter(
+              (x): x is { t: number; w?: string } =>
+                !!x && typeof x === 'object' && typeof (x as { t?: unknown }).t === 'number',
+            )
+          : undefined;
 
         // 3c. Co-speech: server audio schedules on loadedmetadata; local TTS uses estimate
         clearCoSpeechTimers();
@@ -850,6 +1185,24 @@ export function useAgentAgent({
             visemeCues: visRaw,
             coSpeechDisabled: structuredPerformanceTurn,
             coSpeechDialogue: structuredPerformanceTurn ? undefined : dialogue,
+            onAudibleAnchor: () => {
+              if (!mountedRef.current || typeof window === 'undefined') return;
+              dispatchAvatar('avatar:emotion', { emotion: rawEmotion });
+              if (!perfMerged.length) return;
+              clearPerformanceTimers();
+              const estDialogue = estimateDialogueDurationMs(dialogue);
+              performanceTimersRef.current = schedulePerformanceCues(
+                dialogue,
+                perfMerged,
+                wcForPerf,
+                estDialogue,
+                (cue) => {
+                  if (!mountedRef.current) return;
+                  window.dispatchEvent(new CustomEvent('avatar:performance', { detail: cue }));
+                },
+                { anchorMs: 0 },
+              );
+            },
           });
         } else {
           if (type === 'tts_unavailable' && typeof window !== 'undefined') {
@@ -861,7 +1214,21 @@ export function useAgentAgent({
           }
           lastTtsFallbackTextRef.current = dialogue;
           lastTtsFallbackAtRef.current = tsNow;
-          if (!perf.length) {
+          if (perfMerged.length && typeof window !== 'undefined') {
+            const estDialogue = estimateDialogueDurationMs(dialogue);
+            performanceTimersRef.current = schedulePerformanceCues(
+              dialogue,
+              perfMerged,
+              wcForPerf,
+              estDialogue,
+              (cue) => {
+                if (!mountedRef.current) return;
+                window.dispatchEvent(new CustomEvent('avatar:performance', { detail: cue }));
+              },
+              { anchorMs: 0 },
+            );
+          }
+          if (!perfMerged.length) {
             scheduleCoSpeechForDialogue(dialogue, estimateDialogueDurationMs(dialogue));
           }
           agentDirector.scheduleTTS(dialogue, emotionLabel);
@@ -911,10 +1278,37 @@ export function useAgentAgent({
         console.log('[useAgentAgent] Heartbeat frame received');
         break;
 
+      case 'init_ack':
+        // Server-side sends this if it implements ack (currently optional in backend).
+        console.log('[useAgentAgent] ✅ persona_init acknowledged by server:', frame);
+        break;
+
+      case 'connection_ack':
+        console.log('[useAgentAgent] ✅ Connection acknowledged by server:', frame);
+        break;
+
+      case 'pong':
+        // Response to our keep-alive ping — connection is alive.
+        break;
+
+      case 'device_context_ack':
+        break;
+
       case 'goal_update': {
         const g = (frame.goal ?? '') as string;
-        if (g.trim()) {
-          console.log('[useAgentAgent] Thinker goal_update:', g.trim().slice(0, 160));
+        const trimmedGoal = g.trim();
+        if (trimmedGoal) {
+          if (process.env.NODE_ENV === 'development') {
+            console.log('[useAgentAgent] Thinker goal_update:', trimmedGoal.slice(0, 160));
+          }
+          // Wire to BrainStore — drives awareness layer in AgentDirector
+          useBrainStore.getState().setTeachingGoal(trimmedGoal.slice(0, 320));
+          // Dispatch for AgentDirector to react (e.g. brief think gesture)
+          agentDirector.processWsFrame({ type: 'agent:thinking', goal: trimmedGoal });
+          // Soft emit to window for any UI component that wants to show the goal
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('cogni:goal_update', { detail: { goal: trimmedGoal } }));
+          }
         }
         break;
       }
@@ -925,6 +1319,20 @@ export function useAgentAgent({
         console.log('[useAgentAgent] answer_graded score=', sc, fb?.slice(0, 120));
         break;
       }
+
+      case 'auth_ok':
+        console.log('[useAgentAgent] ✅ auth_ok from server', frame);
+        break;
+
+      // ── Gesture / action / emotion / LLM meta-frames from server ───────────
+      case 'agent:response':
+      case 'llm_response':
+      case 'agent:gesture':
+      case 'agent:action':
+      case 'agent:emotion':
+      case 'agent:thinking':
+        agentDirector.processWsFrame(frame as Record<string, unknown>);
+        break;
 
       default:
         console.log('[useAgentAgent] Unhandled frame type:', type);
@@ -937,39 +1345,84 @@ export function useAgentAgent({
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
     if (typeof window === 'undefined') return;
 
-    let url = wsUrl;
+    const url = wsUrl;
+    let accessToken: string | null = null;
     try {
-      const token = localStorage.getItem('cogni_access_token');
-      if (token) {
-        const sep = url.includes('?') ? '&' : '?';
-        url = `${url}${sep}token=${encodeURIComponent(token)}`;
-      }
+      accessToken = localStorage.getItem('cogni_access_token');
     } catch {
       /* ignore */
     }
 
     console.log(`[useAgentAgent] Connecting → ${url}`);
-    const ws = new WebSocket(url);
+    // Phase 3: JWT must not appear in the URL. Optional subprotocol carries token (browser);
+    // server also accepts { type: "auth", token } as the first text frame after connect.
+    const ws =
+      accessToken && typeof WebSocket !== 'undefined'
+        ? new WebSocket(url, ['cogni-auth-v1', accessToken])
+        : new WebSocket(url);
     wsRef.current = ws;
 
+    // Connection-open watchdog: if the server never ACKs the WS upgrade within 8s,
+    // close and let autoReconnect handle it.
+    connectTimeoutRef.current = setTimeout(() => {
+      if (ws.readyState !== WebSocket.OPEN) {
+        console.warn('[useAgentAgent] ⏱ Connection timeout (8s) — closing and retrying');
+        ws.close();
+      }
+    }, 8000);
+
     ws.onopen = () => {
+      // Cancel connection watchdog
+      if (connectTimeoutRef.current) {
+        clearTimeout(connectTimeoutRef.current);
+        connectTimeoutRef.current = null;
+      }
       if (!mountedRef.current) return;
       setIsConnected(true);
       setError(null);
-      console.log('[useAgentAgent] WS connected');
+      console.log('[useAgentAgent] ✅ WS connected');
+      // Always send auth as the first text frame when we have a token (before persona_init).
+      // Some proxies strip the second Sec-WebSocket-Protocol value; the server only treats
+      // the first frame as handshake auth when JWT from the header was missing/invalid.
+      // Backend ignores duplicate auth after subprotocol auth (idempotent).
+      try {
+        if (accessToken) {
+          ws.send(
+            JSON.stringify({ type: 'auth', token: accessToken, v: 1.1 }),
+          );
+          console.log('[useAgentAgent] ✅ Auth frame sent (first text frame, v=1.1)');
+        } else {
+          console.warn(
+            '[useAgentAgent] No cogni_access_token — /ws/agent may close with auth_required. Log in or set COGNI_WS_ALLOW_ANONYMOUS=true on the API.',
+          );
+        }
+      } catch (e) {
+        console.warn('[useAgentAgent] auth frame send failed:', e);
+      }
       // Step 1 digital-human: announce Cogni persona so the backend can lock LLM identity per session
       try {
-        ws.send(
-          JSON.stringify({
-            type: 'persona_init',
-            v: 1.1,
-            persona_id: COGNI_PERSONA.id,
-            system_prompt: COGNI_PERSONA.systemPrompt,
-            platform: COGNI_PERSONA.platformName,
-            voice_defaults: COGNI_PERSONA.voiceParameters,
-          }),
-        );
-        console.log('[useAgentAgent] persona_init sent —', COGNI_PERSONA.id);
+        // Build enhanced system prompt: base identity + JSON brain awareness layer
+        // Import synchronously at module level — COGNI_JSON_BRAIN_SYSTEM_APPEND is already imported
+        const jsonModeEnabled = process.env.NEXT_PUBLIC_COGNI_JSON_BRAIN_MODE === 'true'
+          || process.env.NEXT_PUBLIC_COGNI_PERFORMANCE_JSON_MODE === 'true';
+        const enhancedSystemPrompt = jsonModeEnabled
+          ? `${COGNI_PERSONA.systemPrompt}\n\n${COGNI_JSON_BRAIN_SYSTEM_APPEND}`
+          : COGNI_PERSONA.systemPrompt;
+
+        const personaInitMsg = {
+          type: 'persona_init',
+          v: 1.1,
+          persona_id: COGNI_PERSONA.id,
+          system_prompt: enhancedSystemPrompt,
+          platform: COGNI_PERSONA.platformName,
+          voice_defaults: COGNI_PERSONA.voiceParameters,
+          // Signal server to use gpt-4o-mini for this session (free tier)
+          model_hint: 'gpt-4o-mini',
+          enable_awareness: true,
+          enable_internal_monologue: true,
+        };
+        ws.send(JSON.stringify(personaInitMsg));
+        console.log('[useAgentAgent] Sending persona_init —', COGNI_PERSONA.id);
       } catch (e) {
         console.warn('[useAgentAgent] persona_init send failed:', e);
       }
@@ -986,6 +1439,34 @@ export function useAgentAgent({
       } catch (e) {
         console.warn('[useAgentAgent] device_context send failed:', e);
       }
+      try {
+        const fs = getCogniFocusSubject();
+        if (fs) {
+          ws.send(
+            JSON.stringify({
+              type: 'set_focus_subject',
+              subject: fs,
+              student_override: true,
+              v: 1.1,
+            }),
+          );
+        }
+      } catch (e) {
+        console.warn('[useAgentAgent] set_focus_subject send failed:', e);
+      }
+
+      // Keep-alive ping every 28s — prevents idle-timeout disconnects from proxy/nginx/Docker.
+      if (keepAliveIntervalRef.current) clearInterval(keepAliveIntervalRef.current);
+      keepAliveIntervalRef.current = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          try {
+            if (process.env.NODE_ENV === 'development') {
+              console.log('[useAgentAgent] Sending keep-alive ping');
+            }
+            ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now(), v: 1.1 }));
+          } catch { /* ignore — onclose will handle reconnect */ }
+        }
+      }, 28_000);
     };
 
     ws.onmessage = (evt: MessageEvent) => {
@@ -1000,19 +1481,46 @@ export function useAgentAgent({
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event: CloseEvent) => {
+      if (keepAliveIntervalRef.current) {
+        clearInterval(keepAliveIntervalRef.current);
+        keepAliveIntervalRef.current = null;
+      }
+      if (connectTimeoutRef.current) {
+        clearTimeout(connectTimeoutRef.current);
+        connectTimeoutRef.current = null;
+      }
       if (!mountedRef.current) return;
       setIsConnected(false);
-      console.warn('[useAgentAgent] WS closed');
-      if (autoReconnect && mountedRef.current) {
-        console.log('[useAgentAgent] Reconnecting in 3 s...');
-        reconnectTimer.current = setTimeout(connect, 3000);
+
+      const reason = (event.reason || '').trim() || '(none)';
+      console.warn(
+        `[useAgentAgent] WS closed — code=${event.code} reason="${reason}" clean=${event.wasClean}`,
+      );
+
+      if (!autoReconnect || !mountedRef.current) return;
+
+      if (event.wasClean && event.code === 1000) {
+        console.log('[useAgentAgent] Clean closure (1000), not scheduling reconnect');
+        return;
       }
+
+      const delay = 3000;
+      console.log(`[useAgentAgent] Reconnecting in ${delay / 1000}s...`);
+      reconnectTimer.current = setTimeout(connect, delay);
     };
 
-    ws.onerror = () => {
+    ws.onerror = (event: Event) => {
+      console.error('[useAgentAgent] WS error:', event);
       setError('WebSocket connection error');
-      console.error('[useAgentAgent] WS error');
+      if (ws.readyState === WebSocket.CONNECTING) {
+        console.warn('[useAgentAgent] Error during CONNECTING — closing so onclose can run');
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+      }
     };
   }, [wsUrl, autoReconnect, handleFrame]);
 
@@ -1057,14 +1565,21 @@ export function useAgentAgent({
         console.log(`[Agent] Sending audio frame, size: ${blob.size} type=${blob.type || 'unknown'}`);
         const audioBase64 = await audioInputToBase64(blob);
         const emotionalCtx = emotionalMemoryManager.getContextSummary();
+        const fsAudio = getCogniFocusSubject();
+        const rawCoach = readAssessmentCoaching();
+        const coachingOut = rawCoach ? trimAssessmentCoachingForWs(rawCoach) : null;
         const payload = {
           type: 'audio',
           data: audioBase64,
+          v: 1.1,
+          ...(blob.type?.trim() ? { mime_type: blob.type.trim().slice(0, 128) } : {}),
           /** Canonical key for LLM — same text as persona_init / tutor context */
           system_prompt: COGNI_PERSONA.systemPrompt,
           persona_system_prompt: COGNI_PERSONA.systemPrompt,
           persona: { id: COGNI_PERSONA.id, platform: COGNI_PERSONA.platformName },
           ...(emotionalCtx.trim() ? { emotional_context: emotionalCtx } : {}),
+          ...(fsAudio ? { focus_subject: fsAudio } : {}),
+          ...(coachingOut ? { assessment_coaching: coachingOut } : {}),
         };
         ws.send(JSON.stringify(payload));
         console.log(
@@ -1166,18 +1681,46 @@ export function useAgentAgent({
     // the avatar can say "أرى إنك حصلت على Merit في موضوع X…" naturally.
     const gradeSnapshot = _consumeLastGrade();
     const emotionalCtx = emotionalMemoryManager.getContextSummary();
+    const fsNow = getCogniFocusSubject();
+    const rawCoach = readAssessmentCoaching();
+    const coachingOut = rawCoach ? trimAssessmentCoachingForWs(rawCoach) : null;
     const payload = JSON.stringify({
       type: 'text',
       text: trimmed,
       lang,
       practice,
+      v: 1.1,
       ...(opts?.topicId != null ? { topic_id: opts.topicId } : {}),
       /** Injected every turn so LLM stays aligned with Cogni / Eduverse even if persona_init raced */
-      system_prompt: COGNI_PERSONA.systemPrompt,
+      // Teaching strategy suffix — adds research-backed pedagogy context to each turn
+      system_prompt: activeStrategySuffixRef.current
+        ? `${COGNI_PERSONA.systemPrompt}\n${activeStrategySuffixRef.current}`
+        : COGNI_PERSONA.systemPrompt,
       persona_system_prompt: COGNI_PERSONA.systemPrompt,
       persona: { id: COGNI_PERSONA.id, platform: COGNI_PERSONA.platformName },
+      // Teaching metadata for backend tutor pipeline (all intelligence layers)
+      teaching_strategy: teachingCtxRef.current ? {
+        student_level:             teachingCtxRef.current.studentLevel,
+        student_state:             teachingCtxRef.current.studentState,
+        btec_target:               teachingCtxRef.current.btecTarget,
+        learning_moment:           teachingCtxRef.current.learningMoment,
+        turn_count:                teachingCtxRef.current.sessionTurnCount,
+        // Intuition layer
+        student_pattern:           useBrainStore.getState().studentPattern,
+        hidden_weakness:           useBrainStore.getState().hiddenWeakness,
+        comprehension_confidence:  useBrainStore.getState().comprehensionConfidence,
+        stress_signals:            useBrainStore.getState().stressSignals,
+        // Temporal layer
+        session_phase:             useBrainStore.getState().sessionPhase,
+        energy_level:              useBrainStore.getState().estimatedEnergyLevel,
+        days_to_exam:              useBrainStore.getState().daysToExam,
+        // Persuasion layer
+        persuasion_mode:           useBrainStore.getState().lastPersuasionMode,
+      } : undefined,
       ...(gradeSnapshot ? { grade_result: gradeSnapshot } : {}),
       ...(emotionalCtx.trim() ? { emotional_context: emotionalCtx } : {}),
+      ...(fsNow ? { focus_subject: fsNow } : {}),
+      ...(coachingOut ? { assessment_coaching: coachingOut } : {}),
     });
     ws.send(payload);
     if (!isInternalProactive) {
@@ -1237,6 +1780,30 @@ export function useAgentAgent({
   useEffect(() => {
     sendTextRef.current = sendText;
   }, [sendText]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onFocusSubject = (): void => {
+      const w = wsRef.current;
+      const s = getCogniFocusSubject();
+      if (w?.readyState === WebSocket.OPEN && s) {
+        try {
+          w.send(
+            JSON.stringify({
+              type: 'set_focus_subject',
+              subject: s,
+              student_override: true,
+              v: 1.1,
+            }),
+          );
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+    window.addEventListener(COGNI_FOCUS_SUBJECT_EVENT, onFocusSubject);
+    return () => window.removeEventListener(COGNI_FOCUS_SUBJECT_EVENT, onFocusSubject);
+  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -1372,7 +1939,7 @@ export function useAgentAgent({
       // opens with "أرى إنك أنهيت التقييم…" instead of the generic greeting.
       const pendingGrade = (() => {
         try {
-          const raw = typeof window !== 'undefined' ? localStorage.getItem('nexus-last-grade') : null;
+          const raw = typeof window !== 'undefined' ? localStorage.getItem('eduverse-last-grade') : null;
           return raw ? JSON.parse(raw) as Record<string, unknown> : null;
         } catch { return null; }
       })();
@@ -1410,10 +1977,17 @@ export function useAgentAgent({
       connect();
     };
     if (typeof window !== 'undefined') {
+      ensureWebSpeechVoicesChangeHook();
       window.addEventListener('cogni:auth-changed', onAuthChanged);
     }
 
     mountedRef.current = true;
+
+    // Initialise gesture normalizer (idempotent capture-phase listener)
+    initGestureNormalizer();
+    if (process.env.NODE_ENV === 'development' && typeof window !== 'undefined') {
+      (window as unknown as Record<string, unknown>).__cogniGestureEngine = unifiedGestureEngine;
+    }
 
     // Start AgentDirector (subscribes to BrainStore; idempotent)
     agentDirector.start();
@@ -1429,13 +2003,26 @@ export function useAgentAgent({
       vadStop();
       stopAllAudio();
 
-      wsRef.current?.close();
-      wsRef.current = null;
+      if (keepAliveIntervalRef.current) {
+        clearInterval(keepAliveIntervalRef.current);
+        keepAliveIntervalRef.current = null;
+      }
+      if (connectTimeoutRef.current) {
+        clearTimeout(connectTimeoutRef.current);
+        connectTimeoutRef.current = null;
+      }
 
       if (reconnectTimer.current) {
         clearTimeout(reconnectTimer.current);
         reconnectTimer.current = null;
       }
+
+      try {
+        wsRef.current?.close(1000, 'Component unmounting');
+      } catch {
+        /* ignore */
+      }
+      wsRef.current = null;
 
       console.log('[useAgentAgent] Unmounted — all resources released');
 

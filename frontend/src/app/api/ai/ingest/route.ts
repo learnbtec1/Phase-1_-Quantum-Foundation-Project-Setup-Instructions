@@ -1,20 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
 import { initVectorDB } from "@/lib/ai/vectorDB";
 import OpenAI from "openai";
+import {
+  blockAiBffUnlessEnabledInProduction,
+  requireAuthenticatedUser,
+} from "@/lib/server/bffAuth";
 
 export async function POST(req: NextRequest) {
+  const disabled = blockAiBffUnlessEnabledInProduction();
+  if (disabled) return disabled;
+
+  const auth = await requireAuthenticatedUser(req);
+  if (!auth.ok) return auth.response;
+
   try {
     // 1. Validate environment
     if (!process.env.OPENAI_API_KEY) {
       return NextResponse.json(
         { error: "OPENAI_API_KEY is not configured on the server." },
-        { status: 500 }
+        { status: 503 }
       );
     }
     if (!process.env.PINECONE_API_KEY) {
       return NextResponse.json(
         { error: "PINECONE_API_KEY is not configured on the server." },
-        { status: 500 }
+        { status: 503 }
       );
     }
 
@@ -22,7 +32,7 @@ export async function POST(req: NextRequest) {
     if (!indexName) {
       return NextResponse.json(
         { error: "PINECONE_INDEX_NAME is not configured on the server." },
-        { status: 500 }
+        { status: 503 }
       );
     }
 

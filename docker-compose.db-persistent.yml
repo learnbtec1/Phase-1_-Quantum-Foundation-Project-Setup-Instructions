@@ -1,0 +1,11 @@
+# Optional: named volume for Postgres (persists across `docker compose down`).
+# Use when Docker’s data root is on a Linux filesystem (ext4), not NTFS / /mnt/e.
+#   docker compose -f docker-compose.yml -f docker-compose.db-persistent.yml up --build
+services:
+  db:
+    tmpfs: !reset null
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+volumes:
+  postgres_data:
+    driver: local

@@ -1,6 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import DOMPurify from 'isomorphic-dompurify';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { apiBase, authHeaders } from '@/lib/auth';
@@ -54,6 +55,24 @@ function LessonBodyEditor({
   }, [editor, resetKey]);
 
   return <EditorContent editor={editor} />;
+}
+
+function ActiveLessonPreview({ title, html }: { title: string; html: string | null }) {
+  const safeHtml = useMemo(() => {
+    const raw = html?.trim();
+    if (!raw) return '—';
+    return DOMPurify.sanitize(raw, { USE_PROFILES: { html: true } });
+  }, [html]);
+
+  return (
+    <div className="rounded-xl border border-violet-500/20 bg-[#0a0a12] p-4 text-sm text-gray-200">
+      <h4 className="font-bold text-white mb-2">{title}</h4>
+      <div
+        className="prose prose-invert prose-sm max-w-none text-gray-300 max-h-64 overflow-y-auto"
+        dangerouslySetInnerHTML={{ __html: safeHtml }}
+      />
+    </div>
+  );
 }
 
 export default function CurriculumEditor({ canEdit }: { canEdit: boolean }) {
@@ -309,13 +328,7 @@ export default function CurriculumEditor({ canEdit }: { canEdit: boolean }) {
       </div>
 
       {activeLesson && (
-        <div className="rounded-xl border border-violet-500/20 bg-[#0a0a12] p-4 text-sm text-gray-200">
-          <h4 className="font-bold text-white mb-2">{activeLesson.title}</h4>
-          <div
-            className="prose prose-invert prose-sm max-w-none text-gray-300 max-h-64 overflow-y-auto"
-            dangerouslySetInnerHTML={{ __html: activeLesson.content || '—' }}
-          />
-        </div>
+        <ActiveLessonPreview title={activeLesson.title} html={activeLesson.content} />
       )}
 
       {canEdit && (

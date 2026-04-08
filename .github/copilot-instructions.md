@@ -1,4 +1,4 @@
-# NEXUS PLATFORM v3.0 — AI Coding Agent Guide
+# EDUVERSE PLATFORM v3.0 — AI Coding Agent Guide
 
 ## ⚠️ ذاكرة المشروع — اقرأ أولاً
 
@@ -15,7 +15,7 @@
 | `v.update(delta)` | قبل bone rotation دائماً |
 | `combineSkeletons()` | **محظور** في evaluate/ |
 | `hooks/` path | root, ليس `src/hooks/` |
-| localStorage keys | لا تغيّرها (nexus-auth, nexus-assessments, nexus-vr, btec_platform_progress) |
+| localStorage keys | لا تغيّرها (eduverse-auth, eduverse-assessments, eduverse-vr, btec_platform_progress) |
 
 ---
 
@@ -57,18 +57,18 @@ E:\Phase 1_ Quantum Foundation Project Setup Instructions\
 ### Frontend State Architecture (Zustand + localStorage)
 Three independent stores sync to localStorage with **immutable keys** (never change these):
 
-1. **`nexus-auth`** (`hooks/useAuth.ts`): Mock authentication
-   - Login: `student@nexus.edu` / `password123`
+1. **`eduverse-auth`** (`hooks/useAuth.ts`): Mock authentication
+   - Login: `student@eduverse.edu` / `password123`
    - Persists user session + role
    - Returns: `{ user: User | null, isAuthenticated: boolean, login(), logout() }`
 
-2. **`nexus-assessments`** (`hooks/useAssessment.ts`): Submissions + grading results
+2. **`eduverse-assessments`** (`hooks/useAssessment.ts`): Submissions + grading results
    - **Dual-path grading** based on `openaiApiKey` presence:
      - If key provided → calls `/api/openai-grade` (client-provided key)
      - Else → local fallback via `calculateGrade()` from `lib/btec-grading.ts`
    - Stores all submission history and grades
 
-3. **`nexus-vr`** (`hooks/useVR.ts`): VR progress tracking
+3. **`eduverse-vr`** (`hooks/useVR.ts`): VR progress tracking
    - Tied to exactly **4 evidence items** (hard-coded dependency in scoring logic)
    - Progress calculation: `collected.length / 4 * 100`
    - **Critical**: Changing evidence count breaks percentage calculations
@@ -226,7 +226,7 @@ Base URL: `http://127.0.0.1:8000`
   - Stores located in `hooks/` directory (not `src/hooks/` - note the repository structure)
   - Import pattern: `import { useAuth } from '@/../../hooks/useAuth'` (relative to root, not src)
 - **localStorage keys are public API contracts**: Changing them breaks student progress recovery for existing users. Treat as immutable:
-  - `nexus-auth`, `nexus-assessments`, `nexus-vr`, `btec_platform_progress`
+  - `eduverse-auth`, `eduverse-assessments`, `eduverse-vr`, `btec_platform_progress`
   - Never rename these keys or change their structure without data migration strategy
 - **VR evidence count = 4** (hard-coded in `hooks/useVR.ts` progress calculations); changing this breaks completion percentage logic.
 
@@ -278,7 +278,7 @@ npm run lint -- --fix  # Run linter with auto-fix
 ```
 
 **Common development patterns**:
-- **localStorage debugging**: DevTools → Application → Local Storage → `http://localhost:3000` (check `nexus-auth`, `nexus-assessments`, `nexus-vr`, `btec_platform_progress` keys)
+- **localStorage debugging**: DevTools → Application → Local Storage → `http://localhost:3000` (check `eduverse-auth`, `eduverse-assessments`, `eduverse-vr`, `btec_platform_progress` keys)
 - **3D debugging**: Use React DevTools + Drei's `<Stats />` component for FPS monitoring
 - **API debugging**: Network tab → filter by `api/evaluate` or `api/openai-grade` to inspect requests/responses
 
@@ -392,7 +392,7 @@ Defined in `globals.css`, used with Tailwind:
 ### State Management & Hooks
 | File | Purpose | Critical Patterns |
 |------|---------|-------------------|
-| `hooks/useAuth.ts` | Mock authentication store | Zustand persist; hardcoded credentials `student@nexus.edu` / `password123` |
+| `hooks/useAuth.ts` | Mock authentication store | Zustand persist; hardcoded credentials `student@eduverse.edu` / `password123` |
 | `hooks/useAssessment.ts` | Grading store + API routing | Conditional API call based on `openaiApiKey` presence; stores submission history |
 | `hooks/useVR.ts` | VR progress tracking | Hard-coded to 4 evidence items; progress = `collected.length / 4 * 100` |
 | `context/ProgressContext.tsx` | Gameplay state manager | Context Provider pattern; `useEffect` auto-sync to localStorage; provides `autoGradeAnswer()` |
@@ -464,7 +464,7 @@ PORT=8000                      # FastAPI server port (default: 8000)
 ## Common Pitfalls & Debugging
 
 ### State & Persistence Issues
-1. **Changing localStorage keys** → Breaks student progress recovery. Always preserve: `nexus-auth`, `nexus-assessments`, `nexus-vr`, `btec_platform_progress`. If changes needed, implement data migration.
+1. **Changing localStorage keys** → Breaks student progress recovery. Always preserve: `eduverse-auth`, `eduverse-assessments`, `eduverse-vr`, `btec_platform_progress`. If changes needed, implement data migration.
 
 2. **Modifying VR evidence count from 4** → Breaks completion % calculation in `hooks/useVR.ts` (`collected.length / 4 * 100`). Update calculation if count changes.
 

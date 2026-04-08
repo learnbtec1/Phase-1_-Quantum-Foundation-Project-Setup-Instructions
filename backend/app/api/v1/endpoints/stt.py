@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import base64
 import logging
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 
+from app.api.v1.dependencies.phase2_gates import gate_stt_user
+from app.models.db_models import User
 from app.services.whisper_stt import is_available, transcribe_audio
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,7 @@ router = APIRouter()
 
 @router.post("/stt")
 async def stt_transcribe(
+    _auth: User = Depends(gate_stt_user),
     audio: UploadFile = File(..., description="Audio file (WAV/raw PCM mono 16kHz)"),
 ):
     """Transcribe audio to text. Returns { transcript: str }."""

@@ -1,6 +1,6 @@
 import type { SavedProgress } from '@/types/gameTypes';
 
-const STORAGE_KEY = 'nexus-vr-sim';
+const STORAGE_KEY = 'eduverse-vr-sim';
 
 export function saveProgress(data: SavedProgress) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(data));

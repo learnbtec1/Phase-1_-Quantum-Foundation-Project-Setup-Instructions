@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Unit tests for forensic_engine (BTEC grading logic, text helpers)."""
 import pytest
-from app.services.forensic_engine import (
+from app.archive.forensic_engine import (
     band_from_code,
     extract_criteria_codes,
     calculate_final_grade_btec,

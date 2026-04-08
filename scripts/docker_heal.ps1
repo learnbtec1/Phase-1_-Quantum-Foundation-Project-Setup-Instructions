@@ -89,10 +89,10 @@ docker version
 Write-Host ""
 Write-Host "==== PHASE C: Resolve Conflicts and Start Stack ===="
 
-docker rm -f nexus_db       2>&1 | Out-Null
-docker rm -f nexus_backend  2>&1 | Out-Null
-docker rm -f nexus_frontend 2>&1 | Out-Null
-Write-Host "Existing nexus_* containers removed."
+docker rm -f eduverse_db       2>&1 | Out-Null
+docker rm -f eduverse_backend  2>&1 | Out-Null
+docker rm -f eduverse_frontend 2>&1 | Out-Null
+Write-Host "Existing eduverse_* containers removed."
 
 $projectRoot = "E:\Phase 1_ Quantum Foundation Project Setup Instructions"
 Set-Location -LiteralPath $projectRoot

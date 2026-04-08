@@ -1,7 +1,7 @@
 services:
   redis:
     image: redis:7-alpine
-    container_name: nexus_redis
+    container_name: eduverse_redis
     ports:
       - "6379:6379"
     restart: unless-stopped
@@ -14,18 +14,22 @@ services:
 
   db:
     image: postgres:16-alpine
-    container_name: nexus_db
+    container_name: eduverse_db
     environment:
-      POSTGRES_DB: nexus
-      POSTGRES_USER: nexus
-      POSTGRES_PASSWORD: nexus
+      POSTGRES_DB: ${POSTGRES_DB:-eduverse}
+      POSTGRES_USER: ${POSTGRES_USER:-eduverse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eduverse}
     ports:
       - "5432:5432"
-    volumes:
-      - ./backend/data/postgres:/var/lib/postgresql/data
+    # tmpfs: avoids chmod/initdb failures when Docker stores volumes on NTFS (e.g. disk image on E:)
+    # or bind mounts from /mnt/... under WSL. Data is lost on `docker compose down` (container removed).
+    # For a persistent DB on Linux/ext4 or default Docker Desktop WSL2 disk, use:
+    #   docker compose -f docker-compose.yml -f docker-compose.db-persistent.yml up
+    tmpfs:
+      - /var/lib/postgresql/data:rw,size=2147483648
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nexus -d nexus -h 127.0.0.1"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB -h 127.0.0.1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -33,15 +37,17 @@ services:
 
   backend:
     build: ./backend
-    container_name: nexus_backend
+    container_name: eduverse_backend
     env_file:
       - .env
     environment:
       HOST: 0.0.0.0
       PORT: 8000
-      DATABASE_URL: postgresql+psycopg2://nexus:nexus@db:5432/nexus
+      # Use same credentials as db service (override via root .env: POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB)
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-eduverse}:${POSTGRES_PASSWORD:-eduverse}@db:5432/${POSTGRES_DB:-eduverse}
       REDIS_URL: redis://redis:6379/0
-      JWT_SECRET: ${JWT_SECRET:-change_this_in_production_docker}
+      # Required in .env — compose fails fast if unset (avoids shipping a known-weak default).
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in project root .env — see backend/.env.example}
       PYTHONIOENCODING: "utf-8"
       PYTHONUTF8: "1"
       LANG: "C.UTF-8"
@@ -55,10 +61,18 @@ services:
       # BTEC textbook / rubric / exemplar corpus (host path mounted read-only below)
       LOCAL_RAG_ENABLED: "true"
       LOCAL_RAG_DIR: "/app/btec_corpus"
+      # تقييمات دائمة مع Postgres في Docker (انظر README)
+      USE_DB: "true"
+      # عند تشغيل خدمة chromadb (profile: chroma) وجّه العميل عبر CHROMA_SERVER_* إن دعم الكود ذلك؛
+      # الافتراضي: Chroma محلي داخل الحاوية تحت /app/data/chroma_cogni
+      # CHROMA_HOST: chromadb
+      # CHROMA_PORT: "8000"
     ports:
       - "8000:8000"
     volumes:
+      # Chroma persistence at /app/data/chroma_cogni — keep across restarts (no full RAG rebuild)
       - ./backend/data:/app/data
+      # BTEC corpus files (LOCAL_RAG_DIR=/app/btec_corpus)
       - ./backend/data/btec-bus:/app/btec_corpus:ro
       - whisper_model_cache:/root/.cache/huggingface
     depends_on:
@@ -84,7 +98,7 @@ services:
     build:
       context: ./frontend
       target: dev-base
-    container_name: nexus_frontend
+    container_name: eduverse_frontend
     working_dir: /app
     # Set PROJECT_ROOT in `.env` to this repo’s absolute host path (e.g. D:\work\ukd or /mnt/d/work/ukd) when WSL/cross-drive bind mounts miss edits.
     volumes:
@@ -125,6 +139,20 @@ services:
       retries: 5
       start_period: 25s
 
+  # ChromaDB كخادم منفصل (اختياري). تشغيل: docker compose --profile chroma up -d chromadb
+  # ثم اضبط متغيرات الاتصال في backend إذا كان التطبيق يستخدم HttpClient بدل المسار المحلي.
+  chromadb:
+    profiles: ["chroma"]
+    image: chromadb/chroma:latest
+    container_name: eduverse_chromadb
+    ports:
+      - "8001:8000"
+    volumes:
+      - chromadb_data:/chroma/chroma
+    environment:
+      ANONYMIZED_TELEMETRY: "false"
+    restart: unless-stopped
+
   # One-shot BTEC → ChromaDB (same volumes as backend). Run: docker compose --profile ingest run --rm btec-ingest
   btec-ingest:
     profiles: ["ingest"]
@@ -135,10 +163,13 @@ services:
       PYTHONPATH: /app
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes:
+      # Same paths as backend: Chroma DB + read-only BTEC files
       - ./backend/data:/app/data
       - ./backend/data/btec-bus:/app/btec_corpus:ro
     command: ["python", "scripts/btec_ingest.py", "--data-dir", "/app/btec_corpus", "--chroma-dir", "/app/data/chroma_cogni"]
 
 volumes:
   whisper_model_cache:
+    driver: local
+  chromadb_data:
     driver: local

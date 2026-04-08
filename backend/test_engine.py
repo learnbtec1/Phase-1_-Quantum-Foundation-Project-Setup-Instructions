@@ -1,5 +1,5 @@
 import asyncio
-from app.services.forensic_grader import forensic_grade
+from app.archive.forensic_engine import forensic_grade
 
 async def run_test():
     assignment = """

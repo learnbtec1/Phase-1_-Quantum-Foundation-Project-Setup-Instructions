@@ -15,7 +15,7 @@ import {
 
 import DrAhmedOrb from "@/components/DrAhmedOrb";
 
-const NexusHero3D = dynamic(() => import("@/components/NexusHero3D"), {
+const EduverseHero3D = dynamic(() => import("@/components/EduverseHero3D"), {
   ssr: false,
   loading: () => (
     <div
@@ -122,7 +122,7 @@ const InteractiveTile = ({
 export default function LandingPage() {
   return (
     <div className="min-h-screen bg-[#020617] text-white overflow-hidden relative font-cairo selection:bg-cyan-500/30">
-      <NexusHero3D />
+      <EduverseHero3D />
 
       {/* الضباب السينمائي */}
       <div className="fixed inset-0 bg-gradient-to-b from-transparent via-transparent to-[#020617] z-0 pointer-events-none" />
@@ -138,7 +138,7 @@ export default function LandingPage() {
           >
             <div className="w-2 h-2 bg-emerald-500 rounded-full animate-ping" />
             <span className="text-[10px] font-black tracking-[0.3em] text-cyan-400 uppercase">
-              Nexus Intelligence V3.0
+              Eduverse Intelligence V3.0
             </span>
           </motion.div>
 
@@ -202,7 +202,7 @@ export default function LandingPage() {
 
         {/* Footer */}
         <footer className="mt-auto pt-10 border-t border-white/5 flex flex-col md:flex-row justify-between items-center gap-4 text-[10px] font-bold text-gray-500 tracking-[0.2em] uppercase">
-          <p>© 2026 Nexus Academy — Developed by Dr. Hamzeh</p>
+          <p>© 2026 Eduverse Academy — Developed by Dr. Hamzeh</p>
           <div className="flex gap-8">
             <span className="hover:text-white transition">Core Status: Optimal</span>
             <span className="hover:text-white transition">Neural Uplink: Active</span>

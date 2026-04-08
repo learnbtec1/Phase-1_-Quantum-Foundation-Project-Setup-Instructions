@@ -448,9 +448,9 @@ if (isAvatarSpeaking) {
 ### 2. Firebase / State Management
 ```typescript
 // لا تغيّر localStorage keys:
-✅ nexus-auth
-✅ nexus-assessments  
-✅ nexus-vr
+✅ eduverse-auth
+✅ eduverse-assessments  
+✅ eduverse-vr
 
 // استخدم window.dispatchEvent بدلاً من localStorage للـ events
 window.dispatchEvent(new CustomEvent('cogni:conversation:started'));

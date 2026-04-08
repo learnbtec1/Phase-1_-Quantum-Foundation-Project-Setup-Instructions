@@ -1,6 +1,6 @@
 /**
  * Avatar Actions — دوال مساعدة لإطلاق أحداث الإيماءات والمشاعر على الأفاتار
- * تعمل عبر window.dispatchEvent مع الأحداث المخصصة التي يستمع إليها VRMAvatar.
+ * تعمل عبر window.dispatchEvent مع الأحداث المخصصة التي يستمع إليها مسار الأفاتار الإجرائي (Canvas / AnimationController).
  *
  * الأحداث المدعومة:
  *   avatar:gesture  → { type, side, duration, intensity }

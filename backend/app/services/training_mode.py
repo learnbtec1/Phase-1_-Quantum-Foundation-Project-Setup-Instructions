@@ -16,7 +16,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from app.services.btec_chroma_rag import retrieve_btec_chroma_block
+from app.services.btec_chroma_rag import (
+    extract_btec_chroma_filters_from_context,
+    retrieve_btec_chroma_block,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +90,10 @@ async def generate_practice_question(topic: str, difficulty: str, session_id: st
     band = _grade_band_label(diff)
     sid = f"{session_id}_train_q"[:120]
     rag_query = f"BTEC Business {topic} unit learning outcomes assessment criteria"
-    ref = await retrieve_btec_chroma_block(rag_query, session_id=sid, top_k=6, use_cache=False)
+    _bf = extract_btec_chroma_filters_from_context(f"{topic}\n{rag_query}", {})
+    ref = await retrieve_btec_chroma_block(
+        rag_query, session_id=sid, top_k=6, use_cache=False, filters=_bf if _bf else None
+    )
 
     sys = (
         "You write exactly ONE short-answer practice question in Arabic for BTEC Business students.\n"
@@ -123,7 +129,10 @@ async def evaluate_answer(question: str, student_answer: str, session_id: str) -
     a = (student_answer or "").strip()
     sid = f"{session_id}_train_e"[:120]
     rag_query = f"{q}\n{a}"
-    ref = await retrieve_btec_chroma_block(rag_query, session_id=sid, top_k=6, use_cache=False)
+    _bf = extract_btec_chroma_filters_from_context(rag_query, {})
+    ref = await retrieve_btec_chroma_block(
+        rag_query, session_id=sid, top_k=6, use_cache=False, filters=_bf if _bf else None
+    )
     source_ref = _first_source_ref_from_rag(ref)
 
     grade = "M"
@@ -132,7 +141,7 @@ async def evaluate_answer(question: str, student_answer: str, session_id: str) -
 
     if os.getenv("BTEC_TRAINING_FORENSIC", "false").lower() in ("1", "true", "yes"):
         try:
-            from app.services.forensic_engine import forensic_grade
+            from app.archive.forensic_engine import forensic_grade
 
             assignment = (
                 "مهمة تدريبية (BTEC Business):\n"

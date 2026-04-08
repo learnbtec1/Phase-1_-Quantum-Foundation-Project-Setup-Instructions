@@ -258,7 +258,7 @@ const onUserSpeaking = () => {
 
 ## 📌 ملاحظات مهمة
 
-1. **لا تعدّل localStorage keys** — `nexus-auth`, `nexus-assessments` إلخ محفوظة
+1. **لا تعدّل localStorage keys** — `eduverse-auth`, `eduverse-assessments` إلخ محفوظة
 2. **`stopTTS()` يجب أن يُستدعى من `tts.ts` مباشرة** — لا تحاول فعل copy-paste
 3. **الصوت المكتوم يعمل على جميع المتصفحات الحديثة** — Firefox، Chrome، Safari
 4. **ConversationManager عنصر اختياري** — يمكن إزالته إذا كان لديك نظام آخر للحجب

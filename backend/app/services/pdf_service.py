@@ -11,7 +11,7 @@ Arabic text pipeline
   Raw Arabic text → arabic_reshaper.reshape() → bidi.get_display() → ReportLab
 
 Sections
-  1. Header — NEXUS branding, student name, date
+  1. Header — EDUVERSE branding, student name, date
   2. BTEC Grade Summary table — one row per evaluation (P/M/D/R)
   3. Cognitive Scaffolding Insight — compares earliest vs latest evaluation
   4. Verona Recommendations — extracted from last 3 evaluations
@@ -51,7 +51,7 @@ def _register_arabic_font() -> None:
     """
     Register an Arabic-capable TTF with ReportLab.
     Tries (in order):
-      1. NEXUS_ARABIC_FONT_PATH env var — operator-supplied path
+      1. EDUVERSE_ARABIC_FONT_PATH env var — operator-supplied path
       2. /usr/share/fonts/**/NotoNaskhArabic-Regular.ttf — common Linux location
       3. Falls back to Helvetica (Latin only — Arabic may render as boxes)
     """
@@ -65,7 +65,7 @@ def _register_arabic_font() -> None:
     candidates: list[str] = []
 
     # Operator override
-    env_path = os.getenv("NEXUS_ARABIC_FONT_PATH", "").strip()
+    env_path = os.getenv("EDUVERSE_ARABIC_FONT_PATH", "").strip()
     if env_path:
         candidates.append(env_path)
 
@@ -90,7 +90,7 @@ def _register_arabic_font() -> None:
 
     if _ARABIC_FONT == "Helvetica":
         logger.warning(
-            "[PDF] No Arabic font found. Set NEXUS_ARABIC_FONT_PATH to a valid TTF path. "
+            "[PDF] No Arabic font found. Set EDUVERSE_ARABIC_FONT_PATH to a valid TTF path. "
             "Arabic glyphs will render as boxes on systems without built-in Arabic support."
         )
 
@@ -162,7 +162,7 @@ def generate_student_report(
         leftMargin=2 * cm,
         topMargin=2.5 * cm,
         bottomMargin=2 * cm,
-        title=f"NEXUS Progress Report — {student_name}",
+        title=f"EDUVERSE Progress Report — {student_name}",
     )
 
     styles = getSampleStyleSheet()
@@ -175,14 +175,14 @@ def generate_student_report(
         wordWrap="RTL",
     )
     heading_style = ParagraphStyle(
-        "NexusHeading",
+        "EduverseHeading",
         parent=styles["Heading1"],
         fontName="Helvetica-Bold",
         fontSize=16,
         textColor=colors.HexColor("#1a237e"),
     )
     sub_style = ParagraphStyle(
-        "NexusSub",
+        "EduverseSub",
         parent=styles["Normal"],
         fontName="Helvetica",
         fontSize=10,
@@ -193,7 +193,7 @@ def generate_student_report(
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     # ── 1. Header ─────────────────────────────────────────────────────────────
-    story.append(Paragraph("NEXUS Academic Progress Report", heading_style))
+    story.append(Paragraph("EDUVERSE Academic Progress Report", heading_style))
     story.append(Spacer(1, 0.3 * cm))
     story.append(Paragraph(f"Student: {student_name} &nbsp;|&nbsp; ID: {student_id} &nbsp;|&nbsp; Date: {now}", sub_style))
     story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#1a237e")))

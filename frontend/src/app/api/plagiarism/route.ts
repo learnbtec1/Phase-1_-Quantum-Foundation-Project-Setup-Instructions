@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+import { getBearerTokenFromRequest } from '../evaluate/_auth';
+
 export const runtime = 'nodejs';
 
 /** Fallback shape when the Python backend is unreachable */
@@ -11,6 +13,14 @@ const FALLBACK = {
 
 export async function POST(req: NextRequest) {
   try {
+    const token = getBearerTokenFromRequest(req);
+    if (!token) {
+      return NextResponse.json(
+        { ...FALLBACK, detail: 'يجب تسجيل الدخول.' },
+        { status: 401 },
+      );
+    }
+
     const body = await req.json();
     const { text } = body;
 
@@ -25,7 +35,10 @@ export async function POST(req: NextRequest) {
     try {
       const response = await fetch(`${backendUrl}/api/v1/assessment/check_plagiarism`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({ text }),
         signal: controller.signal,
       });

@@ -1,0 +1,22 @@
+{
+  "unit_id": "pytest_auth_unit_z9",
+  "title": "Pytest security unit title",
+  "qualification": "",
+  "description": "",
+  "criteria": [
+    {
+      "code": "P1",
+      "level": "pass",
+      "description": "First criterion text ok",
+      "scaffold_question": "",
+      "keywords": []
+    },
+    {
+      "code": "P2",
+      "level": "pass",
+      "description": "Second criterion text ok",
+      "scaffold_question": "",
+      "keywords": []
+    }
+  ]
+}

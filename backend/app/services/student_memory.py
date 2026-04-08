@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field, asdict
 
-logger = logging.getLogger("nexus.memory")
+logger = logging.getLogger("eduverse.memory")
 
 _MEMORY_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "student_memory")
 os.makedirs(_MEMORY_DIR, exist_ok=True)

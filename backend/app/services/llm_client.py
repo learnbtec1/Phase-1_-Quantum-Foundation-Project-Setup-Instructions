@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from typing import Any, List, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from app.core.config import settings as _settings
 
@@ -115,3 +115,127 @@ async def cogni_chat_completion(
     except Exception:
         pass
     return out
+
+
+def _append_tool_event(context: Optional[Dict[str, Any]], ev: Dict[str, Any]) -> None:
+    if context is None:
+        return
+    context.setdefault("_cogni_tool_events", []).append(ev)
+
+
+async def cogni_chat_completion_first_with_tools(
+    messages: List[Dict[str, Any]],
+    *,
+    model: Optional[str] = None,
+    max_tokens: int = 500,
+    temperature: float = 0.7,
+    frequency_penalty: Optional[float] = None,
+    presence_penalty: Optional[float] = None,
+    user_id: Optional[uuid.UUID] = None,
+    max_tool_rounds: int = 3,
+    context: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    First tutor turn with OpenAI tool_calls + whitelist execution on the server.
+    Appends structured entries to context["_cogni_tool_events"] when context is provided.
+    """
+    from openai import AsyncOpenAI
+
+    from app.services.cogni_tools import OPENAI_TOOLS_SPEC, run_cogni_tool
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY not set")
+
+    client = AsyncOpenAI(api_key=api_key)
+    m = model or _settings.TUTOR_MODEL
+    fp = _DEFAULT_FREQ if frequency_penalty is None else frequency_penalty
+    pp = _DEFAULT_PRES if presence_penalty is None else presence_penalty
+
+    if user_id:
+        from app.core.rate_limit import OPENAI_TOKEN_LIMIT_PER_MINUTE, minute_token_count
+
+        ident = str(user_id)
+        cur = minute_token_count(ident)
+        if cur + max_tokens > OPENAI_TOKEN_LIMIT_PER_MINUTE:
+            raise RuntimeError("OPENAI_TOKEN_RATE_LIMIT")
+
+    msgs: List[Dict[str, Any]] = [dict(x) for x in messages]
+    total_usage_tokens = 0
+
+    for _round in range(max_tool_rounds):
+        resp = await client.chat.completions.create(
+            model=m,
+            messages=msgs,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            frequency_penalty=fp,
+            presence_penalty=pp,
+            tools=OPENAI_TOOLS_SPEC,
+            tool_choice="auto",
+        )
+        choice = resp.choices[0].message
+        try:
+            usage = getattr(resp, "usage", None)
+            if usage:
+                total_usage_tokens += int(getattr(usage, "total_tokens", None) or 0)
+        except Exception:
+            pass
+
+        tcalls = getattr(choice, "tool_calls", None) or []
+        if not tcalls:
+            out = (choice.content or "").strip()
+            try:
+                if user_id and total_usage_tokens:
+                    from app.core.rate_limit import check_minute_tokens
+                    from app.services.usage_service import log_openai_usage
+
+                    check_minute_tokens(str(user_id), total_usage_tokens)
+                    log_openai_usage(user_id, total_tokens=total_usage_tokens, model=m)
+            except Exception:
+                pass
+            return out
+
+        asst_msg: Dict[str, Any] = {
+            "role": "assistant",
+            "content": choice.content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments or "{}",
+                    },
+                }
+                for tc in tcalls
+            ],
+        }
+        msgs.append(asst_msg)
+
+        for tc in tcalls:
+            fn = tc.function
+            ok, result = await run_cogni_tool(
+                fn.name,
+                fn.arguments or "{}",
+                timeout_sec=8.0,
+                context=context,
+            )
+            preview = (result or "")[:480]
+            _append_tool_event(
+                context,
+                {"tool": fn.name, "ok": ok, "result_preview": preview},
+            )
+            msgs.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result if ok else f"error: {result}",
+                }
+            )
+
+    logger.warning("[llm_client] cogni_chat_completion_first_with_tools: max_tool_rounds exhausted")
+    return (
+        "عذراً، حدث تعقيد تقني مؤقت مع أدوات النظام. لنكمل الحوار بشكل عادي.\n"
+        "*يهدأ برأسه بلطف*\n[EMOTION: neutral]"
+    )

@@ -1,0 +1,24 @@
+{
+  "weights": {
+    "emotion_match": 3.0,
+    "intent_match": 2.5,
+    "first_turn_bonus": 1.5,
+    "recency_penalty": -2.0,
+    "random_jitter": 0.5
+  },
+  "timing": {
+    "gesture_start_offset_min_ms": 300,
+    "gesture_start_offset_max_ms": 500,
+    "micro_start_offset_min_ms": 50,
+    "micro_start_offset_max_ms": 200,
+    "gaze_start_offset_ms": 0,
+    "subsequent_gesture_gap_ms": 800
+  },
+  "limits": {
+    "max_gestures_per_turn": 2,
+    "max_micros_per_turn": 2,
+    "min_score_threshold": 1.0,
+    "short_reply_max_gestures": 1,
+    "short_reply_char_threshold": 40
+  }
+}

@@ -24,7 +24,7 @@
 <!-- PREVIOUS GUIDE CONTENT BELOW (retained for reference) -->
 ## نظرة عامة (المرجعية السابقة)
 
-هذا الدليل يشرح خطوة بخطوة كيفية دمج التغييرات وتشغيل منصة NEXUS مع:
+هذا الدليل يشرح خطوة بخطوة كيفية دمج التغييرات وتشغيل منصة EDUVERSE مع:
 - **الجزء 1**: التحسينات الأمامية (verona.vrm، fallback، وضع التفكير)
 - **الجزء 2**: تدفق STT (transcribing، transcript، grade_result)
 - **الجزء 3**: الذاكرة الدائمة (PostgreSQL + Repository)
@@ -52,7 +52,7 @@ backend/
 │   ├── env.py
 │   ├── script.py.mako
 │   └── versions/
-│       └── 001_initial_nexus_tables.py
+│       └── 001_initial_eduverse_tables.py
 ├── alembic.ini
 ├── requirements.txt
 └── .env.example
@@ -86,9 +86,9 @@ docker-compose.yml
 cd backend
 cp .env.example .env
 # عدّل .env وأضف قيم postgres إذا USE_DB=true:
-# POSTGRES_USER=nexus
-# POSTGRES_PASSWORD=nexus_secret
-# POSTGRES_DB=nexus_db
+# POSTGRES_USER=eduverse
+# POSTGRES_PASSWORD=eduverse_secret
+# POSTGRES_DB=eduverse_db
 # USE_DB=false   # ابدأ بهذا للتحقق
 ```
 
@@ -133,7 +133,7 @@ USE_DB=false
 
 ```env
 USE_DB=true
-DATABASE_URL=postgresql://nexus:nexus_secret@localhost:5432/nexus_db
+DATABASE_URL=postgresql://eduverse:eduverse_secret@localhost:5432/eduverse_db
 ```
 
 - تأكد من تشغيل `docker-compose up -d db`

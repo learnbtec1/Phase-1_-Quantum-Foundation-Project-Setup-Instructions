@@ -21,6 +21,21 @@ function norm(s: string): string {
   return s.replace(DIACRITICS, '').toLowerCase();
 }
 
+/** Extra delay for longer / heavier gestures so they sit better after playback starts. */
+export function coSpeechLeadBoostMs(gesture: string): number {
+  const m: Record<string, number> = {
+    think: 120,
+    clap: 90,
+    cheer: 85,
+    point: 55,
+    openHand: 45,
+    beat: 35,
+    relax: 30,
+    wave: 25,
+  };
+  return m[gesture] ?? 0;
+}
+
 /** Fallback when browser/audio duration is unavailable. */
 export function estimateDialogueDurationMs(text: string): number {
   const n = (text || '').length;
@@ -28,12 +43,18 @@ export function estimateDialogueDurationMs(text: string): number {
 }
 
 /**
- * Infer duration from viseme cue timeline end (ms) + small tail.
+ * Infer audio duration in **milliseconds** from viseme cue timeline.
+ * `cues[n].t` is always in **seconds** (Azure convention; `useTTSWithVisemes` uses
+ * TICKS_TO_SEC = 1/10_000_000 and `useAgentAgent` normalizes to seconds too).
+ * Returns 0 when cues is empty so callers can fall back to audio.duration.
  */
 export function durationMsFromVisemeCues(cues: Array<{ t: number }> | null | undefined): number {
   if (!cues?.length) return 0;
-  const last = cues.reduce((m, c) => Math.max(m, c.t), 0);
-  return last + 500;
+  const lastSec = cues.reduce((m, c) => Math.max(m, c.t), 0);
+  // Auto-detect if someone accidentally stored ms: values > 300 are almost certainly ms
+  // (a 300-second utterance would be extremely unusual).
+  const isMs = lastSec > 300;
+  return isMs ? lastSec + 500 : lastSec * 1000 + 500;
 }
 
 /**
@@ -55,66 +76,87 @@ export function planCoSpeechGestures(
   const plans: CoSpeechPlan[] = [];
 
   const pushAtRatio = (ratio: number, gesture: string, emphasis?: CoSpeechPlan['emphasis']) => {
-    const atMs = Math.round(Math.min(0.92, Math.max(0.06, ratio)) * dur) + 200 + Math.random() * 120;
+    const atMs =
+      Math.round(Math.min(0.92, Math.max(0.06, ratio)) * dur) +
+      200 +
+      Math.random() * 120 +
+      coSpeechLeadBoostMs(gesture);
     plans.push({ atMs, gesture, emphasis });
   };
 
-  const exIdx = (() => {
-    const needles = ['مثلا', 'على سبيل المثال', 'لنفترض', 'example'];
-    let best = -1;
-    for (const w of needles) {
-      const i = n.indexOf(norm(w));
-      if (i >= 0 && (best < 0 || i < best)) best = i;
-    }
-    return best;
-  })();
-  if (exIdx >= 0) pushAtRatio(exIdx / Math.max(raw.length, 1), 'point');
+  const L = Math.max(raw.length, 1);
 
-  const bigIdx = ['كبير', 'كبيرة', 'حجم كبير'].map(k => n.indexOf(norm(k))).filter(i => i >= 0).sort((a, b) => a - b)[0] ?? -1;
-  const smallIdx = ['صغير', 'صغيرة', 'حجم صغير'].map(k => n.indexOf(norm(k))).filter(i => i >= 0).sort((a, b) => a - b)[0] ?? -1;
-  if (bigIdx >= 0) pushAtRatio(bigIdx / Math.max(raw.length, 1), 'openHand');
-  if (smallIdx >= 0) pushAtRatio(smallIdx / Math.max(raw.length, 1), 'openHand');
+  // helper: first occurrence of any keyword in normalised text
+  const firstOf = (keywords: string[]) =>
+    keywords.map(w => n.indexOf(norm(w))).filter(i => i >= 0).sort((a, b) => a - b)[0] ?? -1;
 
-  const ackIdx = (() => {
-    const needles = ['صحيح', 'بالضبط', 'تمام', 'مظبوط', 'صح'];
-    let best = -1;
-    for (const w of needles) {
-      const i = n.indexOf(norm(w));
-      if (i >= 0 && (best < 0 || i < best)) best = i;
-    }
-    return best;
-  })();
-  if (ackIdx >= 0) pushAtRatio(ackIdx / Math.max(raw.length, 1), 'beat');
+  // ── Pointing / example / demonstration ───────────────────────────────────
+  const exIdx = firstOf(['مثلا', 'مثلاً', 'على سبيل المثال', 'لنفترض', 'example',
+    'تلاحظ', 'لاحظ', 'هذا', 'هنا', 'انظر', 'شوف', 'look', 'notice', 'see']);
+  if (exIdx >= 0) pushAtRatio(exIdx / L, 'point');
 
+  // ── Open-hand: big / open / congratulations ───────────────────────────────
+  const bigIdx = firstOf(['كبير', 'كبيرة', 'ضخم', 'واسع', 'عظيم', 'رائع', 'ممتاز',
+    'احسنت', 'مبروك', 'congrats', 'great', 'huge', 'amazing']);
+  if (bigIdx >= 0) pushAtRatio(bigIdx / L, 'openHand');
+
+  // ── Beat / rhythm / listing ───────────────────────────────────────────────
+  const listIdx = firstOf(['أولاً', 'ثانياً', 'ثالثاً', 'أول', 'ثاني', 'ثالث',
+    'نقطة', 'first', 'second', 'third', 'point', 'also', 'وأيضا', 'علاوة على']);
+  if (listIdx >= 0) pushAtRatio(listIdx / L, 'beat');
+
+  const ackIdx = firstOf(['صحيح', 'بالضبط', 'تمام', 'مظبوط', 'صح', 'نعم', 'أكيد',
+    'بالتأكيد', 'طبعا', 'طبعاً', 'right', 'exactly', 'yes', 'correct']);
+  if (ackIdx >= 0) pushAtRatio(ackIdx / L, 'agree');
+
+  // ── Agreement / nod gesture ───────────────────────────────────────────────
+  const agreeIdx = firstOf(['أتفق', 'وافقت', 'صواب', 'معك حق', 'هذا صح', 'agree', 'i agree', 'true']);
+  if (agreeIdx >= 0 && agreeIdx !== ackIdx) pushAtRatio(agreeIdx / L, 'agree');
+
+  // ── Question / think ─────────────────────────────────────────────────────
   const qIdx = (() => {
-    const needles = ['سؤال', 'ليش', 'كيف', 'لماذا', 'شو رأيك'];
-    let best = -1;
-    for (const w of needles) {
-      const i = n.indexOf(norm(w));
-      if (i >= 0 && (best < 0 || i < best)) best = i;
-    }
+    const byWord = firstOf(['سؤال', 'ليش', 'كيف', 'لماذا', 'شو رأيك', 'ماذا',
+      'متى', 'أين', 'هل', 'ما هو', 'ما هي', 'why', 'how', 'what', 'when', 'where']);
     const qm = Math.max(raw.indexOf('?'), raw.indexOf('؟'));
-    if (qm >= 0 && (best < 0 || qm < best)) best = qm;
-    return best;
+    if (byWord < 0) return qm;
+    if (qm < 0) return byWord;
+    return Math.min(byWord, qm);
   })();
-  if (qIdx >= 0) {
-    const r = qIdx / Math.max(raw.length, 1);
-    pushAtRatio(r, 'think', 'question_tilt');
-  }
+  if (qIdx >= 0) pushAtRatio(qIdx / L, 'think', 'question_tilt');
 
-  const impIdx = ['مهم', 'مهمة', 'أهمية', 'بالغ الأهمية'].map(k => n.indexOf(norm(k))).filter(i => i >= 0).sort((a, b) => a - b)[0] ?? -1;
-  if (impIdx >= 0) pushAtRatio(impIdx / Math.max(raw.length, 1), 'openHand', 'eyebrow');
+  // ── Importance / emphasis / warning ──────────────────────────────────────
+  const impIdx = firstOf(['مهم', 'مهمة', 'أهمية', 'بالغ الأهمية', 'ركز', 'انتبه',
+    'لازم', 'ضروري', 'خطير', 'important', 'remember', 'تذكر', 'note', 'warning']);
+  if (impIdx >= 0) pushAtRatio(impIdx / L, 'openHand', 'eyebrow');
+
+  // ── Celebration / praise ──────────────────────────────────────────────────
+  const encourageIdx = firstOf(['شاطر', 'برافو', 'احسنت', 'أحسنت',
+    'ولد نشامي', 'هيلا', 'well done', 'excellent', 'fantastic', 'perfect']);
+  if (encourageIdx >= 0) pushAtRatio(encourageIdx / L, 'clap');
+
+  // ── Farewell / welcome / greeting ─────────────────────────────────────────
+  const greetIdx = firstOf(['مرحبا', 'أهلا', 'السلام', 'وداعا', 'مع السلامة',
+    'hello', 'hi', 'goodbye', 'bye', 'welcome']);
+  if (greetIdx >= 0) pushAtRatio(greetIdx / L, 'wave');
+
+  // ── Negation / contrast ───────────────────────────────────────────────────
+  const negIdx = firstOf(['لا', 'لكن', 'بالعكس', 'غلط', 'خطأ', 'ليس', 'لم',
+    'no', 'not', 'however', 'but', 'wrong', 'incorrect']);
+  if (negIdx >= 0) pushAtRatio(negIdx / L, 'point', 'eyebrow');
 
   plans.sort((a, b) => a.atMs - b.atMs);
   const merged: CoSpeechPlan[] = [];
   let prevT = -99999;
   for (const p of plans) {
     let at = p.atMs;
-    if (merged.length && at - prevT < 850) at = prevT + 850;
-    if (merged.some(m => m.gesture === p.gesture && Math.abs(m.atMs - at) < 400)) continue;
+    // Min spacing 750ms between any two gestures
+    if (merged.length && at - prevT < 750) at = prevT + 750;
+    // Dedupe near-identical gesture at same time
+    if (merged.some(m => m.gesture === p.gesture && Math.abs(m.atMs - at) < 350)) continue;
     merged.push({ ...p, atMs: at });
     prevT = at;
   }
 
-  return merged.slice(0, 5);
+  // Cap at 6 gestures (was 5 — one extra slot for richer dialogue)
+  return merged.slice(0, 6);
 }

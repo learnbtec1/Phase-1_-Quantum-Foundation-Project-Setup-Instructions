@@ -1,5 +1,5 @@
 ═══════════════════════════════════════════════════════════════
-         NEXUS ACADEMY PLATFORM - PROJECT SNAPSHOT
+         EDUVERSE ACADEMY PLATFORM - PROJECT SNAPSHOT
          Generated: 2026-02-17 01:48:28
 ═══════════════════════════════════════════════════════════════
 
@@ -109,7 +109,7 @@ Backend:
 
 2. State Management:
    - Zustand with localStorage persistence
-   - Immutable keys: nexus-auth, nexus-assessments, nexus-vr, btec_platform_progress
+   - Immutable keys: eduverse-auth, eduverse-assessments, eduverse-vr, btec_platform_progress
 
 3. Grading System:
    - Client-side: Keyword-based BTEC grading
@@ -122,7 +122,7 @@ Backend:
    - Marketing simulation with gameplay
 
 5. Authentication:
-   - Mock system (student@nexus.edu / password123)
+   - Mock system (student@eduverse.edu / password123)
    - Zustand persist middleware
 
 📝 AVAILABLE COMMANDS

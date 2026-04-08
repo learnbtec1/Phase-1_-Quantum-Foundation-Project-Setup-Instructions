@@ -1,5 +1,7 @@
 import { NextRequest } from 'next/server';
 
+import { getBearerTokenFromRequest } from '../evaluate/_auth';
+
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
@@ -10,11 +12,20 @@ export const maxDuration = 60;
  */
 export async function POST(req: NextRequest) {
   try {
+    const token = getBearerTokenFromRequest(req);
+    if (!token) {
+      return new Response(
+        JSON.stringify({ detail: 'يجب تسجيل الدخول لاستخراج النص.' }),
+        { status: 401, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+
     const formData = await req.formData();
     const backendUrl = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
 
     const backendRes = await fetch(`${backendUrl}/api/v1/assessment/extract-text`, {
       method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
       body: formData,
     });
 

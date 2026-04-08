@@ -8,6 +8,8 @@ import os
 
 from fastapi import APIRouter, HTTPException, Request, status
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
@@ -16,9 +18,16 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 @router.post("/stripe")
 async def stripe_webhook(request: Request) -> dict:
     """Handle `customer.subscription.created` / `customer.subscription.deleted` (stub)."""
-    secret = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+    secret = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
     payload = await request.body()
     sig = request.headers.get("stripe-signature") or ""
+
+    if settings.is_production and not secret:
+        logger.error("STRIPE_WEBHOOK_SECRET missing in production — rejecting webhook")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="STRIPE_WEBHOOK_SECRET is required in production",
+        )
 
     if not secret:
         logger.warning("STRIPE_WEBHOOK_SECRET not set — acknowledge without verify (dev only)")

@@ -1,5 +1,7 @@
 import { NextRequest } from 'next/server';
 
+import { getBearerTokenFromRequest } from '../evaluate/_auth';
+
 export const runtime = 'nodejs';
 export const maxDuration = 300;
 
@@ -10,6 +12,14 @@ interface StudentSolutionFile {
 }
 
 export async function POST(req: NextRequest) {
+  const token = getBearerTokenFromRequest(req);
+  if (!token) {
+    return new Response(
+      JSON.stringify({ type: 'error', detail: 'يجب تسجيل الدخول لتشغيل التقييم.' }),
+      { status: 401, headers: { 'Content-Type': 'application/json' } },
+    );
+  }
+
   try {
     const body = await req.json();
 
@@ -47,19 +57,27 @@ export async function POST(req: NextRequest) {
       })
       .join('\n\n');
 
-    if (student_text.replace(/=+.*?===/g, '').trim().length < 50) {
+    if (student_text.replace(/=+.*?===/g, '').trim().length < 20) {
       return new Response(JSON.stringify({
         type: 'error',
-        detail: 'محتوى الملفات قصير جداً أو فارغ. الحد الأدنى 50 حرف.',
+        detail: 'محتوى الملفات قصير جداً أو فارغ. الحد الأدنى 20 حرفاً.',
       }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     }
 
     const backendUrl = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
+    const student_id = body?.student_id ?? undefined;
 
     const backendResponse = await fetch(`${backendUrl}/api/v1/assessment/forensic-grade-v3`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ assignment_text, student_text }),
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        assignment_text,
+        student_text,
+        ...(student_id && { student_id }),
+      }),
     });
 
     const errorEnvelope = (msg: string) => ({

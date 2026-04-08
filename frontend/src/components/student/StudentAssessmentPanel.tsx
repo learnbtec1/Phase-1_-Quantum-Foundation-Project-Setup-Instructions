@@ -4,6 +4,14 @@ import { useEffect, useMemo, useState } from 'react';
 import { BookOpen, GraduationCap, Layers } from 'lucide-react';
 import { ACADEMIC_DATA } from '@/lib/academicSubjects';
 import { normalizeIntegratedResult, type EvaluationResult } from '@/lib/assessmentNormalize';
+import {
+  buildAssessmentCoachingPayload,
+  persistAssessmentCoaching,
+  setCogniFocusSubject,
+} from '@/lib/cogniSessionContext';
+import { getStudentIdForEvaluation } from '@/lib/studentDeviceId';
+import { authHeaders } from '@/lib/auth';
+import BusinessSubjectChips from '@/components/student/BusinessSubjectChips';
 
 export type GradeNudgePayload = {
   grade: string;
@@ -47,7 +55,7 @@ export default function StudentAssessmentPanel({ focusTopicLabel, onGradeUpdated
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem('nexus-assessment-history');
+      const raw = localStorage.getItem('eduverse-assessment-history');
       if (raw) {
         const parsed = JSON.parse(raw) as HistoryEntry[];
         if (Array.isArray(parsed)) setHistory(parsed.slice(0, 10));
@@ -73,6 +81,30 @@ export default function StudentAssessmentPanel({ focusTopicLabel, onGradeUpdated
     setSelectedSubject(focusTopicLabel);
   }, [focusTopicLabel]);
 
+  const pickSubjectFromChip = (label: string) => {
+    const v = label.trim();
+    if (!v) return;
+    for (const cls of Object.keys(ACADEMIC_DATA)) {
+      for (const sec of Object.keys(ACADEMIC_DATA[cls] || {})) {
+        const subs = ACADEMIC_DATA[cls][sec] || [];
+        if (subs.includes(v)) {
+          setSelectedClass(cls);
+          setSelectedSection(sec);
+          setSelectedSubject(v);
+          setCogniFocusSubject(v);
+          return;
+        }
+      }
+    }
+    setSelectedSubject(v);
+    setCogniFocusSubject(v);
+  };
+
+  useEffect(() => {
+    const s = selectedSubject.trim();
+    if (s) setCogniFocusSubject(s);
+  }, [selectedSubject]);
+
   const availableSections = useMemo(
     () => (selectedClass ? Object.keys(ACADEMIC_DATA[selectedClass] || {}) : []),
     [selectedClass],
@@ -84,19 +116,20 @@ export default function StudentAssessmentPanel({ focusTopicLabel, onGradeUpdated
 
   const saveLastGrade = (evalResult: EvaluationResult, subjectLabel: string) => {
     try {
-      const criteria = evalResult.data.criteria ?? [];
-      const criteriaSummary = criteria
-        .map((c) => `${c.code}: ${c.verdict === 'Achieved' ? '✓ Achieved' : '✗ Not Achieved'}`)
-        .join(' | ');
+      const coach = buildAssessmentCoachingPayload(evalResult, subjectLabel || '—');
+      persistAssessmentCoaching(coach);
       const snapshot = {
-        final_grade: evalResult.data.final_grade || 'PENDING',
-        subject: subjectLabel || '—',
-        criteria_summary: criteriaSummary,
-        achieved: evalResult.data.summary.achievedCount,
-        total: evalResult.data.summary.totalCriteria,
-        ts: new Date().toISOString(),
+        final_grade: coach.final_grade,
+        subject: coach.subject,
+        criteria_summary: coach.criteria_summary,
+        achieved: coach.achieved,
+        total: coach.total,
+        gaps_detail_ar: coach.gaps_detail_ar,
+        coaching_goal_ar: coach.coaching_goal_ar,
+        ...(coach.report_excerpt ? { report_excerpt: coach.report_excerpt } : {}),
+        ts: coach.ts,
       };
-      localStorage.setItem('nexus-last-grade', JSON.stringify(snapshot));
+      localStorage.setItem('eduverse-last-grade', JSON.stringify(snapshot));
     } catch {
       /* ignore */
     }
@@ -120,11 +153,12 @@ export default function StudentAssessmentPanel({ focusTopicLabel, onGradeUpdated
       const assignmentBrief = `${selectedSubject}\n${assignmentContext}`;
       const res = await fetch('/api/evaluate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({
           student_text: studentAnswer,
           assignment_text: assignmentBrief,
           unit_id: '14',
+          student_id: getStudentIdForEvaluation(),
         }),
       });
       const data = await res.json();
@@ -140,7 +174,7 @@ export default function StudentAssessmentPanel({ focusTopicLabel, onGradeUpdated
       const next = [entry, ...history].slice(0, 20);
       setHistory(next);
       try {
-        localStorage.setItem('nexus-assessment-history', JSON.stringify(next));
+        localStorage.setItem('eduverse-assessment-history', JSON.stringify(next));
       } catch {
         /* ignore */
       }
@@ -218,6 +252,10 @@ export default function StudentAssessmentPanel({ focusTopicLabel, onGradeUpdated
             </option>
           ))}
         </select>
+      </div>
+
+      <div className="rounded-lg border border-white/10 bg-black/20 p-2">
+        <BusinessSubjectChips selectedSubject={selectedSubject} onPick={pickSubjectFromChip} />
       </div>
 
       <div className="space-y-2">

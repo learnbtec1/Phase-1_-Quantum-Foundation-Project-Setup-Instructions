@@ -7,7 +7,10 @@ import { POST } from '../app/api/evaluate/route';
 function buildRequest(body: object): Request {
   return new Request('http://localhost/api/evaluate', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer test-local-token',
+    },
     body: JSON.stringify(body),
   });
 }
@@ -34,5 +37,18 @@ describe('Evaluate API validation', () => {
     expect(res.status).toBe(400);
     const data = await res.json();
     expect(data.type).toBe('error');
+  });
+
+  it('returns 401 when Authorization is missing', async () => {
+    const req = new Request('http://localhost/api/evaluate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        assignment_text: 'نص الواجب الطويل بما يكفي ليصل إلى عشرين حرفاً على الأقل.',
+        student_text: 'إجابة الطالب الطويلة بما يكفي لتجاوز حد العشرين حرفاً هنا.',
+      }),
+    });
+    const res = await POST(req as any);
+    expect(res.status).toBe(401);
   });
 });
