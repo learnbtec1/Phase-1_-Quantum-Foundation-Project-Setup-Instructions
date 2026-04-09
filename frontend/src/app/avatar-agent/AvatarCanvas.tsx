@@ -94,7 +94,7 @@ function ErrorFallback() {
 }
 
 export default function AvatarCanvas({
-  vrmUrl = '/models/cogni_final.vrm',
+  vrmUrl = '/models/cogni.vrm',
   showOfficeEnvironment = true,
   officeGlbUrl = OFFICE_GLB_PUBLIC_PATH,
   officePosition = [...AVATAR_OFFICE_SCENE_DEFAULTS.officePosition],

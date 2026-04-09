@@ -1,4 +1,4 @@
-/** @type {import('next').NextConfig} */
+﻿/** @type {import('next').NextConfig} */
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -73,6 +73,15 @@ const nextConfig = {
   reactStrictMode: false,
   poweredByHeader: false,
   productionBrowserSourceMaps: false,
+
+  /** Allow HMR when browser connects from 127.0.0.1 (avoids "Blocked cross-origin" warning). */
+  allowedDevOrigins: ['127.0.0.1', 'localhost'],
+
+  /** Build-time default — ensures cogni.vrm is resolved even without .env.local. */
+  env: {
+    NEXT_PUBLIC_AVATAR_VRM_URL:
+      process.env.NEXT_PUBLIC_AVATAR_VRM_URL || '/models/cogni.vrm',
+  },
 
   // eslint: removed — Next.js 16 no longer reads this from next.config.js
   // Use .eslintrc / eslint.config.js and `next lint` instead.

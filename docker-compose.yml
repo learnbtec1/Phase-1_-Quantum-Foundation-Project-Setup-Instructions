@@ -117,7 +117,7 @@ services:
       # Enable gesture/lip-sync simulation when Azure TTS key is absent.
       # Set to "false" (or remove) once AZURE_SPEECH_KEY is provided.
       NEXT_PUBLIC_MIME_MODE: "true"
-      NEXT_PUBLIC_AVATAR_VRM_URL: "/models/cogni_final.vrm"
+      NEXT_PUBLIC_AVATAR_VRM_URL: "/models/cogni.vrm"
       # Scene: DEFAULT (carpet + desk) | OFFICE — must be set for Next dev server / client bundle
       NEXT_PUBLIC_ACTIVE_ENV: ${NEXT_PUBLIC_ACTIVE_ENV:-DEFAULT}
     ports:

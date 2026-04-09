@@ -60,12 +60,7 @@ const _envVrm = (
 /** Tried in order after `pickVrmUrl()` inside AvatarCanvas (deduped). */
 export const VRM_FALLBACKS: readonly string[] = [
   ...(_envVrm ? [_envVrm] : []),
-  '/models/cogni_final.vrm',
   '/models/cogni.vrm',
-  '/models/teach.vrm',
-  '/models/teacher-final.vrm',
-  '/models/cogni-avatar.vrm',
-  '/models/teacher.vrm',
 ];
 
 /** Returns the primary VRM URL. All components must call this — never hardcode paths. */
@@ -76,10 +71,10 @@ export function pickVrmUrl(): string {
   ) {
     return normalizePublicModelUrl(
       process.env.NEXT_PUBLIC_AVATAR_VRM_URL.trim(),
-      '/models/cogni_final.vrm',
+      '/models/cogni.vrm',
     );
   }
-  return '/models/cogni_final.vrm';
+  return '/models/cogni.vrm';
 }
 
 // ── Feature flags ─────────────────────────────────────────────────────────────
