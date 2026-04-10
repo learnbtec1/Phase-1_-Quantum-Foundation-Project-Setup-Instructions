@@ -884,6 +884,17 @@ export function VRMSkeletonManager({
    */
   const gestureAmplitudeMulRef = useRef(1.0);
 
+  /**
+   * PHASE 3 — Gesture Context Object.
+   * Stores semantic intent for the current gesture instance.
+   * Drives head coupling, gaze shifts, and blink rate modulation.
+   */
+  const gestureContextRef = useRef<{
+    intensity: number;   // 0.3–1.0 — how emphatic the gesture is
+    mood:      string;   // 'neutral'|'confused'|'confident'|'empathetic'|'excited'
+    durationMs: number;  // mirror of gestureDurationRef for behavior decay
+  }>({ intensity: 0.7, mood: 'neutral', durationMs: 3000 });
+
   const lastEffGestureRef = useRef<GestureId>('idle');
   const gestureCrossfadeStartMsRef = useRef(performance.now());
 
@@ -951,26 +962,50 @@ export function VRMSkeletonManager({
      *
      * الإيماءات المتاحة: think | wave | clap | agree | idle | explain | point
      */
-    w.__cogniPlayGesture = (name: string, durationSec = 2.5) => {
-      const gestures = ['think', 'wave', 'clap', 'agree', 'idle', 'explain', 'point'];
-      const g = (name ?? 'idle').toLowerCase().trim();
-      if (!gestures.includes(g)) {
-        console.warn(`[Cogni] غير معروف: "${name}". المتاح: ${gestures.join(' | ')}`);
+    /**
+     * PHASE 3: Updated debug API — now accepts Gesture Context Object.
+     *
+     * Usage examples:
+     *   window.__cogniPlayGesture('think')
+     *   window.__cogniPlayGesture('think', 2.5)
+     *   window.__cogniPlayGesture({ type:'think', intensity:0.9, mood:'confused', duration:3 })
+     *   window.__cogniPlayGesture({ type:'explain', intensity:0.6, mood:'confident' })
+     */
+    w.__cogniPlayGesture = (
+      nameOrCtx: string | { type: string; intensity?: number; mood?: string; duration?: number },
+      durationSec = 2.5,
+    ) => {
+      const GESTURES = ['think', 'wave', 'clap', 'agree', 'idle', 'explain', 'point'];
+
+      let g: string, intensity: number, mood: string, dur: number;
+
+      if (typeof nameOrCtx === 'object' && nameOrCtx !== null) {
+        // Context Object API
+        g         = (nameOrCtx.type ?? 'idle').toLowerCase().trim();
+        intensity = nameOrCtx.intensity ?? 0.7;
+        mood      = nameOrCtx.mood      ?? 'neutral';
+        dur       = (nameOrCtx.duration ?? durationSec) * 1000;
+      } else {
+        // Legacy string API
+        g         = (nameOrCtx ?? 'idle').toLowerCase().trim();
+        intensity = 0.65 + Math.random() * 0.25;
+        mood      = 'neutral';
+        dur       = durationSec * 1000;
+      }
+
+      if (!GESTURES.includes(g)) {
+        console.warn(`[Cogni] غير معروف: "${g}". المتاح: ${GESTURES.join(' | ')}`);
         return;
       }
+
       window.dispatchEvent(
         new CustomEvent('avatar:gesture', {
-          detail: {
-            gesture: g,
-            type: g,
-            duration: durationSec,
-            durationMs: durationSec * 1000,
-            priority: 2, // NORMAL
-          },
+          detail: { gesture: g, type: g, durationMs: dur, intensity, mood, priority: 2 },
         }),
       );
+
       if (process.env.NODE_ENV === 'development') {
-        console.log(`[Cogni] ▶ playGesture("${g}", ${durationSec}s)`);
+        console.log(`[Cogni] ▶ playGesture("${g}", ${(dur/1000).toFixed(1)}s, intensity=${intensity.toFixed(2)}, mood=${mood})`);
       }
     };
     return () => {
@@ -1185,22 +1220,136 @@ export function VRMSkeletonManager({
     // ── Pending gesture buffer: catches gestures that arrive before humanoid ready ─
     const _pendingGestureRef: { detail: Record<string, unknown> | null } = { detail: null };
 
+    // ── PHASE 3: Gesture Behavior Dispatcher ──────────────────────────────────
+    // Translates gesture intent into coupled head/gaze/blink events.
+    // Uses existing avatar:gaze, avatar:headpose, avatar:blink infrastructure.
+    const dispatchBehaviorForGesture = (
+      gesture: GestureId,
+      intensity: number,
+      mood: string,
+      durationMs: number,
+    ) => {
+      if (typeof window === 'undefined' || gesture === 'idle') return;
+
+      // Clamp intensity to valid range
+      const intens = THREE.MathUtils.clamp(intensity, 0.3, 1.0);
+      const gazeHoldMs = Math.min(durationMs * 0.8, 2200);
+
+      // ── Head Coupling Table ──────────────────────────────────────────────────
+      // Each gesture type gets a specific head pose and gaze shift.
+      // Values are scaled by intensity so 'confused' mood gets larger tilts.
+      const moodMul = mood === 'confused' ? 1.3
+                    : mood === 'excited'  ? 1.1
+                    : mood === 'empathetic' ? 0.8
+                    : mood === 'confident'  ? 0.9
+                    : 1.0; // neutral
+
+      // avatar:headpose is handled by VRMSkeletonManager onHeadPose listener
+      const emitHeadPose = (yaw: number, pitch: number, dur = gazeHoldMs) => {
+        window.dispatchEvent(new CustomEvent('avatar:headpose', {
+          detail: { yaw: yaw * intens * moodMul, pitch: pitch * intens * moodMul, durationMs: dur },
+        }));
+      };
+      // avatar:gaze is handled by AnimationController onGaze listener
+      const emitGaze = (yaw: number, pitch: number, dur = gazeHoldMs) => {
+        window.dispatchEvent(new CustomEvent('avatar:gaze', {
+          detail: { yaw: yaw * intens, pitch: pitch * intens, durationMs: dur },
+        }));
+      };
+      // avatar:blink is handled by AnimationController blinkStyleRef
+      const emitBlink = (style: 'slow' | 'normal') => {
+        window.dispatchEvent(new CustomEvent('avatar:blink', { detail: { style } }));
+      };
+
+      switch (gesture) {
+        case 'think':
+          // Head: tilt to one side (like pondering), slight downward pitch
+          emitHeadPose(
+            (Math.random() > 0.5 ? 0.08 : -0.08) * moodMul, // random left/right tilt
+            -0.06,  // slight chin-down (looking inward)
+          );
+          // Gaze: shifts down and slightly away (mind's eye / internal focus)
+          emitGaze(-0.12, -0.18);
+          // Blink: slow during thinking (cognitive load signal)
+          emitBlink('slow');
+          break;
+
+        case 'explain':
+          // Head: subtle forward pitch (engaging lean) + slight turn toward "board"
+          emitHeadPose(0.0, -0.03, gazeHoldMs * 0.6); // brief forward nod
+          // Gaze: toward camera (addressing listener directly)
+          emitGaze(0, 0.05, gazeHoldMs); // slight upward = confident eye contact
+          emitBlink('normal');
+          break;
+
+        case 'point':
+          // Head: turns slightly in pointing direction (right upper arm = right side)
+          emitHeadPose(0.10, 0, gazeHoldMs * 0.5);
+          // Gaze: follows arm direction
+          emitGaze(0.18 * intens, 0.04, gazeHoldMs);
+          emitBlink('normal');
+          break;
+
+        case 'wave':
+          // Head: slight rise (upbeat, greeting energy)
+          emitHeadPose(0.0, -0.04);
+          emitGaze(0, 0.08, gazeHoldMs); // look up slightly (openness)
+          emitBlink('normal');
+          break;
+
+        case 'agree':
+          // Head: gentle forward tilt (affirmation body language)
+          emitHeadPose(0.0, -0.04, 600);
+          emitGaze(0, 0, gazeHoldMs);
+          emitBlink('normal');
+          break;
+
+        case 'clap':
+          // Head: slight upward pitch (celebratory)
+          emitHeadPose(0.0, -0.05);
+          emitGaze(0, 0.06, gazeHoldMs);
+          emitBlink('normal');
+          break;
+
+        default:
+          break;
+      }
+    };
+
     const applyGestureDetail = (detail: Record<string, unknown>) => {
       const next = normalizeGestureDetail(detail);
       const priRaw = detail?.priority;
       const pri = typeof priRaw === 'number' && Number.isFinite(priRaw) ? priRaw : 'n/a';
+
       // FIX 2: randomize amplitude per gesture instance (0.75–1.25×)
-      // idle keeps amplitude=1 to avoid breathing drift
       gestureAmplitudeMulRef.current = next === 'idle' ? 1.0 : 0.75 + Math.random() * 0.50;
+
+      // PHASE 3: parse gesture context and fire behavior events
+      const intensity = typeof detail.intensity === 'number'
+        ? THREE.MathUtils.clamp(detail.intensity, 0.3, 1.0)
+        : 0.65 + Math.random() * 0.25; // default: randomised 0.65–0.90 for variety
+      const mood = typeof detail.mood === 'string' ? detail.mood : 'neutral';
+      const durationMs = normalizeDurationMs(detail);
+
+      gestureContextRef.current = { intensity, mood, durationMs };
+
+      // Dispatch head/gaze/blink behavior with a short ANTICIPATION delay (150–250ms)
+      // so behavior STARTS before the gesture arm motion peaks (natural pre-impulse)
+      if (next !== 'idle') {
+        const anticipationMs = 150 + Math.random() * 100;
+        setTimeout(() => {
+          dispatchBehaviorForGesture(next, intensity, mood, durationMs);
+        }, anticipationMs);
+      }
+
       if (process.env.NODE_ENV === 'development') {
         console.log(
-          `[VRMSkeletonManager] 🎭 Gesture applied: ${next} (priority: ${pri}) amp=${gestureAmplitudeMulRef.current.toFixed(2)}`,
-          detail?.vrmaStem ?? detail?.gesture ?? '',
+          `[VRMSkeletonManager] 🎭 ${next} | intensity=${intensity.toFixed(2)} mood=${mood} amp=${gestureAmplitudeMulRef.current.toFixed(2)} (priority: ${pri})`,
         );
       }
       gestureStateRef.current = next;
       gestureStartRef.current = performance.now();
-      gestureDurationRef.current = normalizeDurationMs(detail);
+      gestureDurationRef.current = durationMs;
     };
 
     // Replay any gesture that arrived before humanoid was ready
