@@ -406,6 +406,32 @@ const TALK_WRIST_PHASE     = 0.4;
 const GESTURE_FADE_IN_END  = 0.18;
 const GESTURE_FADE_OUT_START = 0.72;
 
+// ─── INTENT CURVE — 4-phase human gesture structure ────────────────────────
+//
+//  BEFORE (linear): progress 0→1 uniformly controls blend
+//  AFTER  (intent): 4 distinct phases with unique blend & slerp characteristics
+//
+//  Phase 0 | PREPARATION | 0.00 → 0.20 | limb starts moving at 20% amplitude
+//  Phase 1 | ATTACK      | 0.20 → 0.50 | fast reach to peak (110% overshoot)
+//  Phase 2 | HOLD        | 0.50 → 0.75 | plateau with micro-oscillation ±5%
+//  Phase 3 | DECAY       | 0.75 → 1.00 | slow organic return to idle
+//
+// These thresholds are normalised progress values (0–1 over gesture duration).
+const INTENT_PREP_END    = 0.20;  // end of preparation phase
+const INTENT_ATTACK_END  = 0.50;  // end of attack phase (peak reached)
+const INTENT_HOLD_END    = 0.75;  // end of hold phase (decay begins)
+// Blend targets per phase (as fraction of full gesture amplitude)
+const INTENT_PREP_BLEND  = 0.22;  // pre-impulse: 22% of target
+const INTENT_PEAK_BLEND  = 1.08;  // attack overshoot: 108% (felt not seen)
+// slerp speed multipliers per phase (applied on top of FIX-1 base speed)
+const INTENT_SLERP_PREP  = 0.45; // slow — limb eases into motion
+const INTENT_SLERP_ATTACK = 2.2; // fast — confident reach to peak
+const INTENT_SLERP_HOLD  = 0.65; // medium — settle at peak
+const INTENT_SLERP_DECAY = 0.38; // very slow — organic release
+// Hold micro-oscillation: simulates sustained muscle activation at peak
+const INTENT_HOLD_OSC_AMP  = 0.048; // ±4.8% of target amplitude
+const INTENT_HOLD_OSC_FREQ = 6.5;   // Hz — subtle but visible
+
 /** بعد تغيّر الإيماءة: يبطّئ معدلات slerp ثم يعود للكامل (يقلّل القفزات). */
 const GESTURE_CROSSFADE_MS = 420;
 
@@ -455,6 +481,62 @@ const BIO_SACCADE_IVAL_MAX = 4700;  // ms max
 const BIO_SACCADE_AMP      = 0.014; // saccade magnitude (radians)
 const BIO_SACCADE_SPEED    = 20;    // lerp speed toward saccade target (settle)
 const BIO_SACCADE_DECAY    = 2.8;   // lerp speed back toward zero between saccades
+
+/**
+ * Returns per-frame intent curve values based on normalised gesture progress.
+ *
+ * @param p        — gesture progress 0→1
+ * @param t        — scene clock (seconds) for oscillation
+ * @param isIdle   — true when gesture = idle (returns neutral values)
+ *
+ * Returns:
+ *   intentBlend   — effective blend for arm targets (replaces gBlend on arms)
+ *   slerpMul      — additional slerp speed factor for this phase
+ *   holdOsc       — micro-oscillation value during hold (0 outside hold)
+ *   phase         — current phase name (for debug)
+ */
+function computeIntentCurve(
+  p: number,
+  t: number,
+  isIdle: boolean,
+): { intentBlend: number; slerpMul: number; holdOsc: number; phase: string } {
+  if (isIdle) return { intentBlend: 0, slerpMul: 1, holdOsc: 0, phase: 'idle' };
+
+  if (p < INTENT_PREP_END) {
+    // ── PREPARATION ──────────────────────────────────────────────────────────
+    // Limb begins to travel at low amplitude (pre-impulse).
+    // smoothstep eases in so there's no abrupt start.
+    const localT = p / INTENT_PREP_END;
+    const intentBlend = THREE.MathUtils.smoothstep(localT, 0, 1) * INTENT_PREP_BLEND;
+    return { intentBlend, slerpMul: INTENT_SLERP_PREP, holdOsc: 0, phase: 'prep' };
+  }
+
+  if (p < INTENT_ATTACK_END) {
+    // ── ATTACK ───────────────────────────────────────────────────────────────
+    // Fast, confident reach from PREP_BLEND to PEAK_BLEND.
+    // The slight overshoot (108%) feels natural; it's corrected in HOLD.
+    const localT = (p - INTENT_PREP_END) / (INTENT_ATTACK_END - INTENT_PREP_END);
+    const intentBlend = INTENT_PREP_BLEND +
+      THREE.MathUtils.smoothstep(localT, 0, 1) * (INTENT_PEAK_BLEND - INTENT_PREP_BLEND);
+    return { intentBlend, slerpMul: INTENT_SLERP_ATTACK, holdOsc: 0, phase: 'attack' };
+  }
+
+  if (p < INTENT_HOLD_END) {
+    // ── HOLD ─────────────────────────────────────────────────────────────────
+    // At peak. Micro-oscillation simulates sustained muscle activation.
+    // Blend settles from PEAK_BLEND toward 1.0 (absorb overshoot).
+    const localT  = (p - INTENT_ATTACK_END) / (INTENT_HOLD_END - INTENT_ATTACK_END);
+    const intentBlend = THREE.MathUtils.lerp(INTENT_PEAK_BLEND, 1.0, localT);
+    const holdOsc = Math.sin(t * INTENT_HOLD_OSC_FREQ * Math.PI * 2) * INTENT_HOLD_OSC_AMP;
+    return { intentBlend, slerpMul: INTENT_SLERP_HOLD, holdOsc, phase: 'hold' };
+  }
+
+  // ── DECAY ───────────────────────────────────────────────────────────────────
+  // Slow organic return. smoothstep eases out so there's no sharp cutoff.
+  const localT = (p - INTENT_HOLD_END) / (1.0 - INTENT_HOLD_END);
+  const intentBlend = 1.0 - THREE.MathUtils.smoothstep(localT, 0, 1);
+  return { intentBlend, slerpMul: INTENT_SLERP_DECAY, holdOsc: 0, phase: 'decay' };
+}
 
 type IdleVariant = 'neutral' | 'weight_left' | 'casual';
 
@@ -1403,6 +1485,18 @@ export function VRMSkeletonManager({
     const _ampBlend = g !== 'idle' ? gBlend : 0;
     const gAmp = 1.0 + (_ampRaw - 1.0) * _ampBlend; // interpolates between 1.0 and _ampRaw
 
+    // ── PHASE 2: GESTURE INTENT CURVE ─────────────────────────────────────────
+    // Computes intentBlend + slerpMul + holdOsc from a 4-phase model.
+    // intentBlend REPLACES gBlend on arm bones only (head/spine keep gBlend).
+    // slerpMul is multiplied into the armK base computed by FIX-1.
+    const _isIdle = g === 'idle' || vrmaActive;
+    const { intentBlend: _ib, slerpMul: intentSlerpMul, holdOsc } =
+      computeIntentCurve(progress, t, _isIdle);
+    // Scale intentBlend by per-instance amplitude (FIX 2 interaction)
+    const intentBlend = _ib * gAmp;
+    // Follow-through overshoot still applies on top of intentBlend during attack/hold
+    const intentArm = intentBlend * armBlendMul;
+
     if (typeof window !== 'undefined') {
       (window as Window & { __avatarSkeletonGesture?: GestureId }).__avatarSkeletonGesture = g;
     }
@@ -1570,22 +1664,20 @@ export function VRMSkeletonManager({
 
     // ─── Arm slerp helpers ──────────────────────────────────────────────────
     //
-    // FIX 1: Variable slerp rate — fast attack (first 40%) / slow decay (last 60%).
+    // FIX 1 + PHASE 2 INTERACTION: Variable slerp rate with intent-phase modulation.
     //
-    // Humans reach a gesture peak quickly (fast attack) then release slowly
-    // (organic decay). A single constant rate produces the "mechanical" feel.
+    // FIX 1 computed a base speed from the attack/decay split.
+    // Now intentSlerpMul (from Intent Curve) further modulates it per phase:
+    //   PREP:   base × 0.45  — slow, deliberate start
+    //   ATTACK: base × 2.2   — fast, confident reach
+    //   HOLD:   base × 0.65  — settle, hold with micro-motion
+    //   DECAY:  base × 0.38  — very slow, organic release
     //
-    //   progress  0 → 0.4  : attack phase  → speed × 2.0  (snappy reach)
-    //   progress  0.4 → 1  : decay  phase  → speed × 0.55 (gentle release)
-    //
-    // Upper arm (UA) leads slightly faster than lower arm (LA) per kMul override.
-    const _attackPhase = g !== 'idle' && progress < 0.4;
-    const _baseSpeed   = _attackPhase ? 14.0 : 3.8; // attack: ×2.0 vs decay: ×0.55 of old 7
-    const armK = Math.min(1, safeDelta * _baseSpeed);
-
-    // armKLow: forearm follows upper arm with a slight lag (more organic chain feel)
-    const _baseSpeedLow = _attackPhase ? 11.0 : 3.2;
-    const armKLow = Math.min(1, safeDelta * _baseSpeedLow);
+    // When idle, intentSlerpMul = 1 (neutral, no change).
+    const _attackPhase = g !== 'idle' && progress < INTENT_ATTACK_END;
+    const _baseSpeed   = _attackPhase ? 12.0 : 4.2;
+    const armK    = Math.min(1, safeDelta * _baseSpeed * intentSlerpMul);
+    const armKLow = Math.min(1, safeDelta * (_attackPhase ? 9.5 : 3.5) * intentSlerpMul);
 
     /**
      * slerpArmEuler — applies target Euler to a bone quaternion.
@@ -1732,12 +1824,13 @@ export function VRMSkeletonManager({
       const eLlaZ = cal ? cal.llaZ : EXPLAIN_LLA_Z;
       // ★ BIO: gravity droop — arm sags slightly toward down when extended
       const explainGravityZ = BIO_GRAVITY_DROOP * gBlend;
-      // FIX 2: amplitude — shifts the arm position (X/Z), not wrist/fingers
-      const aX = gAmp; const aZ = gAmp;
-      slerpArmEuler(ruaRef.current, (eRuaX + wave * 0.4 + antRua) * aX, eRuaY, (eRuaZ + wave + explainGravityZ) * aZ, 1);
-      slerpArmEuler(luaRef.current, (eLuaX - wave * 0.32 + antRua) * aX, eLuaY, (eLuaZ - wave - explainGravityZ) * aZ, 1);
-      slerpArmEuler(rlaRef.current, EXPLAIN_RLA_X, 0, (eRlaZ - wave * 0.2) * aZ, 1, true); // isLow=true
-      slerpArmEuler(llaRef.current, EXPLAIN_LLA_X, 0, (eLlaZ + wave * 0.18) * aZ, 1, true);
+      // INTENT CURVE: intentArm = intentBlend * armBlendMul drives effective reach.
+      // holdOsc adds micro-oscillation during HOLD phase — layered on top of the wave.
+      const _eHold = 1 + holdOsc * 0.7; // scale wave/reach during hold
+      slerpArmEuler(ruaRef.current, (eRuaX + wave * 0.4 + antRua) * _eHold, eRuaY, (eRuaZ + wave + explainGravityZ) * _eHold, 1);
+      slerpArmEuler(luaRef.current, (eLuaX - wave * 0.32 + antRua) * _eHold, eLuaY, (eLuaZ - wave - explainGravityZ) * _eHold, 1);
+      slerpArmEuler(rlaRef.current, EXPLAIN_RLA_X, 0, (eRlaZ - wave * 0.2) * _eHold, 1, true);
+      slerpArmEuler(llaRef.current, EXPLAIN_LLA_X, 0, (eLlaZ + wave * 0.18) * _eHold, 1, true);
       // معصمان: بدون jitter لمنع الاهتزاز الدقيق
       slerpArmEuler(
         rhRef.current,
@@ -1925,15 +2018,15 @@ export function VRMSkeletonManager({
       const tLhY  = cal?.lhY ?? THINK_LH_Y;
       const tLhZ  = cal?.lhZ ?? THINK_LH_Z;
 
-      // kMul=3: factor≈0.35/frame → ذراع تصل 95% من الهدف في ~8 إطارات (0.13s)
-      const thinkK = 1.5 * gArm + 0.15;
-      // FIX 2: amplitude on X/Z (forward reach + height), not Y (rotation axis)
-      slerpArmEuler(ruaRef.current, tRuaX * gAmp, tRuaY, tRuaZ * gAmp, thinkK);
-      slerpArmEuler(rlaRef.current, THINK_RLA_X * gAmp, 0, tRlaZ * gAmp, thinkK, true);
-      slerpArmEuler(rhRef.current,  tRhX * gAmp, tRhY, tRhZ * gAmp,     thinkK * 0.9, true);
-      slerpArmEuler(luaRef.current, tLuaX * gAmp, tLuaY, tLuaZ * gAmp,  thinkK * 0.7);
-      slerpArmEuler(llaRef.current, tLlaX * gAmp, 0, tLlaZ * gAmp,       thinkK * 0.7, true);
-      slerpArmEuler(lhRef.current,  tLhX * gAmp, tLhY, tLhZ * gAmp,      thinkK * 0.65, true);
+      // INTENT CURVE: intentArm drives the blend; holdOsc adds micro-oscillation at peak.
+      // thinkK is now only a scaling hint — actual speed comes from armK (FIX1+PHASE2).
+      const thinkK = 1.5 * intentArm + 0.12;
+      slerpArmEuler(ruaRef.current, tRuaX * (1 + holdOsc), tRuaY, tRuaZ * (1 + holdOsc * 0.6), thinkK);
+      slerpArmEuler(rlaRef.current, THINK_RLA_X * (1 + holdOsc * 0.8), 0, tRlaZ * (1 + holdOsc * 0.7), thinkK, true);
+      slerpArmEuler(rhRef.current,  tRhX * (1 + holdOsc * 0.5), tRhY, tRhZ * (1 + holdOsc * 0.4), thinkK * 0.9, true);
+      slerpArmEuler(luaRef.current, tLuaX, tLuaY, tLuaZ,  thinkK * 0.7);
+      slerpArmEuler(llaRef.current, tLlaX, 0, tLlaZ,       thinkK * 0.7, true);
+      slerpArmEuler(lhRef.current,  tLhX, tLhY, tLhZ,      thinkK * 0.65, true);
 
       slerpBoneFromBind(
         rightShoulderRef.current,
@@ -2033,31 +2126,32 @@ export function VRMSkeletonManager({
         noiseArm(t * BIO_ORG_NOISE_SPD, 9.1, 0) * BIO_ORG_NOISE
       ) * WAVING_MICRO_AMP * gArm * Math.min(gestureAmp, 1.2);
 
-      // Right arm (waving hand) — FIX 2: amplitude on reach (X/Z), not Y axis
+      // INTENT CURVE: holdOsc amplifies the wave micro-motion during hold phase.
       const wRuaX = cal ? cal.ruaX : WAVING_RUA_X;
       const wRuaZ = cal ? cal.ruaZ : WAVING_RUA_Z;
       const wRlaZ = cal ? cal.rlaZ : WAVING_RLA_Z;
+      const _wHold = 1 + holdOsc * 0.9; // wave looks bigger at peak of HOLD phase
       slerpArmEuler(
         ruaRef.current,
-        (wRuaX + micro * 1.2) * gAmp,
+        (wRuaX + micro * 1.2) * _wHold,
         cal ? cal.ruaY : WAVING_RUA_Y,
-        wRuaZ * gAmp,
-        1.1 * gArm + 0.08,
+        wRuaZ * _wHold,
+        1.1 * intentArm + 0.08,
       );
       slerpArmEuler(
         rlaRef.current,
-        (WAVING_RLA_X + micro * 0.3) * gAmp,
+        (WAVING_RLA_X + micro * 0.3) * _wHold,
         0,
-        wRlaZ * gAmp,
-        1 * gArm + 0.08,
-        true, // isLow — forearm follows with lag
+        wRlaZ * _wHold,
+        1 * intentArm + 0.08,
+        true,
       );
       slerpArmEuler(
         rhRef.current,
-        ((cal ? cal.rhX : WAVING_RH_X) + wristJitterX * 0.5) * gAmp,
+        ((cal ? cal.rhX : WAVING_RH_X) + wristJitterX * 0.5) * _wHold,
         (cal?.rhY ?? WAVING_RH_Y) + micro * 0.15,
-        ((cal ? cal.rhZ : WAVING_RH_Z) + wristJitterZ * 0.5) * gAmp,
-        0.9 * gArm + 0.08,
+        ((cal ? cal.rhZ : WAVING_RH_Z) + wristJitterZ * 0.5) * _wHold,
+        0.9 * intentArm + 0.08,
         true,
       );
 
