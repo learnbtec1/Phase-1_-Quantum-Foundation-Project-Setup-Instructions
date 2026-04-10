@@ -795,6 +795,12 @@ export function VRMSkeletonManager({
   const gestureStateRef    = useRef<GestureId>('idle');
   const gestureStartRef    = useRef(0);
   const gestureDurationRef = useRef(3000);
+  /**
+   * FIX 2: Per-instance amplitude multiplier (0.75–1.25).
+   * Re-randomized each time a new gesture starts — makes identical gestures
+   * feel different from frame to frame, eliminating the "same pose every time" feel.
+   */
+  const gestureAmplitudeMulRef = useRef(1.0);
 
   const lastEffGestureRef = useRef<GestureId>('idle');
   const gestureCrossfadeStartMsRef = useRef(performance.now());
@@ -1101,9 +1107,12 @@ export function VRMSkeletonManager({
       const next = normalizeGestureDetail(detail);
       const priRaw = detail?.priority;
       const pri = typeof priRaw === 'number' && Number.isFinite(priRaw) ? priRaw : 'n/a';
+      // FIX 2: randomize amplitude per gesture instance (0.75–1.25×)
+      // idle keeps amplitude=1 to avoid breathing drift
+      gestureAmplitudeMulRef.current = next === 'idle' ? 1.0 : 0.75 + Math.random() * 0.50;
       if (process.env.NODE_ENV === 'development') {
         console.log(
-          `[VRMSkeletonManager] 🎭 Gesture applied: ${next} (priority: ${pri})`,
+          `[VRMSkeletonManager] 🎭 Gesture applied: ${next} (priority: ${pri}) amp=${gestureAmplitudeMulRef.current.toFixed(2)}`,
           detail?.vrmaStem ?? detail?.gesture ?? '',
         );
       }
@@ -1307,6 +1316,7 @@ export function VRMSkeletonManager({
       thinkGestureActiveRef.current = true;
       gestureStateRef.current = 'think';
       gestureStartRef.current = nowMs;
+      gestureAmplitudeMulRef.current = 0.75 + Math.random() * 0.50; // FIX 2
       // Vary duration 2.5–4s so it doesn't feel robotic; will loop if thinking continues
       gestureDurationRef.current = 2500 + Math.random() * 1500;
     } else if (!thinking && thinkGestureActiveRef.current) {
@@ -1384,6 +1394,14 @@ export function VRMSkeletonManager({
     // ★ BIO: follow-through overshoot — arm swings slightly past target then decays
     const armBlendMul = 1 + (FOLLOW_ARM_BLEND_BUMP + BIO_FOLLOW_OVERSHOOT) * followBell;
     const gArm = gBlend * armBlendMul;
+
+    // FIX 2: per-instance amplitude multiplier — applied to ALL arm rotations.
+    // Only active during non-idle gestures; decays smoothly toward 1.0 on decay phase
+    // so it doesn't distort the idle return animation.
+    const _ampRaw = gestureAmplitudeMulRef.current;
+    // Blend amplitude: full during attack, fades to 1.0 during decay
+    const _ampBlend = g !== 'idle' ? gBlend : 0;
+    const gAmp = 1.0 + (_ampRaw - 1.0) * _ampBlend; // interpolates between 1.0 and _ampRaw
 
     if (typeof window !== 'undefined') {
       (window as Window & { __avatarSkeletonGesture?: GestureId }).__avatarSkeletonGesture = g;
@@ -1550,20 +1568,43 @@ export function VRMSkeletonManager({
       headRef.current.quaternion.slerp(SK_Q2, Math.min(1, safeDelta * 7));
     }
 
-    // ─── Arm slerp helper ───────────────────────────────────────────────────
-    const armK = Math.min(1, safeDelta * 7); // was *5 — faster arm tracking for visible motion
+    // ─── Arm slerp helpers ──────────────────────────────────────────────────
+    //
+    // FIX 1: Variable slerp rate — fast attack (first 40%) / slow decay (last 60%).
+    //
+    // Humans reach a gesture peak quickly (fast attack) then release slowly
+    // (organic decay). A single constant rate produces the "mechanical" feel.
+    //
+    //   progress  0 → 0.4  : attack phase  → speed × 2.0  (snappy reach)
+    //   progress  0.4 → 1  : decay  phase  → speed × 0.55 (gentle release)
+    //
+    // Upper arm (UA) leads slightly faster than lower arm (LA) per kMul override.
+    const _attackPhase = g !== 'idle' && progress < 0.4;
+    const _baseSpeed   = _attackPhase ? 14.0 : 3.8; // attack: ×2.0 vs decay: ×0.55 of old 7
+    const armK = Math.min(1, safeDelta * _baseSpeed);
 
+    // armKLow: forearm follows upper arm with a slight lag (more organic chain feel)
+    const _baseSpeedLow = _attackPhase ? 11.0 : 3.2;
+    const armKLow = Math.min(1, safeDelta * _baseSpeedLow);
+
+    /**
+     * slerpArmEuler — applies target Euler to a bone quaternion.
+     * @param kMul  caller-side multiplier (1 = upper arm rate, <1 = slower for LA/wrist)
+     * @param isLow true = use armKLow (forearm/wrist lag behind upper arm)
+     */
     const slerpArmEuler = (
       obj: THREE.Object3D | null,
       ex: number,
       ey: number,
       ez: number,
       kMul: number,
+      isLow = false,
     ) => {
       if (!obj) return;
       SK_E.set(ex, ey, ez, 'YXZ');
       SK_Q.setFromEuler(SK_E);
-      obj.quaternion.slerp(SK_Q, Math.min(1, armK * kMul * gestureSlerpScale));
+      const baseK = isLow ? armKLow : armK;
+      obj.quaternion.slerp(SK_Q, Math.min(1, baseK * kMul * gestureSlerpScale));
     };
 
     // ──── CHANGE #1: Shoulder / hip slerp helper (uses bind pose) ───────────
@@ -1691,10 +1732,12 @@ export function VRMSkeletonManager({
       const eLlaZ = cal ? cal.llaZ : EXPLAIN_LLA_Z;
       // ★ BIO: gravity droop — arm sags slightly toward down when extended
       const explainGravityZ = BIO_GRAVITY_DROOP * gBlend;
-      slerpArmEuler(ruaRef.current, eRuaX + wave * 0.4 + antRua, eRuaY, eRuaZ + wave + explainGravityZ, 1);
-      slerpArmEuler(luaRef.current, eLuaX - wave * 0.32 + antRua, eLuaY, eLuaZ - wave - explainGravityZ, 1);
-      slerpArmEuler(rlaRef.current, EXPLAIN_RLA_X, 0, eRlaZ - wave * 0.2, 1);
-      slerpArmEuler(llaRef.current, EXPLAIN_LLA_X, 0, eLlaZ + wave * 0.18, 1);
+      // FIX 2: amplitude — shifts the arm position (X/Z), not wrist/fingers
+      const aX = gAmp; const aZ = gAmp;
+      slerpArmEuler(ruaRef.current, (eRuaX + wave * 0.4 + antRua) * aX, eRuaY, (eRuaZ + wave + explainGravityZ) * aZ, 1);
+      slerpArmEuler(luaRef.current, (eLuaX - wave * 0.32 + antRua) * aX, eLuaY, (eLuaZ - wave - explainGravityZ) * aZ, 1);
+      slerpArmEuler(rlaRef.current, EXPLAIN_RLA_X, 0, (eRlaZ - wave * 0.2) * aZ, 1, true); // isLow=true
+      slerpArmEuler(llaRef.current, EXPLAIN_LLA_X, 0, (eLlaZ + wave * 0.18) * aZ, 1, true);
       // معصمان: بدون jitter لمنع الاهتزاز الدقيق
       slerpArmEuler(
         rhRef.current,
@@ -1884,12 +1927,13 @@ export function VRMSkeletonManager({
 
       // kMul=3: factor≈0.35/frame → ذراع تصل 95% من الهدف في ~8 إطارات (0.13s)
       const thinkK = 1.5 * gArm + 0.15;
-      slerpArmEuler(ruaRef.current, tRuaX, tRuaY, tRuaZ, thinkK);
-      slerpArmEuler(rlaRef.current, THINK_RLA_X, 0, tRlaZ, thinkK);
-      slerpArmEuler(rhRef.current,  tRhX, tRhY, tRhZ,     thinkK * 0.9);
-      slerpArmEuler(luaRef.current, tLuaX, tLuaY, tLuaZ,  thinkK * 0.7);
-      slerpArmEuler(llaRef.current, tLlaX, 0, tLlaZ,       thinkK * 0.7);
-      slerpArmEuler(lhRef.current,  tLhX, tLhY, tLhZ,      thinkK * 0.65);
+      // FIX 2: amplitude on X/Z (forward reach + height), not Y (rotation axis)
+      slerpArmEuler(ruaRef.current, tRuaX * gAmp, tRuaY, tRuaZ * gAmp, thinkK);
+      slerpArmEuler(rlaRef.current, THINK_RLA_X * gAmp, 0, tRlaZ * gAmp, thinkK, true);
+      slerpArmEuler(rhRef.current,  tRhX * gAmp, tRhY, tRhZ * gAmp,     thinkK * 0.9, true);
+      slerpArmEuler(luaRef.current, tLuaX * gAmp, tLuaY, tLuaZ * gAmp,  thinkK * 0.7);
+      slerpArmEuler(llaRef.current, tLlaX * gAmp, 0, tLlaZ * gAmp,       thinkK * 0.7, true);
+      slerpArmEuler(lhRef.current,  tLhX * gAmp, tLhY, tLhZ * gAmp,      thinkK * 0.65, true);
 
       slerpBoneFromBind(
         rightShoulderRef.current,
@@ -1989,30 +2033,32 @@ export function VRMSkeletonManager({
         noiseArm(t * BIO_ORG_NOISE_SPD, 9.1, 0) * BIO_ORG_NOISE
       ) * WAVING_MICRO_AMP * gArm * Math.min(gestureAmp, 1.2);
 
-      // Right arm (waving hand)
+      // Right arm (waving hand) — FIX 2: amplitude on reach (X/Z), not Y axis
       const wRuaX = cal ? cal.ruaX : WAVING_RUA_X;
       const wRuaZ = cal ? cal.ruaZ : WAVING_RUA_Z;
       const wRlaZ = cal ? cal.rlaZ : WAVING_RLA_Z;
       slerpArmEuler(
         ruaRef.current,
-        wRuaX + micro * 1.2,
+        (wRuaX + micro * 1.2) * gAmp,
         cal ? cal.ruaY : WAVING_RUA_Y,
-        wRuaZ,
+        wRuaZ * gAmp,
         1.1 * gArm + 0.08,
       );
       slerpArmEuler(
         rlaRef.current,
-        WAVING_RLA_X + micro * 0.3,
+        (WAVING_RLA_X + micro * 0.3) * gAmp,
         0,
-        wRlaZ,
+        wRlaZ * gAmp,
         1 * gArm + 0.08,
+        true, // isLow — forearm follows with lag
       );
       slerpArmEuler(
         rhRef.current,
-        (cal ? cal.rhX : WAVING_RH_X) + wristJitterX * 0.5,
+        ((cal ? cal.rhX : WAVING_RH_X) + wristJitterX * 0.5) * gAmp,
         (cal?.rhY ?? WAVING_RH_Y) + micro * 0.15,
-        (cal ? cal.rhZ : WAVING_RH_Z) + wristJitterZ * 0.5,
+        ((cal ? cal.rhZ : WAVING_RH_Z) + wristJitterZ * 0.5) * gAmp,
         0.9 * gArm + 0.08,
+        true,
       );
 
       // Left arm (resting at side)
