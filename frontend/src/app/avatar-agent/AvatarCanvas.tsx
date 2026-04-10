@@ -43,7 +43,8 @@ import {
 } from '@/config/avatar';
 import { OfficeEnvironment } from './OfficeEnvironment';
 import { createAvatarPerformanceHandler } from '@/app/avatar-agent/avatarPerformanceBridge';
-import { VRMAPlayer } from './VRMAPlayer';
+// VRMAPlayer معطَّل — يتطلب @pixiv/three-vrm-animation ويُسبّب build error مع Turbopack
+// لإعادة تفعيله: npm install @pixiv/three-vrm-animation ثم أزِل هذا التعليق
 
 type AvatarCanvasProps = {
   vrmUrl?: string;
@@ -598,12 +599,7 @@ export default function AvatarCanvas({
                 vrmaActiveRef={vrmaActiveRef}
               />
 
-              {/*
-                VRMAPlayer: يُشغّل ملفات .vrma عند توفّرها.
-                عند الفشل → النظام الإجرائي في VRMSkeletonManager يعمل تلقائياً.
-                يعمل عند priority 5 (بعد VRMSkeletonManager=0).
-              */}
-              <VRMAPlayer vrm={vrm} vrmaActiveRef={vrmaActiveRef} />
+              {/* VRMAPlayer معطَّل — انظر تعليق الاستيراد في أعلى الملف */}
 
               <GenerativeGestureManager
                 vrm={vrm}
