@@ -265,6 +265,8 @@ const GESTURES: ArmGestureId[] = ['explain', 'point', 'think', 'clap', 'wave', '
 export type MouseGestureCalibratorProps = { vrm: VRM | null };
 
 export function MouseGestureCalibrator({ vrm }: MouseGestureCalibratorProps) {
+  /** Same as AvatarCanvas: avoid R3F connect(null) when inner canvas divRef lags React 19 timing. */
+  const calibratorEventSourceRef = useRef<HTMLDivElement>(null);
   const [gesture, setGesture] = useState<ArmGestureId>('clap');
   const [activeBone, setActiveBone] = useState<BoneCtrl>('rua');
   const [live, setLive] = useState<ArmEulerOffset | null>(null);
@@ -374,8 +376,12 @@ export function MouseGestureCalibrator({ vrm }: MouseGestureCalibratorProps) {
           </button>
         ))}
       </div>
-      <div className="h-[220px] w-full min-h-[220px] overflow-hidden rounded border border-white/10 bg-zinc-950">
+      <div
+        ref={calibratorEventSourceRef}
+        className="h-[220px] w-full min-h-[220px] overflow-hidden rounded border border-white/10 bg-zinc-950"
+      >
         <Canvas
+          eventSource={calibratorEventSourceRef as React.RefObject<HTMLElement>}
           camera={{ position: [0, 1.35, 2.1], fov: 35 }}
           gl={{ antialias: true, alpha: true }}
           dpr={[1, 2]}

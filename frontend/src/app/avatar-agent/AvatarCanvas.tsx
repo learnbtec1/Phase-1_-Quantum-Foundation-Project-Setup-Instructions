@@ -13,7 +13,6 @@ import * as THREE from 'three';
 import { Canvas } from '@react-three/fiber';
 import {
   ContactShadows,
-  Environment,
   PerspectiveCamera,
   OrbitControls,
 } from '@react-three/drei';
@@ -44,6 +43,7 @@ import {
 } from '@/config/avatar';
 import { OfficeEnvironment } from './OfficeEnvironment';
 import { createAvatarPerformanceHandler } from '@/app/avatar-agent/avatarPerformanceBridge';
+import { VRMAPlayer } from './VRMAPlayer';
 
 type AvatarCanvasProps = {
   vrmUrl?: string;
@@ -143,6 +143,16 @@ export default function AvatarCanvas({
   const audioCtxRef = useRef<AudioContext | null>(null);
   // Track which audio element is currently wired into the analyser so we avoid re-wiring
   const analyserSourceAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  /**
+   * R3F connects pointer events in `onCreated` via `connect(eventSource ?? divRef.current)`.
+   * With React 19 + async `configure()`, the inner `divRef` can still be null → null.addEventListener.
+   * A stable outer ref (parent of `<Canvas />`) is set before the child fiber root runs.
+   */
+  const r3fEventSourceRef = useRef<HTMLDivElement>(null);
+
+  /** مرجع مشترك: VRMAPlayer يكتبه، VRMSkeletonManager يقرأه لتوقيف الإيماءات الإجرائية */
+  const vrmaActiveRef = useRef<boolean>(false);
 
   useEffect(() => {
     initGestureNormalizer();
@@ -477,8 +487,9 @@ export default function AvatarCanvas({
     : [0, 1.28, 0];
 
   return (
-    <div className="relative w-full h-full bg-[#0a0a12]">
+    <div ref={r3fEventSourceRef} className="relative w-full h-full bg-[#0a0a12]">
       <Canvas
+        eventSource={r3fEventSourceRef as React.RefObject<HTMLElement>}
         shadows
         gl={{ powerPreference: 'high-performance', alpha: false, antialias: true }}
         style={{ width: '100%', height: '100%', display: 'block' }}
@@ -498,16 +509,16 @@ export default function AvatarCanvas({
         />
 
         <CameraUpLock />
+        {/*
+          ComfortLightingRig يوفر:
+            • ambientLight + hemisphereLight + pointLight
+            • directionalLight (key) مع castShadow + shadow-mapSize 2048×2048
+            • directionalLight fill + rim (castShadow=false)
+            • Environment preset="city"
+          → لا نُكرّر أياً منها هنا لتجنّب ضوءَي shadow-casting في نفس الـ Canvas،
+            وهو ما تسبّب في "undefined.shadowIntensity" (فشل تهيئة directionalLightShadows).
+        */}
         <ComfortLightingRig />
-
-        {/* إضاءة المكتب + الأفاتار (ambient + مفتاح + تعبئة خفيفة) */}
-        <ambientLight intensity={0.48} />
-        <directionalLight position={[5, 9, 4]} intensity={1.05} castShadow />
-        <directionalLight position={[-4, 5, 3]} intensity={0.38} />
-
-        <Suspense fallback={null}>
-          <Environment preset="city" />
-        </Suspense>
 
         {/* ظل الأقدام (يمنع الطفوان) */}
         <ContactShadows
@@ -584,7 +595,15 @@ export default function AvatarCanvas({
                 motorSpeedMulRef={motorSpeedMulRef}
                 isListeningRef={isListeningRef}
                 isThinkingRef={isThinkingRef}
+                vrmaActiveRef={vrmaActiveRef}
               />
+
+              {/*
+                VRMAPlayer: يُشغّل ملفات .vrma عند توفّرها.
+                عند الفشل → النظام الإجرائي في VRMSkeletonManager يعمل تلقائياً.
+                يعمل عند priority 5 (بعد VRMSkeletonManager=0).
+              */}
+              <VRMAPlayer vrm={vrm} vrmaActiveRef={vrmaActiveRef} />
 
               <GenerativeGestureManager
                 vrm={vrm}

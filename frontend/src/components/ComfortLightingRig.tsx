@@ -99,7 +99,10 @@ export default function ComfortLightingRig({ emotion = 'neutral' }: ComfortLight
       {/* ── Hemisphere — sky lavender / dark ground bounce */}
       <hemisphereLight args={['#c8d8ff', '#0a0d14', 0.45]} />
 
-      {/* ── Key light: mood-reactive warm, upper-left-front */}
+      {/* ── Key light: mood-reactive warm, upper-left-front
+          Three.js r167+ added LightShadow.intensity → mapped to shadowIntensity uniform.
+          shadow-normalBias / shadow-bias prevent acne on curved VRM surfaces.
+          هذا الضوء هو الوحيد الذي يُلقي ظلالاً في المشهد (castShadow) — لا تُضِف آخر. */}
       <directionalLight
         ref={keyLightRef}
         position={[-2.5, 5.5, 3.0]}
@@ -116,6 +119,7 @@ export default function ComfortLightingRig({ emotion = 'neutral' }: ComfortLight
         shadow-camera-bottom={-2}
         shadow-bias={-0.0008}
         shadow-normalBias={0.04}
+        shadow-intensity={1}
       />
 
       {/* ── Fill light: cool lavender, right side */}

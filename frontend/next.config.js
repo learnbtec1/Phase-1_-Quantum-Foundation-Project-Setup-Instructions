@@ -91,6 +91,8 @@ const nextConfig = {
 
   transpilePackages: [
     '@pixiv/three-vrm',
+    '@pixiv/three-vrm-animation',
+    '@pixiv/three-vrm-core',
     '@react-three/xr',
     '@react-three/fiber',
     '@react-three/drei',

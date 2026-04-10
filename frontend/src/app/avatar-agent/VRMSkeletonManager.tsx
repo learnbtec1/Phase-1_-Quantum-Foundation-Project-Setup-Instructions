@@ -10,6 +10,33 @@ import { ARM_IDLE, ARM_OFFSETS, composeArmTargets } from './armGestureReference'
 
 const TAB_SAFE_MAX_DELTA = 0.1;
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  AVATURN SAFE CLAMP — حدود دوران آمنة لنماذج VRM 1.0 (مثل Avaturn).
+//  تمنع دخول الرأس في الجسم عند حسابات الـ Euler المتراكمة.
+//  جميع القيم بالراديان.
+// ═══════════════════════════════════════════════════════════════════════════
+const NECK_CLAMP_X  = 0.78;  // انحناء رقبة أمام/خلف   (≈ 45°)
+const NECK_CLAMP_Y  = 0.95;  // دوران رقبة يمين/يسار   (≈ 54°)
+const NECK_CLAMP_Z  = 0.45;  // ميل رقبة جانبي         (≈ 26°)
+const HEAD_CLAMP_X  = 0.72;  // انحناء رأس أمام/خلف    (≈ 41°)
+const HEAD_CLAMP_Y  = 0.80;  // دوران رأس يمين/يسار    (≈ 46°)
+const HEAD_CLAMP_Z  = 0.40;  // ميل رأس جانبي          (≈ 23°)
+/** تُطبَّق قبيل SK_E.set لضمان قيم آمنة على أي نموذج VRM */
+function clampNeckEuler(x: number, y: number, z: number): [number, number, number] {
+  return [
+    THREE.MathUtils.clamp(x, -NECK_CLAMP_X, NECK_CLAMP_X),
+    THREE.MathUtils.clamp(y, -NECK_CLAMP_Y, NECK_CLAMP_Y),
+    THREE.MathUtils.clamp(z, -NECK_CLAMP_Z, NECK_CLAMP_Z),
+  ];
+}
+function clampHeadEuler(x: number, y: number, z: number): [number, number, number] {
+  return [
+    THREE.MathUtils.clamp(x, -HEAD_CLAMP_X, HEAD_CLAMP_X),
+    THREE.MathUtils.clamp(y, -HEAD_CLAMP_Y, HEAD_CLAMP_Y),
+    THREE.MathUtils.clamp(z, -HEAD_CLAMP_Z, HEAD_CLAMP_Z),
+  ];
+}
+
 const SK_E = new THREE.Euler();
 const SK_Q = new THREE.Quaternion();
 const SK_Q2 = new THREE.Quaternion();
@@ -18,6 +45,36 @@ const GEN_Q = new THREE.Quaternion();
 const SK_AXIS_X = new THREE.Vector3(1, 0, 0);
 /** Dev-only: read back bone orientation after idle slerp (YXZ). */
 const IDLE_APPLIED_E = new THREE.Euler();
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  HAND-BODY COLLISION GUARD — يمنع تداخل اليدين مع جذع الجسم (صدر/بطن).
+//
+//  المبدأ: بعد تطبيق دوران عظام الذراعين، نقرأ المواضع العالمية لليدين
+//  وللصدر من الإطار السابق (تأخير إطار واحد = 16 ms — غير ملحوظ مع slerp).
+//  إذا كانت اليد داخل نصف قطر الجسم، نُضيف دوراناً تصحيحياً فورياً
+//  للذراع العلوي (RUA/LUA Z) يدفعها للخارج.
+//
+//  ضبط الحساسية: عدّل الثوابت أدناه فقط.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** نصف قطر الجذع التقريبي (متر). اليدان أقرب منه = تصحيح فوري. */
+const BODY_COLLISION_RADIUS        = 0.16;
+/** مسافة إضافية (هامش أمان) تُضاف فوق نصف القطر قبل التصحيح. */
+const HAND_BODY_SAFETY_MARGIN      = 0.03;
+/** قوة الدفع الخارجي: تُضرب في عمق الاختراق → مقدار دوران تصحيحي (rad). */
+const HAND_BODY_PUSH_STRENGTH      = 6.0;
+/** سرعة slerp للتصحيح (لا تجعله أسرع من arm slerp لتجنب الاهتزاز). */
+const COLLISION_SLERP_SPEED        = 10.0;
+/** الحد الأدنى لقيمة gBlend لتفعيل الفحص (إيماءة نشطة = > 0.05). */
+const COLLISION_MIN_GBLEND         = 0.05;
+
+/** Vectors مُخصَّصة خارج الـ hook لتجنّب GC pressure كل إطار. */
+const _rHandWorld  = new THREE.Vector3();
+const _lHandWorld  = new THREE.Vector3();
+const _chestWorld  = new THREE.Vector3();
+const _collPushRot = new THREE.Euler();
+const _collPushQ   = new THREE.Quaternion();
+const _collBaseQ   = new THREE.Quaternion(); // نسخة مؤقتة تحلّ محل .clone()
 
 // ═══════════════════════════════════════════════════════════
 // ★ NEW — Named constants for all gesture tuning values.
@@ -612,6 +669,11 @@ export type VRMSkeletonManagerProps = {
   isListeningRef?: MutableRefObject<boolean>;
   /** True while the backend is generating a response (thinking indicator). */
   isThinkingRef?: MutableRefObject<boolean>;
+  /**
+   * مرجع مشترك من VRMAPlayer — عند true يتجاوز VRMSkeletonManager إيماءة gesture الإجرائية
+   * ويترك VRMAPlayer يتحكم بالعظام عبر AnimationMixer. التنفس/التعبيرات/النظر تعمل كالمعتاد.
+   */
+  vrmaActiveRef?: MutableRefObject<boolean>;
 };
 
 /**
@@ -695,6 +757,7 @@ export function VRMSkeletonManager({
   motorSpeedMulRef,
   isListeningRef,
   isThinkingRef,
+  vrmaActiveRef,
 }: VRMSkeletonManagerProps): null {
 
   const spineRef = useRef<THREE.Object3D | null>(null);
@@ -790,6 +853,41 @@ export function VRMSkeletonManager({
     const w = window as any;
     w.__vrm      = vrm;
     w.__cogniVRM = vrm;
+
+    /**
+     * دالة Debug للاختبار من Console المتصفح.
+     * الاستخدام:
+     *   window.__cogniPlayGesture('think')    // تفكير 2.5 ثانية
+     *   window.__cogniPlayGesture('wave', 3)  // تلويح 3 ثوان
+     *   window.__cogniPlayGesture('idle')     // إعادة للوضع الطبيعي
+     *
+     * الإيماءات المتاحة: think | wave | clap | agree | idle | explain | point
+     */
+    w.__cogniPlayGesture = (name: string, durationSec = 2.5) => {
+      const gestures = ['think', 'wave', 'clap', 'agree', 'idle', 'explain', 'point'];
+      const g = (name ?? 'idle').toLowerCase().trim();
+      if (!gestures.includes(g)) {
+        console.warn(`[Cogni] غير معروف: "${name}". المتاح: ${gestures.join(' | ')}`);
+        return;
+      }
+      window.dispatchEvent(
+        new CustomEvent('avatar:gesture', {
+          detail: {
+            gesture: g,
+            type: g,
+            duration: durationSec,
+            durationMs: durationSec * 1000,
+            priority: 2, // NORMAL
+          },
+        }),
+      );
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[Cogni] ▶ playGesture("${g}", ${durationSec}s)`);
+      }
+    };
+    return () => {
+      if (w.__cogniPlayGesture) delete w.__cogniPlayGesture;
+    };
 
     /** Dev helper — plays a procedural gesture via the same event path as the engine. */
     w.__cogniPlayProceduralGesture = (gesture: string, durationSec = 2.5) => {
@@ -1251,11 +1349,14 @@ export function VRMSkeletonManager({
     gestureAmp *= motorMul;
 
     // ─── Gesture state machine ──────────────────────────────────────────────
+    // عندما يكون VRMAPlayer نشطاً يتجمّد الـ state machine عند idle لتجنّب التعارض
+    const vrmaActive = vrmaActiveRef?.current ?? false;
     const elapsed = nowMs - gestureStartRef.current;
     const dur = Math.max(1, gestureDurationRef.current);
     let progress = Math.min(1, elapsed / dur);
-    let g = gestureStateRef.current;
-    if (g !== 'idle' && progress >= 1) {
+    // إذا كان VRMA نشطاً: تجاوز أي إيماءة إجرائية نشطة (ما عدا idle)
+    let g = vrmaActive ? 'idle' as GestureId : gestureStateRef.current;
+    if (!vrmaActive && g !== 'idle' && progress >= 1) {
       if (process.env.NODE_ENV === 'development') {
         console.log('[Gesture] Transition to idle after duration');
       }
@@ -1263,8 +1364,8 @@ export function VRMSkeletonManager({
       g = 'idle';
       progress = 0;
     }
-    const fadeIn  = THREE.MathUtils.smoothstep(progress, 0, GESTURE_FADE_IN_END);
-    const fadeOut = 1 - THREE.MathUtils.smoothstep(progress, GESTURE_FADE_OUT_START, 1);
+    const fadeIn  = vrmaActive ? 0 : THREE.MathUtils.smoothstep(progress, 0, GESTURE_FADE_IN_END);
+    const fadeOut = vrmaActive ? 0 : 1 - THREE.MathUtils.smoothstep(progress, GESTURE_FADE_OUT_START, 1);
     const gBlend  = fadeIn * fadeOut;
 
     // Anticipation (wind-up) + follow-through (ذروة خفيفة قبل الذوبان)
@@ -1419,15 +1520,15 @@ export function VRMSkeletonManager({
 
     const neckBind = m.get('neck');
     if (neckRef.current && neckBind) {
-      SK_E.set(
+      const [cnx, cny, cnz] = clampNeckEuler(
         nx * NECK_SWAY_MUL + gPitch * 0.48 + thinkNkX + waveNkX + clapNkX + agreeNkX
           + listenHeadPitch * 0.55 * procHeadNod + nodPitch * 0.6 * procHeadNod
           + mn.neckX * mnBlend + hpPitch * 0.55,
         ny * NECK_SWAY_MUL + gYaw * 0.48 + thinkNkY + waveNkY + clapNkY + agreeNkY
           + mn.neckY * mnBlend + hpYaw * 0.55,
         nz * NECK_SWAY_MUL + thinkNkZ + waveNkZ + clapNkZ + agreeNkZ + listenHeadTilt * 0.55 * procHeadNod,
-        'YXZ',
       );
+      SK_E.set(cnx, cny, cnz, 'YXZ');
       SK_Q.setFromEuler(SK_E);
       SK_Q2.copy(neckBind).multiply(SK_Q);
       neckRef.current.quaternion.slerp(SK_Q2, Math.min(1, safeDelta * 8));
@@ -1435,15 +1536,15 @@ export function VRMSkeletonManager({
 
     const headBind = m.get('head');
     if (headRef.current && headBind) {
-      SK_E.set(
+      const [chx, chy, chz] = clampHeadEuler(
         nx * 1.05 + gPitch * 0.62 + thinkHdX + waveHdX + clapHdX + agreeHdX
           + listenHeadPitch * 0.45 * procHeadNod + nodPitch * procHeadNod
           + mn.headX * mnBlend + hpPitch * 0.45,
         ny * 1.05 + gYaw * 0.62 + thinkHdY + waveHdY + clapHdY + agreeHdY
           + hpYaw * 0.45,
         nz + thinkHdZ + waveHdZ + clapHdZ + agreeHdZ + listenHeadTilt * 0.45 * procHeadNod,
-        'YXZ',
       );
+      SK_E.set(chx, chy, chz, 'YXZ');
       SK_Q.setFromEuler(SK_E);
       SK_Q2.copy(headBind).multiply(SK_Q);
       headRef.current.quaternion.slerp(SK_Q2, Math.min(1, safeDelta * 7));
@@ -2171,6 +2272,66 @@ export function VRMSkeletonManager({
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    //  HAND-BODY COLLISION GUARD
+    //  يُنفَّذ بعد تطبيق جميع عظام الإيماءة وقبل vrm.update().
+    //  يقرأ المواضع العالمية من الإطار السابق (1 frame lag = ~16 ms، غير ملحوظ).
+    //  يُطبّق دوراناً تصحيحياً مباشراً على RUA/LUA دون تجاوز الـ slerp.
+    // ═════════════════════════════════════════════════════════════════════════
+    if (gBlend > COLLISION_MIN_GBLEND && chestRef.current && ruaRef.current && luaRef.current) {
+      // نقطة مرجعية: مركز الجذع (الصدر)
+      chestRef.current.getWorldPosition(_chestWorld);
+      const effRadius = BODY_COLLISION_RADIUS + HAND_BODY_SAFETY_MARGIN;
+
+      // ── اليد اليمنى (RUA) ──────────────────────────────────────────────
+      if (rhRef.current) {
+        rhRef.current.getWorldPosition(_rHandWorld);
+        // المسافة الأفقية فقط (X وZ) — نتجاهل Y لأن اليد قد تكون فوق الصدر بشكل مقصود
+        const rdx = _rHandWorld.x - _chestWorld.x;
+        const rdz = _rHandWorld.z - _chestWorld.z;
+        const rHorizDist = Math.sqrt(rdx * rdx + rdz * rdz);
+        if (rHorizDist < effRadius) {
+          // عمق الاختراق × القوة = مقدار دوران الدفع (راديان)
+          const rPen = effRadius - rHorizDist;
+          const rPush = rPen * HAND_BODY_PUSH_STRENGTH;
+          // الذراع اليمنى: Z+ يخفض الذراع نحو idle → يبعدها عن الجسم
+          _collPushRot.set(0, 0, rPush, 'YXZ');
+          _collPushQ.setFromEuler(_collPushRot);
+          _collBaseQ.copy(ruaRef.current.quaternion).multiply(_collPushQ);
+          ruaRef.current.quaternion.slerp(
+            _collBaseQ,
+            Math.min(1, safeDelta * COLLISION_SLERP_SPEED),
+          );
+          if (process.env.NODE_ENV === 'development' && rPen > 0.02) {
+            console.log(`[Collision] RHand penetration=${rPen.toFixed(3)}m push=${rPush.toFixed(3)}rad`);
+          }
+        }
+      }
+
+      // ── اليد اليسرى (LUA) ──────────────────────────────────────────────
+      if (lhRef.current) {
+        lhRef.current.getWorldPosition(_lHandWorld);
+        const ldx = _lHandWorld.x - _chestWorld.x;
+        const ldz = _lHandWorld.z - _chestWorld.z;
+        const lHorizDist = Math.sqrt(ldx * ldx + ldz * ldz);
+        if (lHorizDist < effRadius) {
+          const lPen = effRadius - lHorizDist;
+          const lPush = lPen * HAND_BODY_PUSH_STRENGTH;
+          // الذراع اليسرى: Z- يخفض الذراع → يبعدها عن الجسم
+          _collPushRot.set(0, 0, -lPush, 'YXZ');
+          _collPushQ.setFromEuler(_collPushRot);
+          _collBaseQ.copy(luaRef.current.quaternion).multiply(_collPushQ);
+          luaRef.current.quaternion.slerp(
+            _collBaseQ,
+            Math.min(1, safeDelta * COLLISION_SLERP_SPEED),
+          );
+          if (process.env.NODE_ENV === 'development' && lPen > 0.02) {
+            console.log(`[Collision] LHand penetration=${lPen.toFixed(3)}m push=${lPush.toFixed(3)}rad`);
+          }
+        }
+      }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  GENERATIVE GESTURE OVERLAY (MIBURI / RIDGE / etc.)
     // ═════════════════════════════════════════════════════════════════════════
     const genRemaining = generativeEndMsRef.current - nowMs;
@@ -2209,11 +2370,10 @@ export function VRMSkeletonManager({
       slerpGen('rightShoulder', rightShoulderRef.current);
     }
 
-    // ─── SINGLE vrm.update() call (see execution-order contract above) ──────
-    // يجب أن يكون priority بعد AnimationController(-2) وLipSyncManager(-1):
-    //   -10 كان خاطئاً: يجعل vrm.update() يعالج expressions/visemes من الإطار السابق (lip sync بطيء 16ms).
-    //   0 صحيح: AnimationController و LipSyncManager يكتبان في نفس الإطار، ثم vrm.update() يطبّقها.
-    //   __avatarSkeletonGesture: AnimationController يقرأه بتأخير إطار واحد (16ms) — غير ملحوظ لـ stabilizeGaze.
+    // ─── vrm.update() ────────────────────────────────────────────────────────
+    // عند vrmaActive: VRMAPlayer (priority 5) سيستدعي vrm.update() بعدنا بعظام VRMA الصحيحة.
+    // نستدعيه هنا دائماً لضمان تحديث expressions (blink, lip-sync) التي يكتبها
+    // AnimationController(-2) وLipSyncManager(-1) في نفس الإطار.
     vrm.update(safeDelta);
   }, 0);
 

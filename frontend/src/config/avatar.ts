@@ -60,6 +60,7 @@ const _envVrm = (
 /** Tried in order after `pickVrmUrl()` inside AvatarCanvas (deduped). */
 export const VRM_FALLBACKS: readonly string[] = [
   ...(_envVrm ? [_envVrm] : []),
+  '/models/avaturn_avatar.vrm', // نموذج Avaturn (VRM 1.0) — احتياطي قبل cogni
   '/models/cogni.vrm',
 ];
 
