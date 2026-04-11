@@ -191,11 +191,16 @@ export default function AvatarCanvas({
   useEffect(() => {
     initGestureNormalizer();
     initBrainPersistence();
-    initAvatarVoiceListener(); // wire avatar:voice → TTS rate/pitch
-    // SpontaneousBehavior disabled — FREEZE_IDLE_ANIMATIONS=true in VRMSkeletonManager
-    // re-enable by calling startSpontaneousBehavior({...}) here and flipping the flag
+    initAvatarVoiceListener();
+    startSpontaneousBehavior({
+      isTalkingRef,
+      isThinkingRef,
+      motorSpeedMulRef,
+      isListeningRef,
+    });
     return () => {
       flushBrainPersistence();
+      stopSpontaneousBehavior();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

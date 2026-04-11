@@ -3,33 +3,27 @@
  *
  * ╔══════════════════════════════════════════════════════════════════════╗
  * ║  ✅ VERIFIED AXIS MAP — cogni.vrm (VRM 1.0) — confirmed 2026-04-11  ║
- * ║                                                                      ║
- * ║  slerpArmEuler uses SK_E.set(ex, ey, ez, 'YXZ')                     ║
+ * ║  slerpArmEuler: SK_E.set(ex, ey, ez, 'YXZ')                        ║
  * ║                                                                      ║
  * ║  RIGHT upper arm:                                                    ║
- * ║    ruaY +  = FORWARD  (toward avatar front)  ✅                      ║
+ * ║    ruaY +  = FORWARD  (toward avatar front)                         ║
  * ║    ruaY −  = BACKWARD                                                ║
- * ║    ruaZ +  = DOWN     (arm hangs at side)    ✅                      ║
- * ║    ruaZ −  = UP       (arm raises above shoulder)                    ║
- * ║    ruaX ±  = ROLL/TWIST (arm rotation around its length axis)        ║
+ * ║    ruaZ +  = DOWN     (hang at side)                                 ║
+ * ║    ruaZ −  = UP       (raise above shoulder)                         ║
+ * ║    ruaX ±  = ROLL/TWIST (around arm length axis)                    ║
  * ║                                                                      ║
- * ║  LEFT upper arm  (Y axis mirrored from right):                       ║
- * ║    luaY −  = FORWARD  (toward avatar front)  ✅                      ║
+ * ║  LEFT upper arm  (Y mirrored from right):                            ║
+ * ║    luaY −  = FORWARD  (toward avatar front)                         ║
  * ║    luaY +  = BACKWARD                                                ║
- * ║    luaZ −  = DOWN     (arm hangs at side)    ✅                      ║
- * ║    luaZ +  = UP       (arm raises above shoulder)                    ║
+ * ║    luaZ −  = DOWN     (hang at side)                                 ║
+ * ║    luaZ +  = UP       (raise above shoulder)                         ║
  * ║    luaX ±  = ROLL/TWIST                                              ║
  * ╚══════════════════════════════════════════════════════════════════════╝
- *
- * Calibration workflow:
- *   1. Set ARM_IDLE to desired base pose (verified values above)
- *   2. For each gesture, set ARM_OFFSETS[id] = delta from ARM_IDLE
- *   3. Rebuild Docker: docker compose build frontend && docker compose up -d --force-recreate frontend
  */
 
 export type ArmGestureId = 'explain' | 'point' | 'think' | 'clap' | 'wave' | 'agree';
 
-/** Euler local YXZ for each bone — same order as slerpArmEuler in VRMSkeletonManager. */
+/** Euler local YXZ — same order as slerpArmEuler in VRMSkeletonManager. */
 export type ArmEulerOffset = {
   ruaX: number; ruaY: number; ruaZ: number;
   luaX: number; luaY: number; luaZ: number;
@@ -40,25 +34,22 @@ export type ArmEulerOffset = {
 };
 
 /**
- * ARM_IDLE — base static pose (confirmed working, 2026-04-11).
+ * ARM_IDLE — natural resting position for cogni.vrm (VRM 1.0).
  *
- * Right arm: extended FORWARD (ruaY=+1.2) with slight downward tilt (ruaZ=+0.3)
- * Left arm:  raised UP (luaZ=+1.3)
- *
- * NOTE: BLOCK_ALL_GESTURES=true in VRMSkeletonManager keeps this pose static.
- *       Set false + calibrate ARM_OFFSETS before enabling gestures.
+ * Arms hang naturally at sides (T-pose → +1.4 rad downward).
+ * All Y = 0 (no forward/backward swing).
+ * This is the base from which all gesture OFFSETS are added.
  */
 export const ARM_IDLE: ArmEulerOffset = {
-  ruaX:  0.0,  ruaY: +1.2,  ruaZ: +0.3,   // right: FORWARD + slight down
-  luaX:  0.0,  luaY:  0.0,  luaZ: +1.3,   // left:  raised UP
-  rlaX:  0.25, rlaZ:  0.0,                 // right forearm: slight elbow bend
-  llaX:  0.08, llaZ:  0.0,                 // left forearm: natural
+  ruaX:  0.0,  ruaY:  0.0,  ruaZ: +1.4,   // right: hanging naturally
+  luaX:  0.0,  luaY:  0.0,  luaZ: -1.4,   // left:  hanging naturally (mirrored)
+  rlaX:  0.08, rlaZ:  0.0,                 // forearms: slight natural bend
+  llaX:  0.08, llaZ:  0.0,
   rhX:   0.0,  rhY:   0.0,  rhZ:   0.0,
   lhX:   0.0,  lhY:   0.0,  lhZ:   0.0,
 };
 
 // ─── ZERO OFFSET TEMPLATE ────────────────────────────────────────────────────
-// All zeros = no deviation from ARM_IDLE.
 const ZERO: ArmEulerOffset = {
   ruaX: 0, ruaY: 0, ruaZ: 0,
   luaX: 0, luaY: 0, luaZ: 0,
@@ -70,36 +61,80 @@ const ZERO: ArmEulerOffset = {
 
 /**
  * ARM_OFFSETS — delta added to ARM_IDLE for each gesture.
- * composed = ARM_IDLE + offset
+ * composed_absolute = ARM_IDLE + offset
  *
- * All gestures = ZERO until calibrated (avatar holds ARM_IDLE pose).
- * Calibrate using: ruaY+ = forward, ruaZ- = up (right) / luaZ+ = up (left)
+ * All values use VERIFIED axis map (2026-04-11):
+ *   Right: ruaY+ = fwd | ruaZ- = up | Left: luaY- = fwd | luaZ+ = up
  */
 export const ARM_OFFSETS: Record<ArmGestureId, ArmEulerOffset> = {
 
-  // ── EXPLAIN ─────────────────────────────────────────────────────────────
-  // TODO: Both arms forward at chest level, open palms.
-  explain: { ...ZERO },
+  // ── WAVE ─────────────────────────────────────────────────────────────────
+  // Right arm raised forward-outward, elbow bent — friendly greeting.
+  // absolute: ruaY=+0.8 (fwd), ruaZ=-0.5 (raised), rlaX=+0.30
+  wave: {
+    ruaX:  0.0,  ruaY: +0.8,  ruaZ: -1.9,   // offset = target(-0.5) − idle(+1.4)
+    luaX:  0.0,  luaY:  0.0,  luaZ:  0.0,   // left stays at idle
+    rlaX: +0.22, rlaZ:  0.0,                 // elbow bent
+    llaX:  0.0,  llaZ:  0.0,
+    rhX:   0.0,  rhY:   0.0,  rhZ:   0.0,
+    lhX:   0.0,  lhY:   0.0,  lhZ:   0.0,
+  },
 
-  // ── POINT ───────────────────────────────────────────────────────────────
-  // TODO: Right arm fully extended forward, left at side.
-  point: { ...ZERO },
+  // ── POINT ────────────────────────────────────────────────────────────────
+  // Right arm fully extended forward, nearly horizontal — pointing at student/board.
+  // absolute: ruaY=+1.5, ruaZ=+0.1
+  point: {
+    ruaX:  0.0,  ruaY: +1.5,  ruaZ: -1.3,   // offset = target(+0.1) − idle(+1.4)
+    luaX:  0.0,  luaY:  0.0,  luaZ:  0.0,
+    rlaX: +0.02, rlaZ:  0.0,                 // nearly straight (pointing)
+    llaX:  0.0,  llaZ:  0.0,
+    rhX:   0.0,  rhY:   0.0,  rhZ:   0.0,
+    lhX:   0.0,  lhY:   0.0,  lhZ:   0.0,
+  },
 
-  // ── THINK ───────────────────────────────────────────────────────────────
-  // TODO: Right hand near chin, thoughtful pose.
-  think: { ...ZERO },
+  // ── THINK ────────────────────────────────────────────────────────────────
+  // Right hand raised toward chin/face, elbow bent — thoughtful pose.
+  // absolute: ruaY=+0.5, ruaZ=0.0 (T-pose level), rlaX=+0.80
+  think: {
+    ruaX:  0.0,  ruaY: +0.5,  ruaZ: -1.4,   // offset = target(0.0) − idle(+1.4)
+    luaX:  0.0,  luaY:  0.0,  luaZ: +0.4,   // left slight raise: -1.0−(−1.4)=+0.4
+    rlaX: +0.72, rlaZ:  0.0,                 // strong elbow bend toward chin
+    llaX:  0.0,  llaZ:  0.0,
+    rhX:   0.0,  rhY:   0.0,  rhZ:   0.0,
+    lhX:   0.0,  lhY:   0.0,  lhZ:   0.0,
+  },
 
-  // ── CLAP ────────────────────────────────────────────────────────────────
-  // TODO: Both hands meeting in front of chest.
-  clap: { ...ZERO },
+  // ── EXPLAIN ──────────────────────────────────────────────────────────────
+  // Both arms forward at chest level, open palms — presenting/explaining.
+  // Right: abs ruaY=+0.8, ruaZ=+0.2 | Left: abs luaY=-0.8, luaZ=-0.2
+  explain: {
+    ruaX:  0.0,  ruaY: +0.8,  ruaZ: -1.2,   // right fwd: offset = +0.2−1.4
+    luaX:  0.0,  luaY: -0.8,  luaZ: +1.2,   // left fwd:  offset = −0.2−(−1.4)
+    rlaX: +0.07, rlaZ:  0.0,                 // slight forearm extension
+    llaX: +0.07, llaZ:  0.0,
+    rhX:   0.0,  rhY:   0.0,  rhZ:   0.0,
+    lhX:   0.0,  lhY:   0.0,  lhZ:   0.0,
+  },
 
-  // ── WAVE ────────────────────────────────────────────────────────────────
-  // TODO: Right arm raised beside head, elbow bent ~90°.
-  wave: { ...ZERO },
+  // ── CLAP ─────────────────────────────────────────────────────────────────
+  // Both hands meeting in front of chest — celebration/applause.
+  // Right: abs ruaY=+1.2, ruaZ=0.0 | Left: abs luaY=-1.2, luaZ=0.0
+  clap: {
+    ruaX:  0.0,  ruaY: +1.2,  ruaZ: -1.4,   // offset = 0.0−1.4
+    luaX:  0.0,  luaY: -1.2,  luaZ: +1.4,   // offset = 0.0−(−1.4)
+    rlaX: +0.32, rlaZ:  0.0,                 // elbows bent
+    llaX: +0.32, llaZ:  0.0,
+    rhX:   0.0,  rhY:   0.0,  rhZ:   0.0,
+    lhX:   0.0,  lhY:   0.0,  lhZ:   0.0,
+  },
 
-  // ── AGREE ───────────────────────────────────────────────────────────────
-  // TODO: Arms relaxed, head nods (handled by VRMSkeletonManager).
-  agree: { ...ZERO },
+  // ── AGREE ────────────────────────────────────────────────────────────────
+  // Subtle affirmation — arms mostly at idle, head nods (handled by VRMSkeletonManager).
+  agree: {
+    ...ZERO,
+    ruaY: +0.1,   // very slight right arm forward
+    luaY: -0.1,   // mirrored left
+  },
 
 };
 

@@ -66,13 +66,7 @@ export function planCoSpeechGestures(
   text: string,
   audioDurationMs: number,
 ): CoSpeechPlan[] {
-  // Temporarily disabled — gesture offsets not yet calibrated for VRM 1.0.
-  // All ARM_OFFSETS are ZERO which causes oscillation artifacts when gestures fire.
-  // Re-enable after calibrating each gesture in armGestureReference.ts.
-  void text; void audioDurationMs;
-  return [];
-
-  /* eslint-disable no-unreachable */
+  // ✅ Re-enabled — ARM_OFFSETS calibrated with verified axis map 2026-04-11
   const raw = text || '';
   const n = norm(raw);
   const estFallback = estimateDialogueDurationMs(raw);

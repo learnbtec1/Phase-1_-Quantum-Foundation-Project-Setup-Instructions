@@ -138,14 +138,13 @@ const IDLE_LLA_Z                 = ARM_IDLE.llaZ;
  * Arms stay at exact ARM_IDLE pose — useful for pose calibration.
  * Set false to restore natural idle life.
  */
-const FREEZE_IDLE_ANIMATIONS     = false;
+const FREEZE_IDLE_ANIMATIONS     = false;   // false = breathing + head sway active
 
 /**
- * BLOCK_ALL_GESTURES = true → ignores ALL incoming avatar:gesture events.
- * Avatar stays locked at ARM_IDLE permanently (no wave, think, point, etc.).
- * Set false to restore normal gesture behaviour after calibrating ARM_OFFSETS.
+ * BLOCK_ALL_GESTURES = false → gestures enabled (ARM_OFFSETS calibrated 2026-04-11).
+ * Set true only for pose calibration debugging.
  */
-const BLOCK_ALL_GESTURES         = true;
+const BLOCK_ALL_GESTURES         = false;
 
 const _ARM_EX                      = composeArmTargets(ARM_OFFSETS.explain);
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2500,9 +2499,11 @@ export function VRMSkeletonManager({
 
       if (listening) {
         // ── Listening posture: arms slightly forward + raised from rest ────────
-        // Same rig as gestures: small +X = forward from shoulders.
-        slerpArmEuler(ruaRef.current, 0.12, 0.0, 0.9 + talkNudge, 1.2);
-        slerpArmEuler(luaRef.current, 0.10, 0.0, -0.9 + talkNudge * 0.88, 1.2);
+        // Axes (verified 2026-04-11): ruaY+ = fwd | ruaZ+ = down | luaY- = fwd | luaZ- = down
+        // Right: Y=+0.12 (slight forward), Z=+0.9 (less hang than idle 1.4)
+        // Left:  Y=-0.10 (slight forward mirrored), Z=-0.9 (mirrored)
+        slerpArmEuler(ruaRef.current, 0.0, 0.12, 0.9 + talkNudge, 1.2);
+        slerpArmEuler(luaRef.current, 0.0, -0.10, -0.9 + talkNudge * 0.88, 1.2);
         slerpArmEuler(rlaRef.current,  0.0, 0, 0.05, 1.0);
         slerpArmEuler(llaRef.current,  0.0, 0, -0.05, 1.0);
         slerpArmEuler(rhRef.current,  0, 0, talkWrist, 0.75);

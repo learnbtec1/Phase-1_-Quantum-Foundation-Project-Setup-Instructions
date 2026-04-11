@@ -968,8 +968,8 @@ export function useAgentAgent({
                       pitch: avatarBehavior.gazeTarget === 'think' ? -0.12 : 0,
                       durationMs: 2000 },
           }));
-          // Strategy gesture disabled — arm offsets not calibrated for VRM 1.0 yet
-          // void unifiedGestureEngine.play(avatarBehavior.gesture, { priority: PRIORITY.NORMAL });
+          // ✅ Re-enabled — ARM_OFFSETS calibrated 2026-04-11
+          void unifiedGestureEngine.play(avatarBehavior.gesture, { priority: PRIORITY.NORMAL });
           // Extra: if hidden weakness detected, trigger concerned look
           if (intuitionReading.hiddenWeakness && typeof window !== 'undefined') {
             setTimeout(() => {
@@ -994,14 +994,14 @@ export function useAgentAgent({
           // 2. Strategy-based gesture (high priority) — from intuition engine
           // Already dispatched in the strategy block above (unifiedGestureEngine.play)
 
-          // 3. Intent gesture hint — disabled (arm offsets not calibrated for VRM 1.0)
-          // if (gestureHint) {
-          //   setTimeout(() => {
-          //     window.dispatchEvent(new CustomEvent('avatar:gesture', {
-          //       detail: { gesture: gestureHint, duration: 2200 },
-          //     }));
-          //   }, 80);
-          // }
+          // 3. Intent gesture hint — ✅ re-enabled
+          if (gestureHint) {
+            setTimeout(() => {
+              window.dispatchEvent(new CustomEvent('avatar:gesture', {
+                detail: { gesture: gestureHint, duration: 2200 },
+              }));
+            }, 80);
+          }
 
           // 4. Acknowledging nod — delayed further to sequence correctly
           //    Uses avatar:nod (now wired in VRMSkeletonManager) for micro nod
@@ -1043,8 +1043,8 @@ export function useAgentAgent({
           window.dispatchEvent(
             new CustomEvent('avatar:emotion', { detail: { emotion: 'thinking', strength: 0.6 } }),
           );
-          // Thinking gesture disabled — arm offsets not calibrated for VRM 1.0 yet
-          // void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.HIGH });
+          // ✅ Re-enabled — ARM_OFFSETS calibrated 2026-04-11
+          void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.HIGH });
         }
         break;
       }
