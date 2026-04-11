@@ -19,7 +19,7 @@ import { checkGestureCooldown, recordGestureLog, getLastGestureLog } from '@/ai/
 import { dispatchAvatar }                    from '@/utils/events/normalizeAvatarEvents';
 import { speakWithTTS, stopTTSGlobally, resolveSpeakRate } from '@/ai/io/tts';
 import { COGNI_PERSONA, AVATAR_PERSONALITY } from '@/config/personality';
-import { ENABLE_MIME_MODE } from '@/config/avatar';
+import { ENABLE_MIME_MODE, LEVEL6_UNIFIED_BEHAVIOR } from '@/config/avatar';
 import { emotionalMemoryManager }            from '@/ai/avatar/EmotionalMemoryManager';
 import {
   microReactionDelay,
@@ -74,13 +74,44 @@ function devLog(...args: unknown[]): void {
   }
 }
 
+function emitBehaviorText(text: string, context: 'conversation' | 'system' = 'conversation'): void {
+  if (typeof window === 'undefined' || !text.trim()) return;
+  window.dispatchEvent(
+    new CustomEvent('avatar:behavior:text', { detail: { text, context } }),
+  );
+}
+
 function emit(name: string, detail: Record<string, unknown>): void {
   if (typeof window === 'undefined') return;
+  if (LEVEL6_UNIFIED_BEHAVIOR) {
+    if (name === 'avatar:gesture' || name === 'avatar:emotion') return;
+    if (name === 'avatar:speak:start') {
+      window.dispatchEvent(
+        new CustomEvent('avatar:behavior:speech', { detail: { phase: 'pre_speech' } }),
+      );
+      window.dispatchEvent(
+        new CustomEvent('avatar:behavior:speech', { detail: { phase: 'agent_start' } }),
+      );
+    } else if (name === 'avatar:speak:end') {
+      window.dispatchEvent(
+        new CustomEvent('avatar:behavior:speech', { detail: { phase: 'agent_end' } }),
+      );
+    }
+  }
   if (['avatar:gesture', 'avatar:emotion', 'avatar:listening', 'avatar:nod', 'avatar:headpose', 'avatar:speak:start', 'avatar:speak:end'].includes(name)) {
     dispatchAvatar(name as any, detail);
   } else {
     window.dispatchEvent(new CustomEvent(name, { detail }));
   }
+}
+
+/** Level 6: direct VRMA / engine plays are disabled — intent pipeline owns body motion. */
+function directorGesturePlay(name: string, opts?: Record<string, unknown>): void {
+  if (LEVEL6_UNIFIED_BEHAVIOR) return;
+  void unifiedGestureEngine.play(
+    name,
+    opts as Parameters<typeof unifiedGestureEngine.play>[1],
+  );
 }
 
 /** Cogni: slightly longer “thinking” before reacting — patient educator */
@@ -227,6 +258,10 @@ export class AgentDirector {
       const onContagion = (e: Event) => {
         const d = (e as CustomEvent).detail as { emotion?: string; intensity?: number };
         if (!d?.emotion) return;
+        if (LEVEL6_UNIFIED_BEHAVIOR) {
+          emitBehaviorText(`Student affect: ${d.emotion}`, 'system');
+          return;
+        }
         emit('avatar:emotion', { emotion: d.emotion });
         if (d.emotion === 'calm') {
           emit('avatar:gesture', { type: 'openHand', duration: 2 });
@@ -255,6 +290,10 @@ export class AgentDirector {
 
   private _reactToEmotion(emotion: EmotionLabel): void {
     this._lastEmotion = emotion;
+    if (LEVEL6_UNIFIED_BEHAVIOR) {
+      emitBehaviorText(`[emotion:${emotion}]`, 'system');
+      return;
+    }
     const lf = useBrainStore.getState().lastFrame;
     const emoStr =
       typeof lf?.emotion === 'string' && lf.emotion.trim().length > 0
@@ -267,7 +306,7 @@ export class AgentDirector {
       const vrmaName = EMOTION_TO_VRMA[emotion];
       if (vrmaName) {
         const p = (['surprised', 'angry'].includes(emotion)) ? PRIORITY.CRITICAL : PRIORITY.HIGH;
-        void unifiedGestureEngine.play(vrmaName, { priority: p });
+        directorGesturePlay(vrmaName, { priority: p });
       }
     });
   }
@@ -407,9 +446,9 @@ export class AgentDirector {
     devLog('New teaching goal:', goal.slice(0, 80));
     this._later(cogniDelayMs(microReactionDelay()), () => {
       // Show "planning" gesture — brief think then gentle wave to indicate readiness
-      void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.LOW });
+      directorGesturePlay('Thinking', { priority: PRIORITY.LOW });
       this._later(2000, () => {
-        void unifiedGestureEngine.play('Acknowledging', { priority: PRIORITY.LOW });
+        directorGesturePlay('Acknowledging', { priority: PRIORITY.LOW });
       });
     });
   }
@@ -421,7 +460,7 @@ export class AgentDirector {
     // Concerned expression + lean forward
     this._later(300, () => {
       emit('avatar:emotion', { emotion: 'concerned', strength: 0.6 });
-      void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.NORMAL });
+      directorGesturePlay('Thinking', { priority: PRIORITY.NORMAL });
       emit('avatar:headpose', { yaw: 0.05, pitch: -0.04, duration: 1800 });
     });
   }
@@ -430,21 +469,21 @@ export class AgentDirector {
     devLog('Session phase →', phase);
     switch (phase) {
       case 'warmup':
-        void unifiedGestureEngine.play('Waving', { priority: PRIORITY.LOW });
+        directorGesturePlay('Waving', { priority: PRIORITY.LOW });
         emit('avatar:emotion', { emotion: 'friendly', strength: 0.65 });
         break;
       case 'deepwork':
-        void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.LOW });
+        directorGesturePlay('Thinking', { priority: PRIORITY.LOW });
         emit('avatar:emotion', { emotion: 'attentive', strength: 0.7 });
         break;
       case 'cooldown':
-        void unifiedGestureEngine.play('Acknowledging', { priority: PRIORITY.LOW });
+        directorGesturePlay('Acknowledging', { priority: PRIORITY.LOW });
         emit('avatar:emotion', { emotion: 'calm', strength: 0.6 });
         break;
       case 'closing':
         // Peak-End Rule: end with positive energy
         this._later(800, () => {
-          void unifiedGestureEngine.play('Clapping', { priority: PRIORITY.NORMAL });
+          directorGesturePlay('Clapping', { priority: PRIORITY.NORMAL });
           emit('avatar:emotion', { emotion: 'proud', strength: 0.8 });
         });
         break;
@@ -461,7 +500,7 @@ export class AgentDirector {
     const b = behaviorMap[mode];
     if (!b) return;
     this._later(200, () => {
-      void unifiedGestureEngine.play(b.gesture, { priority: PRIORITY.BACKGROUND });
+      directorGesturePlay(b.gesture, { priority: PRIORITY.BACKGROUND });
       emit('avatar:blink', { style: mode === 'pathos' ? 'slow' : 'normal' });
     });
   }
@@ -469,10 +508,19 @@ export class AgentDirector {
   /** تطبيق سلوك الأفاتار المرتبط باستراتيجية التدريس المختارة */
   applyTeachingStrategyBehavior(strategy: TeachingStrategy): void {
     if (!strategy) return;
+    if (LEVEL6_UNIFIED_BEHAVIOR) {
+      this._later(cogniDelayMs(120), () => {
+        emitBehaviorText(
+          `Teaching strategy ${strategy.name}: emphasize ${strategy.avatarGesture}, mood ${strategy.avatarEmotion}. ${strategy.description.slice(0, 160)}`,
+          'system',
+        );
+      });
+      return;
+    }
     const { avatarGesture, avatarEmotion, bodyLanguage } = strategy;
     this._later(cogniDelayMs(120), () => {
       emit('avatar:emotion', { emotion: avatarEmotion, strength: 0.72 });
-      void unifiedGestureEngine.play(avatarGesture, { priority: PRIORITY.NORMAL });
+      directorGesturePlay(avatarGesture, { priority: PRIORITY.NORMAL });
       emit('avatar:gaze', {
         yaw: bodyLanguage.gazeTarget === 'think' ? -0.18 : 0,
         pitch: bodyLanguage.gazeTarget === 'think' ? -0.12 : 0,
@@ -495,7 +543,7 @@ export class AgentDirector {
     // Student confused → empathetic agree + acknowledge
     if (studentState === 'confused') {
       this._later(300, () => {
-        void unifiedGestureEngine.play('Acknowledging', { priority: PRIORITY.NORMAL });
+        directorGesturePlay('Acknowledging', { priority: PRIORITY.NORMAL });
       });
     }
     // High energy → match with more expressive body language
@@ -516,13 +564,14 @@ export class AgentDirector {
     const delay = getRandomDelay(5000, 8000);
     this._neutralBreakTimerId = setTimeout(() => {
       this._neutralBreakTimerId = null;
+      if (LEVEL6_UNIFIED_BEHAVIOR) return;
       if (useBrainStore.getState().emotionLabel === 'neutral') {
         // Alternate between procedural (fast) and VRMA-based (named) idle gestures
         const useVrma = Math.random() < 0.35;
         if (useVrma) {
           const vrmaIdles = ['look-around', 'look-around2', 'Relax', 'Idle1', 'Idle2', 'Idle3', 'Idle4'];
           const pick = vrmaIdles[Math.floor(Math.random() * vrmaIdles.length)];
-          void unifiedGestureEngine.play(pick, { priority: PRIORITY.LOW });
+          directorGesturePlay(pick, { priority: PRIORITY.LOW });
         } else {
           const fallbackGestures = ['look', 'relax', 'agree'];
           const randomG = fallbackGestures[Math.floor(Math.random() * fallbackGestures.length)];
@@ -586,6 +635,7 @@ export class AgentDirector {
   }
 
   private _fireGesture(g: string, o: any): void {
+    if (LEVEL6_UNIFIED_BEHAVIOR) return;
     // Standing-first: emit full gesture tokens. AvatarCanvas maps seated-safe motion only when UI sit is active.
     // FIX: personality-consistent gestures — high friendliness softens point unless user profile prefers technical pointing
     const adaptPG = emotionalMemoryManager.getPersonalityAdaptation();
@@ -662,9 +712,11 @@ export class AgentDirector {
 
       if (VRMA_GESTURES_SET.has(mapped)) {
         // Full VRMA pipeline: gesture + priority + crossfade + correct bone state
-        void unifiedGestureEngine.play(mapped, {
+        directorGesturePlay(mapped, {
           priority: PRIORITY.NORMAL,
           durationMs: Math.round(durationSec * 1000),
+          intensity,
+          mood: useBrainStore.getState().emotionLabel ?? 'neutral',
         });
       } else {
         // Legacy procedural path (openHand, beat, lean_forward, etc.)
@@ -701,6 +753,7 @@ export class AgentDirector {
         this._later(delay, () => {
           stopTTSGlobally();
           emitAgentMessage(trimmed, emotion);
+          if (LEVEL6_UNIFIED_BEHAVIOR) emitBehaviorText(trimmed, 'conversation');
           useBrainStore.getState().setTalking(true);
           emit('avatar:speak:start', {});
           const simulatedMs = Math.max(400, Math.min(120_000, trimmed.length * 65));
@@ -722,6 +775,7 @@ export class AgentDirector {
       this._later(delay, async () => {
         stopTTSGlobally();
         emitAgentMessage(trimmed, emotion);
+        if (LEVEL6_UNIFIED_BEHAVIOR) emitBehaviorText(trimmed, 'conversation');
 
         if (clientAzure) {
           // الصوت يُشغَّل من `AvatarCanvas` عبر `onAgentSpeak` (Azure SDK + visemes).
@@ -765,6 +819,10 @@ export class AgentDirector {
   updateEmotion(emotion: string): void {
     const e = String(emotion ?? '').trim();
     if (!e) return;
+    if (LEVEL6_UNIFIED_BEHAVIOR) {
+      emitBehaviorText(`[emotion:${e}]`, 'system');
+      return;
+    }
     this.processWsFrame({ type: 'agent:emotion', emotion: e });
   }
 
@@ -772,12 +830,16 @@ export class AgentDirector {
    * React to a user-typed message before send (listening / thinking are handled in UI).
    */
   processUserMessage(message: string): void {
+    if (LEVEL6_UNIFIED_BEHAVIOR) {
+      emitBehaviorText(message, 'conversation');
+      return;
+    }
     const sentiment = this.analyzeSentiment(message);
-    if (sentiment === 'happy') void unifiedGestureEngine.play('Clapping', { priority: PRIORITY.HIGH });
-    else if (sentiment === 'question') void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.NORMAL });
-    else if (sentiment === 'greeting') void unifiedGestureEngine.play('greeting', { priority: PRIORITY.HIGH });
-    else if (sentiment === 'grateful') void unifiedGestureEngine.play('thankful', { priority: PRIORITY.NORMAL });
-    else if (sentiment === 'sad') void unifiedGestureEngine.play('Sad', { priority: PRIORITY.NORMAL });
+    if (sentiment === 'happy') directorGesturePlay('Clapping', { priority: PRIORITY.HIGH });
+    else if (sentiment === 'question') directorGesturePlay('Thinking', { priority: PRIORITY.NORMAL });
+    else if (sentiment === 'greeting') directorGesturePlay('greeting', { priority: PRIORITY.HIGH });
+    else if (sentiment === 'grateful') directorGesturePlay('thankful', { priority: PRIORITY.NORMAL });
+    else if (sentiment === 'sad') directorGesturePlay('Sad', { priority: PRIORITY.NORMAL });
   }
 
   analyzeSentiment(text: string): string {
@@ -806,32 +868,38 @@ export class AgentDirector {
     const emoRaw = String(frame.emotion ?? '').trim();
     const emoStr = emoRaw.toLowerCase();
 
+    if (LEVEL6_UNIFIED_BEHAVIOR) {
+      if (responseText) emitBehaviorText(responseText, 'conversation');
+      else if (emoStr) emitBehaviorText(`[emotion:${emoRaw}]`, 'system');
+      return;
+    }
+
     if (emoStr) {
       emit('avatar:emotion', { emotion: emoRaw });
       if (emoStr === 'thinking' || emoStr === 'confused' || emoStr === 'processing') {
-        void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.HIGH });
+        directorGesturePlay('Thinking', { priority: PRIORITY.HIGH });
         return;
       }
       const vrma = EMOTION_TO_VRMA[emoStr as EmotionLabel];
       if (vrma) {
         const p =
           emoStr === 'surprised' || emoStr === 'angry' ? PRIORITY.CRITICAL : PRIORITY.HIGH;
-        void unifiedGestureEngine.play(vrma, { priority: p });
+        directorGesturePlay(vrma, { priority: p });
         return;
       }
       const g = resolveEmotionGesturePlay(emoStr);
-      if (g) void unifiedGestureEngine.play(g, { priority: PRIORITY.HIGH });
+      if (g) directorGesturePlay(g, { priority: PRIORITY.HIGH });
       return;
     }
 
     if (/شكر|thank|thanks/i.test(responseText)) {
-      void unifiedGestureEngine.play('thankful', { priority: PRIORITY.NORMAL });
+      directorGesturePlay('thankful', { priority: PRIORITY.NORMAL });
     } else if (responseText.includes('!')) {
-      void unifiedGestureEngine.play('Surprised', { priority: PRIORITY.HIGH });
+      directorGesturePlay('Surprised', { priority: PRIORITY.HIGH });
     } else {
       const hint = this.inferEmotionFromResponseText(responseText);
       const g = resolveEmotionGesturePlay(hint);
-      if (g) void unifiedGestureEngine.play(g, { priority: PRIORITY.NORMAL });
+      if (g) directorGesturePlay(g, { priority: PRIORITY.NORMAL });
     }
   }
 
@@ -854,7 +922,7 @@ export class AgentDirector {
           rawP === 'LOW'      ? PRIORITY.LOW :
           rawP === 'BACKGROUND' ? PRIORITY.BACKGROUND :
           PRIORITY.NORMAL;
-        void unifiedGestureEngine.play(name, { priority: p as typeof PRIORITY[keyof typeof PRIORITY] });
+        directorGesturePlay(name, { priority: p as typeof PRIORITY[keyof typeof PRIORITY] });
         break;
       }
       case 'agent:emotion': {
@@ -866,12 +934,12 @@ export class AgentDirector {
         if (vrmaName) {
           const p =
             emo === 'surprised' || emo === 'angry' ? PRIORITY.CRITICAL : PRIORITY.HIGH;
-          void unifiedGestureEngine.play(vrmaName, { priority: p });
+          directorGesturePlay(vrmaName, { priority: p });
           break;
         }
         const fallback = resolveEmotionGesturePlay(emo);
         if (fallback) {
-          void unifiedGestureEngine.play(fallback, { priority: PRIORITY.HIGH });
+          directorGesturePlay(fallback, { priority: PRIORITY.HIGH });
         }
         break;
       }
@@ -893,12 +961,12 @@ export class AgentDirector {
           agree:    'Agreeing',
         };
         const mapped = ACTION_MAP[action.toLowerCase()] ?? action;
-        void unifiedGestureEngine.play(mapped, { priority: PRIORITY.HIGH });
+        directorGesturePlay(mapped, { priority: PRIORITY.HIGH });
         break;
       }
       case 'agent:thinking': {
         useBrainStore.getState().setThinking(true);
-        void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.HIGH });
+        directorGesturePlay('Thinking', { priority: PRIORITY.HIGH });
         break;
       }
       default:

@@ -57,10 +57,121 @@ const CAPSULE_HEIGHT = Math.max(1.4, PHYSICS_CONFIG.avatar.capsuleHeight); // ov
 
 // Pre-allocated temporaries (zero allocations per frame)
 const _deskBox   = new THREE.Box3();
+const _meshBox   = new THREE.Box3();
 const _avatarBox = new THREE.Box3();
 const _tmpVec    = new THREE.Vector3();
 const _center    = new THREE.Vector3();
 const _size      = new THREE.Vector3();
+
+/** World-space AABBs: room walls (first 4) + per-mesh colliders from the office GLB. */
+const _envColliderBoxes: THREE.Box3[] = [];
+const _wallBoxes: [THREE.Box3, THREE.Box3, THREE.Box3, THREE.Box3] = [
+  new THREE.Box3(),
+  new THREE.Box3(),
+  new THREE.Box3(),
+  new THREE.Box3(),
+];
+const _meshColliderBoxPool: THREE.Box3[] = [];
+
+const WALL_THICKNESS = 0.08;
+const MIN_MESH_EXTENT = 0.028;
+const IGNORE_MESH_NAME =
+  /^(RoomShell|Backdrop|ParquetFloor|Sky|Sun|Light|Camera|Helper|grid|Axes|FloorClick)/i;
+
+function appendRoomWallBoxes(out: THREE.Box3[]): void {
+  const rb = ROOM_BOUNDS;
+  const t = WALL_THICKNESS;
+  _wallBoxes[0]!.set(
+    new THREE.Vector3(rb.minX, rb.floorY, rb.minZ),
+    new THREE.Vector3(rb.minX + t, rb.ceilY, rb.maxZ),
+  );
+  _wallBoxes[1]!.set(
+    new THREE.Vector3(rb.maxX - t, rb.floorY, rb.minZ),
+    new THREE.Vector3(rb.maxX, rb.ceilY, rb.maxZ),
+  );
+  _wallBoxes[2]!.set(
+    new THREE.Vector3(rb.minX, rb.floorY, rb.minZ),
+    new THREE.Vector3(rb.maxX, rb.ceilY, rb.minZ + t),
+  );
+  _wallBoxes[3]!.set(
+    new THREE.Vector3(rb.minX, rb.floorY, rb.maxZ - t),
+    new THREE.Vector3(rb.maxX, rb.ceilY, rb.maxZ),
+  );
+  out.push(_wallBoxes[0]!, _wallBoxes[1]!, _wallBoxes[2]!, _wallBoxes[3]!);
+}
+
+function shouldSkipMeshCollider(mesh: THREE.Mesh, worldBox: THREE.Box3, floorY: number): boolean {
+  if (mesh.userData?.ignorePhysics === true) return true;
+  if (IGNORE_MESH_NAME.test(mesh.name || '')) return true;
+  if (worldBox.isEmpty()) return true;
+  worldBox.getSize(_size);
+  if (Math.min(_size.x, _size.y, _size.z) < MIN_MESH_EXTENT) return true;
+
+  const horiz = _size.x * _size.z;
+  const bottomNearFloor = worldBox.min.y < floorY + 0.22 && worldBox.max.y < floorY + 0.38;
+  if (_size.y < 0.14 && horiz > 14 && bottomNearFloor) return true;
+
+  const ceilingSlab = worldBox.min.y > floorY + 2.4 && _size.y < 0.2 && horiz > 10;
+  if (ceilingSlab) return true;
+
+  return false;
+}
+
+function acquireMeshColliderBox(): THREE.Box3 {
+  return _meshColliderBoxPool.pop() ?? new THREE.Box3();
+}
+
+function releaseAllPooledMeshBoxes(): void {
+  for (let i = 4; i < _envColliderBoxes.length; i++) {
+    _meshColliderBoxPool.push(_envColliderBoxes[i]!);
+  }
+}
+
+/** Rebuild `_envColliderBoxes` from `ROOM_BOUNDS` + office mesh world AABBs. */
+function rebuildEnvironmentColliderBoxes(): void {
+  releaseAllPooledMeshBoxes();
+  _envColliderBoxes.length = 0;
+  appendRoomWallBoxes(_envColliderBoxes);
+
+  if (!_deskScene) return;
+
+  _deskScene.updateMatrixWorld(true);
+  _deskScene.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh || !mesh.geometry) return;
+    _meshBox.setFromObject(mesh);
+    if (shouldSkipMeshCollider(mesh, _meshBox, ROOM_BOUNDS.floorY)) return;
+    const box = acquireMeshColliderBox();
+    box.copy(_meshBox);
+    _envColliderBoxes.push(box);
+  });
+}
+
+/** After office transforms or layout JSON, mark caches stale and drop Rapier statics so they rebuild. */
+export function markDeskSceneTransformDirty(): void {
+  _deskBoxDirty = true;
+  resetRapierAvatarState();
+}
+
+function ensureEnvironmentColliderBoxes(): void {
+  if (_deskBoxDirty) {
+    if (_deskScene) {
+      refreshDeskBox();
+    } else {
+      _deskBox.makeEmpty();
+      _deskBoxDirty = false;
+      rebuildEnvironmentColliderBoxes();
+    }
+  } else if (_envColliderBoxes.length === 0) {
+    rebuildEnvironmentColliderBoxes();
+  }
+}
+
+/** Walls + furniture AABBs used by Rapier registration and Box3 resolve. */
+export function getEnvironmentColliderBoxes(): readonly THREE.Box3[] {
+  ensureEnvironmentColliderBoxes();
+  return _envColliderBoxes;
+}
 
 // ── Desk state ────────────────────────────────────────────────────────────────
 let _deskScene: THREE.Object3D | null = null;
@@ -74,6 +185,8 @@ export function setDeskScene(scene: THREE.Object3D): void {
 
 /** Clear desk collider + chair anchor (e.g. when office GLB is removed from the scene). */
 export function clearDeskScene(): void {
+  releaseAllPooledMeshBoxes();
+  _envColliderBoxes.length = 0;
   _deskScene = null;
   _deskBoxDirty = true;
   _chairAnchorPosition = null;
@@ -86,6 +199,7 @@ function refreshDeskBox(): void {
   if (!_deskScene) return;
   _deskBox.setFromObject(_deskScene);
   _deskBoxDirty = false;
+  rebuildEnvironmentColliderBoxes();
 }
 
 // ── ChairSeatAnchor ───────────────────────────────────────────────────────────
@@ -187,45 +301,43 @@ export function resolve(
   if (pos.z < ROOM_BOUNDS.minZ + margin) { pos.z = ROOM_BOUNDS.minZ + margin; touched = true; }
   if (pos.z > ROOM_BOUNDS.maxZ - margin) { pos.z = ROOM_BOUNDS.maxZ - margin; touched = true; }
 
-  // 3. Desk Box3 separation (up to 3 iterations to stop tunneling)
-  if (_deskScene) {
-    if (_deskBoxDirty) refreshDeskBox();
+  // 3. Environment Box3 separation (walls + every eligible office mesh)
+  ensureEnvironmentColliderBoxes();
 
-    // Build avatar AABB (capsule approximated as box)
-    _avatarBox.min.set(pos.x - radius, pos.y, pos.z - radius);
-    _avatarBox.max.set(pos.x + radius, pos.y + CAPSULE_HEIGHT, pos.z + radius);
+  _avatarBox.min.set(pos.x - radius, pos.y, pos.z - radius);
+  _avatarBox.max.set(pos.x + radius, pos.y + CAPSULE_HEIGHT, pos.z + radius);
 
-    for (let iter = 0; iter < 3; iter++) {
-      if (!_avatarBox.intersectsBox(_deskBox)) break;
+  for (let iter = 0; iter < 6; iter++) {
+    let hit = false;
+    for (let b = 0; b < _envColliderBoxes.length; b++) {
+      const staticBox = _envColliderBoxes[b]!;
+      if (!_avatarBox.intersectsBox(staticBox)) continue;
 
-      // Compute overlap extents on each axis
       const ox = Math.min(
-        _avatarBox.max.x - _deskBox.min.x,
-        _deskBox.max.x   - _avatarBox.min.x,
+        _avatarBox.max.x - staticBox.min.x,
+        staticBox.max.x   - _avatarBox.min.x,
       );
       const oz = Math.min(
-        _avatarBox.max.z - _deskBox.min.z,
-        _deskBox.max.z   - _avatarBox.min.z,
+        _avatarBox.max.z - staticBox.min.z,
+        staticBox.max.z   - _avatarBox.min.z,
       );
 
-      // Push out along axis of minimum overlap
       if (ox < oz) {
-        // Separate on X
-        _deskBox.getCenter(_tmpVec);
+        staticBox.getCenter(_tmpVec);
         const sign = pos.x < _tmpVec.x ? -1 : 1;
         pos.x += sign * (ox + 0.01);
       } else {
-        // Separate on Z
-        _deskBox.getCenter(_tmpVec);
+        staticBox.getCenter(_tmpVec);
         const sign = pos.z < _tmpVec.z ? -1 : 1;
         pos.z += sign * (oz + 0.01);
       }
 
-      // Re-update avatar AABB for next iteration
       _avatarBox.min.set(pos.x - radius, pos.y, pos.z - radius);
       _avatarBox.max.set(pos.x + radius, pos.y + CAPSULE_HEIGHT, pos.z + radius);
       touched = true;
+      hit = true;
     }
+    if (!hit) break;
   }
 
   return touched;
@@ -233,7 +345,14 @@ export function resolve(
 
 /** Expose the computed desk Box3 for debug visualization */
 export function getDeskBox(): THREE.Box3 {
-  if (_deskBoxDirty && _deskScene) refreshDeskBox();
+  if (_deskBoxDirty) {
+    if (_deskScene) refreshDeskBox();
+    else {
+      _deskBox.makeEmpty();
+      _deskBoxDirty = false;
+      rebuildEnvironmentColliderBoxes();
+    }
+  }
   return _deskBox;
 }
 
@@ -279,7 +398,7 @@ export function resolveIfEnabled(
     vrmOrRadius as VRM | null,
     group!,
     dt!,
-    getDeskBox(),
+    getEnvironmentColliderBoxes(),
     getChairAnchorVector3(),
     boneDir,
   );

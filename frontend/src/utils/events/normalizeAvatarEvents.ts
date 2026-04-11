@@ -110,6 +110,8 @@ export interface GestureEventInput {
   name?: string;
   /** Some pipelines only set `gesture` (e.g. ad-hoc CustomEvent) — treat like type/name. */
   gesture?: string;
+  /** When `'procedural'`, VRMAPlayer skips VRMA so arms use ARM_OFFSETS only. */
+  source?: string;
   side?: 'left' | 'right' | 'both';
   duration?: number;
   intensity?: number;
@@ -138,6 +140,8 @@ export interface GestureEventDetail {
   type: GestureToken;
   /** Mirrors `type` when it is also a VRMSkeletonManager GestureId — helps listeners that read `gesture` first. */
   gesture?: GestureToken;
+  /** Preserved from input — `'procedural'` tells VRMAPlayer not to load VRMA. */
+  source?: string;
   side: 'left' | 'right' | 'both';
   duration: number;
   intensity: number;
@@ -178,6 +182,9 @@ export function normalizeAvatarEvent(
     };
     if (type === 'idle' || type === 'explain' || type === 'point' || type === 'think' || type === 'wave' || type === 'clap' || type === 'agree') {
       out.gesture = type;
+    }
+    if (typeof g.source === 'string' && g.source.trim()) {
+      out.source = g.source.trim();
     }
     return out;
   }

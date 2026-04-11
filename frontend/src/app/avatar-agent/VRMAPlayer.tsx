@@ -10,13 +10,18 @@
  *   4. يُعيّن `vrmaActiveRef.current = true` أثناء التشغيل → يُوقف الإيماءات الإجرائية.
  *   5. يدعم `avatar:vrma:play` لتشغيل ملف VRMA مباشرةً بمساره.
  *
- * ترتيب useFrame: priority 5 (بعد VRMSkeletonManager=0) → يُطبَّق بعد الإيماءات الإجرائية.
+ * ترتيب useFrame: priority -1 (قبل VRMSkeletonManager=0) → mixer + لقطة vrmaPoseRef دون ترك العظام على وضع الـ mixer.
  *
  * فيزياء منع الاختراق: مُستبعَدة أثناء VRMA — إيماءات VRMA المصمَّمة بشكل صحيح لا تخترق.
  * للإيماءات التي قد تُسبّب اختراقاً، اضبط قيم ARM_OFFSETS في armGestureReference.ts.
  */
 
 import React, { useEffect, useRef } from 'react';
+import {
+  captureNormalizedHumanoidPose,
+  restoreNormalizedHumanoidPose,
+  type BonePoseMap,
+} from './motion/PoseComposer';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import type { VRM } from '@pixiv/three-vrm';
@@ -204,6 +209,8 @@ export type VRMAPlayerProps = {
   vrm: VRM | null;
   /** مرجع مشترك مع VRMSkeletonManager — true أثناء تشغيل VRMA */
   vrmaActiveRef: React.MutableRefObject<boolean>;
+  /** لقطة عظام مطبّعة من الـ mixer — يستهلكها PoseComposer في VRMSkeletonManager */
+  vrmaPoseRef?: React.MutableRefObject<{ seq: number; bones: BonePoseMap } | null>;
 };
 
 // ─── أداة التحميل (singleton) + cache ───────────────────────────────────────
@@ -263,11 +270,12 @@ async function loadFirstAvailableClip(
  * مكوّن R3F يُشغّل ملفات VRMA على نموذج VRM.
  * يجب تضمينه داخل `<Canvas>` بعد VRMSkeletonManager.
  */
-export function VRMAPlayer({ vrm, vrmaActiveRef }: VRMAPlayerProps): null {
+export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps): null {
   const mixerRef           = useRef<THREE.AnimationMixer | null>(null);
   const currentActionRef   = useRef<THREE.AnimationAction | null>(null);
   const actionEndMsRef     = useRef<number>(0);
   const isLoopingRef       = useRef<boolean>(false);
+  const vrmaPoseSeqRef     = useRef(0);
 
   // ── أنشئ/دمّر الـ mixer عند تغيُّر الـ VRM ──────────────────────────────
   useEffect(() => {
@@ -345,6 +353,15 @@ export function VRMAPlayer({ vrm, vrmaActiveRef }: VRMAPlayerProps): null {
       // الإيماءة الخاملة (idle) تُعالَج في VRMSkeletonManager — لا VRMA هنا
       if (key === 'idle') return;
 
+      // إجرائي فقط: يتجاهل VRMA ويترك VRMSkeletonManager يطبّق ARM_OFFSETS
+      const srcRaw = typeof detail.source === 'string' ? detail.source.trim().toLowerCase() : '';
+      if (srcRaw === 'procedural') {
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`[VRMAPlayer] source=procedural — skipping VRMA for "${key}"`);
+        }
+        return;
+      }
+
       const urls = GESTURE_VRMA_MAP[key];
       if (!urls || urls.length === 0) {
         // اسم الإيماءة غير موجود في الخريطة → استخدام الإجرائي
@@ -400,11 +417,12 @@ export function VRMAPlayer({ vrm, vrmaActiveRef }: VRMAPlayerProps): null {
     return () => window.removeEventListener('avatar:vrma:play', onPlay as EventListener);
   }, [vrm]);
 
-  // ── حلقة الإطارات ────────────────────────────────────────────────────────
+  // ── حلقة الإطارات — قبل VRMSkeletonManager: عيّن mixer ثم لقطة وضعية فقط ──
   useFrame((_, delta) => {
     const mixer = mixerRef.current;
     if (!mixer) {
       vrmaActiveRef.current = false;
+      if (vrmaPoseRef) vrmaPoseRef.current = null;
       return;
     }
 
@@ -412,14 +430,12 @@ export function VRMAPlayer({ vrm, vrmaActiveRef }: VRMAPlayerProps): null {
     const looping   = isLoopingRef.current;
     const hasAction = currentActionRef.current !== null;
 
-    // الإيماءة نشطة إذا: [تدور الـ action] AND [لم تنتهِ المدة (أو هي loop)]
     const isActive =
       hasAction &&
       currentActionRef.current!.isRunning() &&
       (looping || nowMs < actionEndMsRef.current + 600);
 
     if (!isActive && hasAction) {
-      // انتهت المدة أو توقّف الـ action → تلاشٍ وتنظيف
       currentActionRef.current!.fadeOut(0.35);
       currentActionRef.current = null;
       isLoopingRef.current     = false;
@@ -427,13 +443,26 @@ export function VRMAPlayer({ vrm, vrmaActiveRef }: VRMAPlayerProps): null {
 
     vrmaActiveRef.current = isActive;
 
-    if (isActive) {
-      const safeDelta = Math.min(delta, 0.1);
-      mixer.update(safeDelta);
-      // أعِد تحديث springBones بوضع VRMA (الـ VRMSkeletonManager سبق أن استدعى vrm.update)
-      if (vrm) vrm.update(safeDelta);
+    if (!isActive) {
+      if (vrmaPoseRef) vrmaPoseRef.current = null;
+      return;
     }
-  }, 5); // priority 5 — يُنفَّذ بعد VRMSkeletonManager (priority 0)
+
+    const safeDelta = Math.min(delta, 0.1);
+    const humanoid = vrm?.humanoid;
+    if (vrmaPoseRef && humanoid) {
+      const snap: BonePoseMap = new Map();
+      captureNormalizedHumanoidPose(humanoid, snap);
+      mixer.update(safeDelta);
+      const posed: BonePoseMap = new Map();
+      captureNormalizedHumanoidPose(humanoid, posed);
+      restoreNormalizedHumanoidPose(humanoid, snap);
+      vrmaPoseSeqRef.current += 1;
+      vrmaPoseRef.current = { seq: vrmaPoseSeqRef.current, bones: posed };
+    } else {
+      mixer.update(safeDelta);
+    }
+  }, -1);
 
   return null;
 }

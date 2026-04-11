@@ -1,5 +1,5 @@
 /**
- * Rapier 3D — character controller + static environment (desk, chair, floor).
+ * Rapier 3D — character controller + static environment (floor, room walls, mesh cuboids, chair).
  * Desired motion comes from AvatarCanvas; computeColliderMovement corrects for obstacles.
  */
 import RAPIER from '@dimforge/rapier3d-compat';
@@ -12,9 +12,17 @@ import { ROOM_BOUNDS } from '../scene/RoomShell';
 const RAPIER_FLOOR_HALF_EXTENT_Y = 0.08;
 
 let _staticsRegistered = false;
+/** Rigid bodies created for floor + walls + furniture; removed on `resetRapierAvatarState`. */
+let _staticWorld: RAPIER.World | null = null;
+const _staticBodies: RAPIER.RigidBody[] = [];
 let _charController: ReturnType<RAPIER.World['createCharacterController']> | null = null;
 let _avatarBody: ReturnType<RAPIER.World['createRigidBody']> | null = null;
 let _avatarCollider: ReturnType<RAPIER.World['createCollider']> | null = null;
+
+function trackStaticBody(world: RAPIER.World, body: RAPIER.RigidBody): void {
+  if (!_staticWorld) _staticWorld = world;
+  _staticBodies.push(body);
+}
 
 function buildFloor(world: RAPIER.World): void {
   const hw = (ROOM_BOUNDS.maxX - ROOM_BOUNDS.minX) / 2;
@@ -30,6 +38,7 @@ function buildFloor(world: RAPIER.World): void {
   const walkSurfaceY = ROOM_BOUNDS.floorY;
   const bodyY = walkSurfaceY - RAPIER_FLOOR_HALF_EXTENT_Y;
   const body = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(cx, bodyY, cz));
+  trackStaticBody(world, body);
   const desc = RAPIER.ColliderDesc.cuboid(hw, RAPIER_FLOOR_HALF_EXTENT_Y, hd)
     .setFriction(PHYSICS_CONFIG.environment.friction)
     .setRestitution(PHYSICS_CONFIG.environment.restitution);
@@ -39,15 +48,17 @@ function buildFloor(world: RAPIER.World): void {
   }
 }
 
-function buildDesk(world: RAPIER.World, box: THREE.Box3): void {
+function buildStaticCuboid(world: RAPIER.World, box: THREE.Box3): void {
+  if (box.isEmpty()) return;
   const c = new THREE.Vector3();
   const s = new THREE.Vector3();
   box.getCenter(c);
   box.getSize(s);
-  const hx = Math.max(s.x / 2, 0.05);
-  const hy = Math.max(s.y / 2, 0.05);
-  const hz = Math.max(s.z / 2, 0.05);
+  const hx = Math.max(s.x / 2, 0.02);
+  const hy = Math.max(s.y / 2, 0.02);
+  const hz = Math.max(s.z / 2, 0.02);
   const body = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(c.x, c.y, c.z));
+  trackStaticBody(world, body);
   const desc = RAPIER.ColliderDesc.cuboid(hx, hy, hz)
     .setFriction(PHYSICS_CONFIG.environment.friction)
     .setRestitution(PHYSICS_CONFIG.environment.restitution);
@@ -61,22 +72,23 @@ function buildChair(world: RAPIER.World, seatWorld: THREE.Vector3): void {
   const body = world.createRigidBody(
     RAPIER.RigidBodyDesc.fixed().setTranslation(seatWorld.x, seatWorld.y + hy * 0.5, seatWorld.z),
   );
+  trackStaticBody(world, body);
   const desc = RAPIER.ColliderDesc.cuboid(hx, hy, hz)
     .setFriction(PHYSICS_CONFIG.environment.friction)
     .setRestitution(PHYSICS_CONFIG.environment.restitution);
   world.createCollider(desc, body);
 }
 
-/** Floor + optional desk/chair (from WorldColliders / scene). */
+/** Floor + room wall slabs + mesh AABBs + optional chair (from WorldColliders). */
 export function ensureRapierStatics(
   world: RAPIER.World,
-  deskBox: THREE.Box3,
+  environmentBoxes: readonly THREE.Box3[],
   chairSeat: THREE.Vector3 | null,
 ): void {
   if (_staticsRegistered) return;
   buildFloor(world);
-  if (!deskBox.isEmpty()) {
-    buildDesk(world, deskBox);
+  for (const box of environmentBoxes) {
+    buildStaticCuboid(world, box);
   }
   if (chairSeat) {
     buildChair(world, chairSeat);
@@ -103,13 +115,13 @@ export function resolveRapierFrame(
   vrm: VRM | null,
   group: THREE.Group,
   dt: number,
-  deskBox: THREE.Box3,
+  environmentBoxes: readonly THREE.Box3[],
   chairSeat: THREE.Vector3 | null,
   _boneDir?: Map<string, THREE.Bone> | null,
 ): void {
   if (!vrm) return;
 
-  ensureRapierStatics(world, deskBox, chairSeat);
+  ensureRapierStatics(world, environmentBoxes, chairSeat);
 
   if (!_charController) {
     const cc = world.createCharacterController(0.02);
@@ -164,6 +176,13 @@ export function resolveRapierFrame(
 }
 
 export function resetRapierAvatarState(): void {
+  if (_staticWorld) {
+    for (const b of _staticBodies) {
+      _staticWorld.removeRigidBody(b);
+    }
+  }
+  _staticBodies.length = 0;
+  _staticWorld = null;
   _charController = null;
   _avatarBody = null;
   _avatarCollider = null;

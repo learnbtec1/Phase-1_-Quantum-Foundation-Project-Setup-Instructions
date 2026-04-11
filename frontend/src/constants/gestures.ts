@@ -275,6 +275,8 @@ export const GESTURE_PRIORITY_MAP: Readonly<Record<string, PriorityValue>> = {
 
 export const GESTURE_DURATION_MS: Readonly<Record<string, number>> = {
   default:       2000,
+  test_elbow:    2800,
+  testelbow:     2800,
   thinking:      3500,
   angry:         2200,
   surprised:      900,
@@ -371,9 +373,17 @@ export const GESTURE_FALLBACKS: Readonly<Record<string, FallbackConfig>> = {
 
 // ─── Canonical procedural gestures (VRMSkeletonManager arm/head procedural) ─
 
-export type CanonicalGesture = 'idle' | 'explain' | 'point' | 'think' | 'wave' | 'clap' | 'agree';
+export type CanonicalGesture =
+  | 'idle'
+  | 'explain'
+  | 'point'
+  | 'think'
+  | 'wave'
+  | 'clap'
+  | 'agree'
+  | 'test_elbow';
 export const CANONICAL_GESTURES = new Set<CanonicalGesture>([
-  'idle', 'explain', 'point', 'think', 'wave', 'clap', 'agree',
+  'idle', 'explain', 'point', 'think', 'wave', 'clap', 'agree', 'test_elbow',
 ]);
 
 /** Map any VRMA stem → best canonical procedural gesture for blended state */

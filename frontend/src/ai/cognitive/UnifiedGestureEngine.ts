@@ -54,6 +54,7 @@ function perfNow(): number {
 
 const LEGACY_TO_CANONICAL: Record<string, CanonicalGesture> = {
   look: 'idle', wave: 'wave', waving: 'wave', clap: 'clap', clapping: 'clap',
+  test_elbow: 'test_elbow', testelbow: 'test_elbow', 'test-elbow': 'test_elbow',
   agree: 'agree', agreeing: 'agree',
   nod: 'agree',        // nod → agree (head nod posture in VRMSkeletonManager)
   idle: 'idle', explain: 'explain',
@@ -128,6 +129,8 @@ interface QueueEntry {
   ts: number;
   durationMs: number;
   crossFade: boolean;
+  intensity?: number;
+  mood?: string;
 }
 
 // ─── Engine ──────────────────────────────────────────────────────────────────
@@ -206,6 +209,8 @@ export class UnifiedGestureEngine {
       priority?: PriorityValue;
       durationMs?: number;
       crossFade?: boolean;
+      intensity?: number;
+      mood?: string;
     } = {},
   ): Promise<void> {
     if (!name?.trim()) return;
@@ -214,7 +219,7 @@ export class UnifiedGestureEngine {
     const durationMs = opts.durationMs ?? this.#resolveDuration(normalised);
     const crossFade = opts.crossFade !== false;
 
-    const entry: QueueEntry = { name: normalised, priority, ts: Date.now(), durationMs, crossFade };
+    const entry: QueueEntry = { name: normalised, priority, ts: Date.now(), durationMs, crossFade, intensity: opts.intensity, mood: opts.mood };
 
     if (priority <= this.#currentPriority) {
       const idleSlot = (PRIORITY.BACKGROUND + 1) as PriorityValue;
@@ -363,7 +368,7 @@ export class UnifiedGestureEngine {
       // Resolve name to VRMA stem or fallback
       const stem = this.#lookupStem(entry.name);
       if (stem) {
-        await this.#dispatchVrma(stem, entry.durationMs, entry.priority);
+        await this.#dispatchVrma(stem, entry.durationMs, entry.priority, entry.intensity, entry.mood);
       } else {
         const fallback = GESTURE_FALLBACKS[entry.name.toLowerCase().replace(/\s+/g, '')];
         if (fallback) {
@@ -391,18 +396,19 @@ export class UnifiedGestureEngine {
     }
   }
 
-  async #dispatchVrma(stem: string, durationMs: number, priority: PriorityValue): Promise<void> {
+  async #dispatchVrma(stem: string, durationMs: number, priority: PriorityValue, intensity?: number, mood?: string): Promise<void> {
     const canonical = VRMA_TO_CANONICAL[stem] ?? 'idle';
     const url = this.resolveVrmaUrl(stem);
     const loop = /^Idle[1-4]$/i.test(stem) || stem === 'Relax';
 
-    devLog('info', `📡 Dispatching gesture: ${stem} → ${canonical} url=${url}`);
+    devLog('info', `📡 Dispatching gesture: ${stem} → ${canonical} url=${url} intensity=${intensity ?? 0.82} mood=${mood ?? 'neutral'}`);
 
     // Dispatch procedural canonical for VRMSkeletonManager arm system
     this.#rawDispatch({
       gesture: canonical,
       type: canonical,
-      intensity: 0.82,
+      intensity: intensity ?? 0.82,
+      mood: mood ?? 'neutral',
       duration: Math.max(0.5, durationMs / 1000),
       side: 'right',
       vrma: url,
@@ -440,7 +446,7 @@ export class UnifiedGestureEngine {
       case 'single': {
         const stem = this.#lookupStem(fb.gestures[0] ?? 'idle');
         if (stem) {
-          await this.#dispatchVrma(stem, each, entry.priority);
+          await this.#dispatchVrma(stem, each, entry.priority, entry.intensity, entry.mood);
         } else {
           try { dispatchGestureFromActionText(fb.gestures[0] ?? 'idle'); } catch { /* ignore */ }
           if (each > 0) await this.#delay(Math.min(each, 3000));
@@ -453,7 +459,7 @@ export class UnifiedGestureEngine {
           if (this.#currentName !== entry.name) break; // interrupted
           const stem = this.#lookupStem(g);
           if (stem) {
-            await this.#dispatchVrma(stem, each, entry.priority);
+            await this.#dispatchVrma(stem, each, entry.priority, entry.intensity, entry.mood);
           } else {
             try { dispatchGestureFromActionText(g); } catch { /* ignore */ }
             if (each > 0) await this.#delay(Math.min(each, 3000));
@@ -468,7 +474,7 @@ export class UnifiedGestureEngine {
           if (this.#currentName !== entry.name) break; // interrupted
           const stem = this.#lookupStem(g);
           if (stem) {
-            await this.#dispatchVrma(stem, each, entry.priority);
+            await this.#dispatchVrma(stem, each, entry.priority, entry.intensity, entry.mood);
           } else {
             try { dispatchGestureFromActionText(g); } catch { /* ignore */ }
             if (each > 0) await this.#delay(Math.min(each, 3000));
