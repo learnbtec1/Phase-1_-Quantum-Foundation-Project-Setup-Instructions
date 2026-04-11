@@ -12,7 +12,6 @@ import React, {
 import * as THREE from 'three';
 import { Canvas } from '@react-three/fiber';
 import {
-  ContactShadows,
   PerspectiveCamera,
   OrbitControls,
 } from '@react-three/drei';
@@ -21,7 +20,7 @@ import {
   type GLTF,
   type GLTFParser,
 } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { VRMLoaderPlugin, VRM, VRMUtils } from '@pixiv/three-vrm';
+import { VRMLoaderPlugin, VRM } from '@pixiv/three-vrm';
 import { useBrainStore } from '@/store/useBrainStore';
 import { initBrainPersistence, flushBrainPersistence } from '@/lib/brainPersistence';
 import { initAvatarVoiceListener } from '@/ai/io/tts';
@@ -31,7 +30,6 @@ import ComfortLightingRig from '@/components/ComfortLightingRig';
 import LipSyncManager, { type VisemeCue } from './LipSyncManager';
 import { AnimationController } from './AnimationController';
 import { VRMSkeletonManager } from './VRMSkeletonManager';
-import { MouseGestureCalibrator } from './MouseGestureCalibrator';
 import { GenerativeGestureManager } from './GenerativeGestureManager';
 import { useAvatarEventBridge } from '@/hooks/useAvatarEventBridge';
 import { initGestureNormalizer } from '@/lib/gestureNormalizer';
@@ -40,6 +38,9 @@ import {
   AVATAR_OFFICE_SCENE_DEFAULTS,
   getAvatarOfficeScenePosition,
   OFFICE_GLB_PUBLIC_PATH,
+  pickVrmUrl,
+  FORWARD_ROTATION_Y,
+  AVATAR_GROUP_ROTATION_Y,
 } from '@/config/avatar';
 import { OfficeEnvironment } from './OfficeEnvironment';
 import { createAvatarPerformanceHandler } from '@/app/avatar-agent/avatarPerformanceBridge';
@@ -94,8 +95,35 @@ function ErrorFallback() {
   );
 }
 
+/**
+ * Invisible floor plane that intercepts right-clicks and emits the XZ position.
+ * Placed at the avatar's floor level (Y = avatarPositionY).
+ */
+function FloorClickDetector({
+  floorY,
+  onRightClick,
+}: {
+  floorY: number;
+  onRightClick: (x: number, z: number) => void;
+}) {
+  return (
+    <mesh
+      rotation={[-Math.PI / 2, 0, 0]}
+      position={[0, floorY, 0]}
+      visible={false}
+      onContextMenu={(e) => {
+        e.stopPropagation();
+        onRightClick(e.point.x, e.point.z);
+      }}
+    >
+      <planeGeometry args={[40, 40]} />
+      <meshBasicMaterial />
+    </mesh>
+  );
+}
+
 export default function AvatarCanvas({
-  vrmUrl = '/models/cogni.vrm',
+  vrmUrl = pickVrmUrl(),
   showOfficeEnvironment = true,
   officeGlbUrl = OFFICE_GLB_PUBLIC_PATH,
   officePosition = [...AVATAR_OFFICE_SCENE_DEFAULTS.officePosition],
@@ -114,6 +142,11 @@ export default function AvatarCanvas({
   const [vrm, setVrm] = useState<VRM | null>(null);
   const [error, setError] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
+  // Right-click → move avatar to floor position (starts at desk position)
+  const [avatarXZ, setAvatarXZ] = useState<[number, number]>([
+    avatarPosition[0],
+    avatarPosition[2],
+  ]);
 
   // Shared Refs for Managers
   const isTalkingRef = useRef<boolean>(false);
@@ -159,16 +192,10 @@ export default function AvatarCanvas({
     initGestureNormalizer();
     initBrainPersistence();
     initAvatarVoiceListener(); // wire avatar:voice → TTS rate/pitch
-    startSpontaneousBehavior({
-      isTalkingRef,
-      isThinkingRef,
-      motorSpeedMulRef,
-      isListeningRef, // propagate so SpontaneousBehavior suppresses heavy gestures while student speaks
-    });
-    // Flush on unmount too (SPA navigation)
+    // SpontaneousBehavior disabled — FREEZE_IDLE_ANIMATIONS=true in VRMSkeletonManager
+    // re-enable by calling startSpontaneousBehavior({...}) here and flipping the flag
     return () => {
       flushBrainPersistence();
-      stopSpontaneousBehavior();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -228,12 +255,9 @@ export default function AvatarCanvas({
         return;
       }
 
-      try {
-        VRMUtils.removeUnnecessaryVertices(gltf.scene);
-        VRMUtils.combineSkeletons(gltf.scene);
-      } catch (err) {
-        console.warn('[AvatarCanvas] VRM optimization warning:', err);
-      }
+      // VRM 1.0: no rotateVRM0 (already faces +Z), no combineSkeletons (causes skinning artifacts on VRM1),
+      // no removeUnnecessaryVertices (unnecessary for a production-ready VRM1 model).
+      // The model is canonical and was already optimized during UniVRM export.
 
       // Fix materials for shadows
       gltf.scene.traverse((obj) => {
@@ -259,7 +283,7 @@ export default function AvatarCanvas({
       console.log('  humanoid present:', !!loadedVrm.humanoid);
       console.log('  autoUpdateHumanBones:', loadedVrm.humanoid?.autoUpdateHumanBones);
       const testBone = loadedVrm.humanoid?.getRawBoneNode('rightUpperArm' as never);
-      console.log('  rightUpperArm (post-combineSkeletons):', testBone);
+      console.log('  rightUpperArm:', testBone);
       console.log('  hips:', loadedVrm.humanoid?.getRawBoneNode('hips' as never));
 
       // ── DIAGNOSTIC: all available humanoid bones in THIS model ──────────
@@ -295,9 +319,16 @@ export default function AvatarCanvas({
     setLoading(true);
 
     const loader = new GLTFLoader();
-    // autoUpdateHumanBones: true (default) — VRMSkeletonManager writes to NORMALIZED bones;
-    // humanoid.update() inside vrm.update() handles normalized→raw conversion correctly.
-    loader.register((parser: GLTFParser) => new VRMLoaderPlugin(parser));
+    // VRM 1.0 (cogni.vrm): autoUpdateHumanBones=true (default).
+    // VRMSkeletonManager writes ONLY to normalized bones.
+    // vrm.update() → humanoid.update() converts normalized→raw per-model correctly.
+    // DO NOT set autoUpdateHumanBones=false — breaks procedural animation.
+    // DO NOT call setRawPose(getNormalizedPose()) — bypasses per-model transforms.
+    loader.register((parser: GLTFParser) => new VRMLoaderPlugin(parser, {
+      // expressionPlugin options: only use the 16 preset expressions we actually need.
+      // The 317 blendshapes exist in the mesh but VRM manager only exposes preset ones.
+      // This is handled automatically — no extra config needed for VRM 1.0.
+    }));
 
     loader.load(
       vrmUrl,
@@ -477,9 +508,6 @@ export default function AvatarCanvas({
     return () => window.removeEventListener('agent:message', onAgentMessage as EventListener);
   }, [onAgentSpeak]);
 
-  if (loading && !error) return <LoadingFallback />;
-  if (error) return <ErrorFallback />;
-
   const cameraPosition: [number, number, number] = showOfficeEnvironment
     ? [...AVATAR_OFFICE_SCENE_DEFAULTS.cameraPosition]
     : [0, 1.38, -2.65];
@@ -487,10 +515,25 @@ export default function AvatarCanvas({
     ? [...AVATAR_OFFICE_SCENE_DEFAULTS.orbitTarget]
     : [0, 1.28, 0];
 
+  // ROOT DIV MUST ALWAYS RENDER so r3fEventSourceRef.current is non-null when Canvas mounts.
+  // This is the permanent fix for "Cannot read properties of null (reading 'addEventListener')".
+  // Loading/error overlays are positioned on top — never use early return before this div.
   return (
     <div ref={r3fEventSourceRef} className="relative w-full h-full bg-[#0a0a12]">
+      {(loading && !error) && (
+        <div className="pointer-events-none absolute inset-0 z-10">
+          <LoadingFallback />
+        </div>
+      )}
+      {error && (
+        <div className="pointer-events-none absolute inset-0 z-10">
+          <ErrorFallback />
+        </div>
+      )}
       <Canvas
+        key="avatar-canvas-singleton"
         eventSource={r3fEventSourceRef as React.RefObject<HTMLElement>}
+        frameloop="always"
         shadows
         gl={{ powerPreference: 'high-performance', alpha: false, antialias: true }}
         style={{ width: '100%', height: '100%', display: 'block' }}
@@ -498,6 +541,10 @@ export default function AvatarCanvas({
           gl.outputColorSpace = THREE.SRGBColorSpace;
           gl.toneMapping = THREE.ACESFilmicToneMapping;
           gl.toneMappingExposure = 1.0;
+          gl.domElement.addEventListener('webglcontextlost', (e) => {
+            e.preventDefault();
+            setTimeout(() => window.location.reload(), 800);
+          }, { once: true });
         }}
       >
         {/* كاميرا أمام الأفاتار (جهة −Z) مع رؤية المكتب خلفه */}
@@ -521,22 +568,18 @@ export default function AvatarCanvas({
         */}
         <ComfortLightingRig />
 
-        {/* ظل الأقدام (يمنع الطفوان) */}
-        <ContactShadows
-          position={[0, 0.008, 0]}
-          opacity={0.75}
-          scale={10}
-          blur={2.5}
-          far={1.2}
-          color="#000000"
-        />
+        {/* ContactShadows removed — room floor is the ground surface now */}
 
+        {/* Fallback floor plane — shown only when office env is disabled */}
         {!showOfficeEnvironment && (
-          <gridHelper args={[20, 20, '#333333', '#1a1a1a']} position={[0, -0.01, 0]} />
+          <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
+            <planeGeometry args={[20, 20]} />
+            <meshStandardMaterial color="#1a1a2e" roughness={0.9} metalness={0.1} />
+          </mesh>
         )}
 
-        <color attach="background" args={['#0a0a12']} />
-        <fog attach="fog" args={['#0a0a12', 4, 22]} />
+        <color attach="background" args={['#1a1a2e']} />
+        {/* fog disabled — was hiding room geometry at Z>4 */}
 
         <OrbitControls
           enablePan={false}
@@ -561,12 +604,19 @@ export default function AvatarCanvas({
           )}
         </Suspense>
 
+        {/* Invisible floor — right-click moves the avatar */}
+        <FloorClickDetector
+          floorY={avatarPosition[1]}
+          onRightClick={(x, z) => setAvatarXZ([x, z])}
+        />
+
         <Suspense fallback={null}>
           {vrm && (
             <group
               ref={groupRef}
               name="AvatarRoot"
-              position={avatarPosition}
+              position={[avatarXZ[0], avatarPosition[1], avatarXZ[1]]}
+              rotation={[0, AVATAR_GROUP_ROTATION_Y, 0]}
               scale={avatarScale}
             >
               <primitive object={vrm.scene} />
@@ -611,9 +661,6 @@ export default function AvatarCanvas({
         </Suspense>
       </Canvas>
 
-      {process.env.NODE_ENV === 'development' && vrm ? (
-        <MouseGestureCalibrator vrm={vrm} />
-      ) : null}
     </div>
   );
 }

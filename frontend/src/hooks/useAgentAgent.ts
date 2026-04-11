@@ -714,25 +714,32 @@ export function useAgentAgent({
         }
         useBrainStore.getState().setTalking(true);
         if (typeof window !== 'undefined') {
-          // Dispatch avatar:audio:element FIRST so AvatarCanvas wires the analyser ref
-          // before avatar:speak:start sets isTalkingRef.current = true in the same turn.
+          // ORDER IS CRITICAL (Phase 2 fix):
+          // 1. Wire analyser ref FIRST (audio:element)
           window.dispatchEvent(new CustomEvent('avatar:audio:element', { detail: { audio } }));
+          // 2. If server cues are already available (from WS frame), dispatch timeline
+          //    IMMEDIATELY — BEFORE speak:start so LipSyncManager has cues from frame 1.
+          //    This eliminates the 300ms+ blind window where the mouth was frozen.
+          if (serverCues?.length) {
+            window.dispatchEvent(
+              new CustomEvent('avatar:visemes:timeline', { detail: { cues: serverCues } }),
+            );
+            console.log('[useAgentAgent] Lip-sync timeline bound (immediate, from WS) —', serverCues.length, 'cues');
+          }
+          // 3. Now dispatch speak:start (isTalkingRef = true, LipSyncManager starts)
           window.dispatchEvent(new CustomEvent('avatar:speak:start'));
         }
         console.log('[useAgentAgent] Server TTS play:start', { format: fmt || 'pcm-wrap', blobType: blob.type });
-        void visemeCuePromise.then((cues) => {
-          if (!mountedRef.current || !cues?.length || typeof window === 'undefined') return;
-          // Dispatch timeline after audio:element is already bound
-          window.dispatchEvent(
-            new CustomEvent('avatar:visemes:timeline', { detail: { cues } }),
-          );
-          console.log(
-            '[useAgentAgent] Lip-sync timeline bound —',
-            cues.length,
-            'cues',
-            serverCues ? '(from WS)' : '(from /api/tts-with-timing)',
-          );
-        });
+        // 4. If no server cues, fall back to async fetch (original path — always runs for non-WS cues)
+        if (!serverCues?.length) {
+          void visemeCuePromise.then((cues) => {
+            if (!mountedRef.current || !cues?.length || typeof window === 'undefined') return;
+            window.dispatchEvent(
+              new CustomEvent('avatar:visemes:timeline', { detail: { cues } }),
+            );
+            console.log('[useAgentAgent] Lip-sync timeline bound (async fallback, from /api/tts-with-timing) —', cues.length, 'cues');
+          });
+        }
       };
       audio.onended = () => {
         clearCoSpeechTimers();
@@ -961,7 +968,8 @@ export function useAgentAgent({
                       pitch: avatarBehavior.gazeTarget === 'think' ? -0.12 : 0,
                       durationMs: 2000 },
           }));
-          void unifiedGestureEngine.play(avatarBehavior.gesture, { priority: PRIORITY.NORMAL });
+          // Strategy gesture disabled — arm offsets not calibrated for VRM 1.0 yet
+          // void unifiedGestureEngine.play(avatarBehavior.gesture, { priority: PRIORITY.NORMAL });
           // Extra: if hidden weakness detected, trigger concerned look
           if (intuitionReading.hiddenWeakness && typeof window !== 'undefined') {
             setTimeout(() => {
@@ -986,15 +994,14 @@ export function useAgentAgent({
           // 2. Strategy-based gesture (high priority) — from intuition engine
           // Already dispatched in the strategy block above (unifiedGestureEngine.play)
 
-          // 3. Intent gesture hint — only if no strategy gesture was fired
-          //    Delayed 80ms to avoid same-tick collision with strategy gesture
-          if (gestureHint) {
-            setTimeout(() => {
-              window.dispatchEvent(new CustomEvent('avatar:gesture', {
-                detail: { gesture: gestureHint, duration: 2200 },
-              }));
-            }, 80);
-          }
+          // 3. Intent gesture hint — disabled (arm offsets not calibrated for VRM 1.0)
+          // if (gestureHint) {
+          //   setTimeout(() => {
+          //     window.dispatchEvent(new CustomEvent('avatar:gesture', {
+          //       detail: { gesture: gestureHint, duration: 2200 },
+          //     }));
+          //   }, 80);
+          // }
 
           // 4. Acknowledging nod — delayed further to sequence correctly
           //    Uses avatar:nod (now wired in VRMSkeletonManager) for micro nod
@@ -1036,7 +1043,8 @@ export function useAgentAgent({
           window.dispatchEvent(
             new CustomEvent('avatar:emotion', { detail: { emotion: 'thinking', strength: 0.6 } }),
           );
-          void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.HIGH });
+          // Thinking gesture disabled — arm offsets not calibrated for VRM 1.0 yet
+          // void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.HIGH });
         }
         break;
       }
@@ -1063,7 +1071,6 @@ export function useAgentAgent({
           console.warn('[useAgentAgent] Skipping duplicate TTS fallback (same text within 10s — likely quota loop)');
           break;
         }
-
         stopAllAudio();
 
         setIsProcessing(false);

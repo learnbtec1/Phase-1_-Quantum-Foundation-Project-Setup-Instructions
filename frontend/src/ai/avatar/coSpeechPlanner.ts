@@ -66,6 +66,13 @@ export function planCoSpeechGestures(
   text: string,
   audioDurationMs: number,
 ): CoSpeechPlan[] {
+  // Temporarily disabled — gesture offsets not yet calibrated for VRM 1.0.
+  // All ARM_OFFSETS are ZERO which causes oscillation artifacts when gestures fire.
+  // Re-enable after calibrating each gesture in armGestureReference.ts.
+  void text; void audioDurationMs;
+  return [];
+
+  /* eslint-disable no-unreachable */
   const raw = text || '';
   const n = norm(raw);
   const estFallback = estimateDialogueDurationMs(raw);
@@ -135,9 +142,12 @@ export function planCoSpeechGestures(
   if (encourageIdx >= 0) pushAtRatio(encourageIdx / L, 'clap');
 
   // ── Farewell / welcome / greeting ─────────────────────────────────────────
-  const greetIdx = firstOf(['مرحبا', 'أهلا', 'السلام', 'وداعا', 'مع السلامة',
-    'hello', 'hi', 'goodbye', 'bye', 'welcome']);
-  if (greetIdx >= 0) pushAtRatio(greetIdx / L, 'wave');
+  // Disabled: auto-wave on every greeting causes distorted right-arm shake
+  // because wave gesture offsets are not yet calibrated for VRM 1.0.
+  // Re-enable after calibrating ARM_OFFSETS.wave in armGestureReference.ts.
+  // const greetIdx = firstOf(['مرحبا', 'أهلا', 'السلام', 'وداعا', 'مع السلامة',
+  //   'hello', 'hi', 'goodbye', 'bye', 'welcome']);
+  // if (greetIdx >= 0) pushAtRatio(greetIdx / L, 'wave');
 
   // ── Negation / contrast ───────────────────────────────────────────────────
   const negIdx = firstOf(['لا', 'لكن', 'بالعكس', 'غلط', 'خطأ', 'ليس', 'لم',

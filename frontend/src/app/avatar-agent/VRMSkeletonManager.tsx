@@ -116,15 +116,36 @@ const NECK_SWAY_MUL    = 0.58;
 // ═══════════════════════════════════════════════════════════════════════════════
 //  IDLE pose — مرجع ثابت من armGestureReference.ts (كل إيماءة = idle + إزاحة)
 // ═══════════════════════════════════════════════════════════════════════════════
-// +Z = shoulder-down on right; −Z = shoulder-down on left (mirrored on this VRM).
+// Arm axes in YXZ Euler (SK_E.set(ex, ey, ez, 'YXZ')):
+//   ey (Y) → horizontal swing: swing arm FORWARD/BACKWARD in world plane
+//   ez (Z) → vertical swing:   arm DOWN (+Z right / -Z left) from T-pose
+//   ex (X) → roll/twist:       roll around the arm's length axis
+// The idle slerp previously hardcoded ey=0 — arm stayed in T-pose.
+// Now reads IDLE_RUA_Y / IDLE_LUA_Y so ruaY in ARM_IDLE controls forward swing.
 const IDLE_RUA_X                 = ARM_IDLE.ruaX;
+const IDLE_RUA_Y                 = ARM_IDLE.ruaY;   // ← NEW: forward/backward swing
 const IDLE_RUA_Z                 = ARM_IDLE.ruaZ;
 const IDLE_LUA_X                 = ARM_IDLE.luaX;
+const IDLE_LUA_Y                 = ARM_IDLE.luaY;   // ← NEW: forward/backward swing (left)
 const IDLE_LUA_Z                 = ARM_IDLE.luaZ;
 const IDLE_RLA_X                 = ARM_IDLE.rlaX;
 const IDLE_RLA_Z                 = ARM_IDLE.rlaZ;
 const IDLE_LLA_X                 = ARM_IDLE.llaX;
 const IDLE_LLA_Z                 = ARM_IDLE.llaZ;
+
+/**
+ * FREEZE_IDLE_ANIMATIONS = true → disables breathing, head sway, wrist jitter.
+ * Arms stay at exact ARM_IDLE pose — useful for pose calibration.
+ * Set false to restore natural idle life.
+ */
+const FREEZE_IDLE_ANIMATIONS     = false;
+
+/**
+ * BLOCK_ALL_GESTURES = true → ignores ALL incoming avatar:gesture events.
+ * Avatar stays locked at ARM_IDLE permanently (no wave, think, point, etc.).
+ * Set false to restore normal gesture behaviour after calibrating ARM_OFFSETS.
+ */
+const BLOCK_ALL_GESTURES         = true;
 
 const _ARM_EX                      = composeArmTargets(ARM_OFFSETS.explain);
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -205,33 +226,34 @@ const THINK_LH_X                   = _ARM_TH.lhX;
 const THINK_LH_Y                   = _ARM_TH.lhY;
 const THINK_LH_Z                   = _ARM_TH.lhZ;
 
-const THINK_RSHOULDER_X            = -0.0644;  // rightShoulder pitch
-const THINK_RSHOULDER_Y            = -0.0832;  // rightShoulder yaw
-const THINK_RSHOULDER_Z            =  0.3417;  // rightShoulder roll
+// THINK body — ZEROED for VRM 1.0 clean slate. Recalibrate via motion-lab.
+const THINK_RSHOULDER_X            =  0;
+const THINK_RSHOULDER_Y            =  0;
+const THINK_RSHOULDER_Z            =  0;
 
-const THINK_LSHOULDER_X            = -0.2605;  // leftShoulder pitch
-const THINK_LSHOULDER_Y            = -0.0012;  // leftShoulder yaw
-const THINK_LSHOULDER_Z            = -0.0142;  // leftShoulder roll
+const THINK_LSHOULDER_X            =  0;
+const THINK_LSHOULDER_Y            =  0;
+const THINK_LSHOULDER_Z            =  0;
 
-const THINK_NECK_X                 =  0.2133;  // neck pitch
-const THINK_NECK_Y                 =  0.6304;  // neck yaw
-const THINK_NECK_Z                 = -0.0841;  // neck roll
+const THINK_NECK_X                 =  0;
+const THINK_NECK_Y                 =  0;
+const THINK_NECK_Z                 =  0;
 
-const THINK_HEAD_X                 =  0.2496;  // head pitch
-const THINK_HEAD_Y                 =  0.2922;  // head yaw
-const THINK_HEAD_Z                 = -0.0557;  // head roll
+const THINK_HEAD_X                 =  0;
+const THINK_HEAD_Y                 =  0;
+const THINK_HEAD_Z                 =  0;
 
-const THINK_HIPS_X                 =  0.0139;  // hips pitch
-const THINK_HIPS_Y                 = -0.1036;  // hips yaw
-const THINK_HIPS_Z                 = -0.0268;  // hips roll
+const THINK_HIPS_X                 =  0;
+const THINK_HIPS_Y                 =  0;
+const THINK_HIPS_Z                 =  0;
 
-const THINK_SPINE_X                = -0.0356;  // spine pitch
-const THINK_SPINE_Y                =  0.0424;  // spine yaw
-const THINK_SPINE_Z                = -0.0019;  // spine roll
+const THINK_SPINE_X                =  0;
+const THINK_SPINE_Y                =  0;
+const THINK_SPINE_Z                =  0;
 
-const THINK_CHEST_X                = -0.0509;  // chest pitch
-const THINK_CHEST_Y                = -0.1243;  // chest yaw
-const THINK_CHEST_Z                = -0.0332;  // chest roll
+const THINK_CHEST_X                =  0;
+const THINK_CHEST_Y                =  0;
+const THINK_CHEST_Z                =  0;
 
 const THINK_MICRO_FREQ             =  1.15;
 const THINK_MICRO_AMP              =  0.04;
@@ -258,33 +280,34 @@ const WAVING_LH_X                  = _ARM_WV.lhX;
 const WAVING_LH_Y                  = _ARM_WV.lhY;
 const WAVING_LH_Z                  = _ARM_WV.lhZ;
 
-const WAVING_RSHOULDER_X           = -0.1763;
-const WAVING_RSHOULDER_Y           =  1.7880;
-const WAVING_RSHOULDER_Z           =  1.8644;
+// WAVE body — ZEROED for VRM 1.0 clean slate. Recalibrate via motion-lab.
+const WAVING_RSHOULDER_X           =  0;
+const WAVING_RSHOULDER_Y           =  0;
+const WAVING_RSHOULDER_Z           =  0;
 
-const WAVING_LSHOULDER_X           =  0.1932;
-const WAVING_LSHOULDER_Y           =  1.8013;
-const WAVING_LSHOULDER_Z           = -1.7348;
+const WAVING_LSHOULDER_X           =  0;
+const WAVING_LSHOULDER_Y           =  0;
+const WAVING_LSHOULDER_Z           =  0;
 
-const WAVING_NECK_X                =  0.0504;
-const WAVING_NECK_Y                =  0.0378;
-const WAVING_NECK_Z                =  0.0167;
+const WAVING_NECK_X                =  0;
+const WAVING_NECK_Y                =  0;
+const WAVING_NECK_Z                =  0;
 
-const WAVING_HEAD_X                =  0.0479;
-const WAVING_HEAD_Y                = -0.0162;
-const WAVING_HEAD_Z                = -0.0143;
+const WAVING_HEAD_X                =  0;
+const WAVING_HEAD_Y                =  0;
+const WAVING_HEAD_Z                =  0;
 
-const WAVING_HIPS_X                =  0.0034;
-const WAVING_HIPS_Y                = -0.0361;
-const WAVING_HIPS_Z                = -0.0047;
+const WAVING_HIPS_X                =  0;
+const WAVING_HIPS_Y                =  0;
+const WAVING_HIPS_Z                =  0;
 
-const WAVING_SPINE_X               = -0.0101;
-const WAVING_SPINE_Y               = -0.1476;
-const WAVING_SPINE_Z               =  0.0014;
+const WAVING_SPINE_X               =  0;
+const WAVING_SPINE_Y               =  0;
+const WAVING_SPINE_Z               =  0;
 
-const WAVING_CHEST_X               = -0.0150;
-const WAVING_CHEST_Y               =  0.0257;
-const WAVING_CHEST_Z               =  0.0003;
+const WAVING_CHEST_X               =  0;
+const WAVING_CHEST_Y               =  0;
+const WAVING_CHEST_Z               =  0;
 
 const WAVING_MICRO_FREQ            =  2.5;
 const WAVING_MICRO_AMP             =  0.08;
@@ -294,33 +317,34 @@ const _ARM_CL                      = composeArmTargets(ARM_OFFSETS.clap);
 //  CLAPPING — رأس/رقبة/كتف من VRMA؛ أذرع فرع clap = idle + ARM_OFFSETS.clap
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const CLAPPING_RSHOULDER_X         =  0.1569;
-const CLAPPING_RSHOULDER_Y         = -0.0095;
-const CLAPPING_RSHOULDER_Z         =  0.0705;
+// CLAP body — ZEROED for VRM 1.0 clean slate. Recalibrate via motion-lab.
+const CLAPPING_RSHOULDER_X         =  0;
+const CLAPPING_RSHOULDER_Y         =  0;
+const CLAPPING_RSHOULDER_Z         =  0;
 
-const CLAPPING_LSHOULDER_X         = -0.1969;
-const CLAPPING_LSHOULDER_Y         = -0.0178;
-const CLAPPING_LSHOULDER_Z         = -0.1558;
+const CLAPPING_LSHOULDER_X         =  0;
+const CLAPPING_LSHOULDER_Y         =  0;
+const CLAPPING_LSHOULDER_Z         =  0;
 
-const CLAPPING_NECK_X              = -0.0163;
-const CLAPPING_NECK_Y              = -0.1063;
-const CLAPPING_NECK_Z              = -0.0347;
+const CLAPPING_NECK_X              =  0;
+const CLAPPING_NECK_Y              =  0;
+const CLAPPING_NECK_Z              =  0;
 
-const CLAPPING_HEAD_X              = -0.0586;
-const CLAPPING_HEAD_Y              = -0.1733;
-const CLAPPING_HEAD_Z              = -0.0009;
+const CLAPPING_HEAD_X              =  0;
+const CLAPPING_HEAD_Y              =  0;
+const CLAPPING_HEAD_Z              =  0;
 
-const CLAPPING_HIPS_X              =  0.0135;
-const CLAPPING_HIPS_Y              =  0.0494;
-const CLAPPING_HIPS_Z              = -0.0084;
+const CLAPPING_HIPS_X              =  0;
+const CLAPPING_HIPS_Y              =  0;
+const CLAPPING_HIPS_Z              =  0;
 
-const CLAPPING_SPINE_X             = -0.0004;
-const CLAPPING_SPINE_Y             = -0.0089;
-const CLAPPING_SPINE_Z             =  0.0040;
+const CLAPPING_SPINE_X             =  0;
+const CLAPPING_SPINE_Y             =  0;
+const CLAPPING_SPINE_Z             =  0;
 
-const CLAPPING_CHEST_X             =  0.0151;
-const CLAPPING_CHEST_Y             =  0.0199;
-const CLAPPING_CHEST_Z             =  0.0067;
+const CLAPPING_CHEST_X             =  0;
+const CLAPPING_CHEST_Y             =  0;
+const CLAPPING_CHEST_Z             =  0;
 
 const CLAPPING_MICRO_FREQ          =  3.0;
 const CLAPPING_MICRO_AMP           =  0.06;
@@ -346,32 +370,32 @@ const AGREEING_LH_X                = _ARM_AG.lhX;
 const AGREEING_LH_Y                = _ARM_AG.lhY;
 const AGREEING_LH_Z                = _ARM_AG.lhZ;
 
-/** كتف/جذع خفيف فقط — القيم الضخمة السابقة (≈1.9 rad) كانت تصارع الأذرع وتُحسّ بالاهتزاز */
-const AGREEING_RSHOULDER_X         =  0.03;
-const AGREEING_RSHOULDER_Y         =  0.04;
-const AGREEING_RSHOULDER_Z         =  0.02;
+// AGREE body — ZEROED for VRM 1.0 clean slate. Recalibrate via motion-lab.
+const AGREEING_RSHOULDER_X         =  0;
+const AGREEING_RSHOULDER_Y         =  0;
+const AGREEING_RSHOULDER_Z         =  0;
 
-const AGREEING_LSHOULDER_X         = -0.03;
-const AGREEING_LSHOULDER_Y         =  0.04;
-const AGREEING_LSHOULDER_Z         = -0.02;
+const AGREEING_LSHOULDER_X         =  0;
+const AGREEING_LSHOULDER_Y         =  0;
+const AGREEING_LSHOULDER_Z         =  0;
 
-const AGREEING_NECK_X              =  0.035;
+const AGREEING_NECK_X              =  0;
 const AGREEING_NECK_Y              =  0;
 const AGREEING_NECK_Z              =  0;
 
-const AGREEING_HEAD_X              = -0.04;
+const AGREEING_HEAD_X              =  0;
 const AGREEING_HEAD_Y              =  0;
 const AGREEING_HEAD_Z              =  0;
 
 const AGREEING_HIPS_X              =  0;
 const AGREEING_HIPS_Y              =  0;
-const AGREEING_HIPS_Z              =  0.02;
+const AGREEING_HIPS_Z              =  0;
 
-const AGREEING_SPINE_X             =  0.02;
+const AGREEING_SPINE_X             =  0;
 const AGREEING_SPINE_Y             =  0;
-const AGREEING_SPINE_Z             =  0.012;
+const AGREEING_SPINE_Z             =  0;
 
-const AGREEING_CHEST_X             =  0.014;
+const AGREEING_CHEST_X             =  0;
 const AGREEING_CHEST_Y             =  0;
 const AGREEING_CHEST_Z             =  0;
 
@@ -1217,8 +1241,10 @@ export function VRMSkeletonManager({
   }, [vrm]);
 
   useEffect(() => {
-    // ── Pending gesture buffer: catches gestures that arrive before humanoid ready ─
-    const _pendingGestureRef: { detail: Record<string, unknown> | null } = { detail: null };
+    // ── Pending gesture queue: catches gestures that arrive before humanoid ready ─
+    // Changed from single-slot to queue so multiple startup gestures (greeting + think)
+    // are not silently dropped. Cap at 5 to prevent memory leaks if humanoid never loads.
+    const _pendingGestureRef: { queue: Record<string, unknown>[] } = { queue: [] };
 
     // ── PHASE 3: Gesture Behavior Dispatcher ──────────────────────────────────
     // Translates gesture intent into coupled head/gaze/blink events.
@@ -1352,19 +1378,22 @@ export function VRMSkeletonManager({
       gestureDurationRef.current = durationMs;
     };
 
-    // Replay any gesture that arrived before humanoid was ready
-    if (vrm.humanoid && _pendingGestureRef.detail) {
-      applyGestureDetail(_pendingGestureRef.detail);
-      _pendingGestureRef.detail = null;
+    // Replay all gestures that arrived before humanoid was ready
+    if (vrm.humanoid && _pendingGestureRef.queue.length > 0) {
+      for (const d of _pendingGestureRef.queue) applyGestureDetail(d);
+      _pendingGestureRef.queue.length = 0;
     }
 
     const onGesture = (e: Event) => {
+      // BLOCK_ALL_GESTURES: ignore all incoming gestures — avatar stays at ARM_IDLE
+      if (BLOCK_ALL_GESTURES) return;
       const detail = (e as CustomEvent<Record<string, unknown>>).detail;
       if (!vrm.humanoid) {
-        // Buffer the latest gesture — will be replayed when humanoid is available
-        _pendingGestureRef.detail = detail;
+        // Queue the gesture — replayed when humanoid is available (up to 5 slots)
+        _pendingGestureRef.queue.push(detail);
+        if (_pendingGestureRef.queue.length > 5) _pendingGestureRef.queue.shift();
         if (process.env.NODE_ENV === 'development') {
-          console.warn('[VRMSkeletonManager] ⏳ Gesture buffered (humanoid not ready):', detail?.gesture ?? detail?.type);
+          console.warn('[VRMSkeletonManager] ⏳ Gesture queued (humanoid not ready):', detail?.gesture ?? detail?.type, `[queue size: ${_pendingGestureRef.queue.length}]`);
         }
         return;
       }
@@ -1690,32 +1719,30 @@ export function VRMSkeletonManager({
        Math.sin((t - CHEST_PHASE_LAG_SEC) * breathRateB + 0.35) * 0.32 +
        noiseBreath((t - CHEST_PHASE_LAG_SEC) * 0.38, 2.2, 0) * 0.14) * breathAmpMul;
 
-    const spineBind = m.get('spine');
-    if (spineRef.current && spineBind) {
-      const ax = breath * BREATHE_SPINE_AMP;
-      SK_Q.setFromAxisAngle(SK_AXIS_X, ax);
-      SK_Q2.copy(spineBind).multiply(SK_Q);
-      spineRef.current.quaternion.slerp(SK_Q2, Math.min(1, safeDelta * 6));
+    // FREEZE_IDLE_ANIMATIONS: skip breathing & head sway for static pose calibration
+    const breathShoulderLift = 0;
+    const breathArmDrift = 0;
+    if (!FREEZE_IDLE_ANIMATIONS) {
+      const spineBind = m.get('spine');
+      if (spineRef.current && spineBind) {
+        const ax = breath * BREATHE_SPINE_AMP;
+        SK_Q.setFromAxisAngle(SK_AXIS_X, ax);
+        SK_Q2.copy(spineBind).multiply(SK_Q);
+        spineRef.current.quaternion.slerp(SK_Q2, Math.min(1, safeDelta * 6));
+      }
+      const chestBind = m.get('chest');
+      if (chestRef.current && chestBind) {
+        const ax = breatheChest * BREATHE_CHEST_AMP;
+        SK_Q.setFromAxisAngle(SK_AXIS_X, ax);
+        SK_Q2.copy(chestBind).multiply(SK_Q);
+        chestRef.current.quaternion.slerp(SK_Q2, Math.min(1, safeDelta * 5));
+      }
     }
-
-    const chestBind = m.get('chest');
-    if (chestRef.current && chestBind) {
-      const ax = breatheChest * BREATHE_CHEST_AMP;
-      SK_Q.setFromAxisAngle(SK_AXIS_X, ax);
-      SK_Q2.copy(chestBind).multiply(SK_Q);
-      chestRef.current.quaternion.slerp(SK_Q2, Math.min(1, safeDelta * 5));
-    }
-
-    // ★ BIO: Breathing → shoulder coupling ──────────────────────────────────
-    // Shoulders rise slightly during inhale (positive breath = inhale)
-    const breathShoulderLift = Math.max(0, breath) * BIO_BREATHE_SHLDR;
-    // Idle arm drift: arms float very slightly with breath cycle
-    const breathArmDrift = breath * BIO_BREATHE_ARM;
 
     // ─── Head / Neck noise sway ─────────────────────────────────────────────
-    const nx = noiseHead(t * HEAD_NOISE_SPEED, 0.3, 0) * HEAD_SWAY_AMP * procHeadNoise;
-    const ny = noiseHead(0.4, t * HEAD_NOISE_SPEED, 0) * HEAD_SWAY_AMP * procHeadNoise;
-    const nz = noiseHead(t * 0.41, 9.1, 0) * HEAD_SWAY_AMP * 0.35 * procHeadNoise;
+    const nx = FREEZE_IDLE_ANIMATIONS ? 0 : noiseHead(t * HEAD_NOISE_SPEED, 0.3, 0) * HEAD_SWAY_AMP * procHeadNoise;
+    const ny = FREEZE_IDLE_ANIMATIONS ? 0 : noiseHead(0.4, t * HEAD_NOISE_SPEED, 0) * HEAD_SWAY_AMP * procHeadNoise;
+    const nz = FREEZE_IDLE_ANIMATIONS ? 0 : noiseHead(t * 0.41, 9.1, 0) * HEAD_SWAY_AMP * 0.35 * procHeadNoise;
 
     // ★ BIO: Eye saccade — micro random gaze jumps every 2–5 s ───────────────
     if (saccadeNextMsRef.current === 0) {
@@ -2504,16 +2531,15 @@ export function VRMSkeletonManager({
         slerpArmEuler(
           ruaRef.current,
           (ic ? ic.ruaX : IDLE_RUA_X) + idleOffsetX,
-          0,
-          // ★ BIO: breathArmDrift makes arms float subtly with breath cycle
-          (ic ? ic.ruaZ : IDLE_RUA_Z) + talkNudge + idleOffsetZ + breathArmDrift,
+          IDLE_RUA_Y,   // ← was 0 — now reads ruaY for forward swing
+          (ic ? ic.ruaZ : IDLE_RUA_Z) + talkNudge + idleOffsetZ + (FREEZE_IDLE_ANIMATIONS ? 0 : breathArmDrift),
           1,
         );
         slerpArmEuler(
           luaRef.current,
           (ic ? ic.luaX : IDLE_LUA_X) + idleOffsetX,
-          0,
-          (ic ? ic.luaZ : IDLE_LUA_Z) + talkNudge * 0.88 - idleOffsetZ - breathArmDrift,
+          IDLE_LUA_Y,   // ← was 0 — now reads luaY for forward/outward swing
+          (ic ? ic.luaZ : IDLE_LUA_Z) + talkNudge * 0.88 - idleOffsetZ - (FREEZE_IDLE_ANIMATIONS ? 0 : breathArmDrift),
           1,
         );
         slerpArmEuler(rlaRef.current, ic ? ic.rlaX : IDLE_LOWER_ARM_X, 0, (ic ? ic.rlaZ : 0) + 0.02 + talkNudge * 0.35, 0.85);
