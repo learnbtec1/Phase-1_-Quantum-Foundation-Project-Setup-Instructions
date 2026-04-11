@@ -22,8 +22,6 @@ import { Z_LAYERS } from '@/lib/z-layers';
 import { useCogniAvatarDebug } from '@/hooks/useCogniAvatarDebug';
 import { useTTSWithVisemes } from '@/hooks/useTTSWithVisemes';
 import type { VisemeCue } from '@/app/avatar-agent/LipSyncManager';
-import { GestureCalibrator } from '@/app/avatar-agent/GestureCalibrator';
-
 type HistoryEntry = { role: 'user' | 'teacher'; text: string; emotion?: string };
 type MeUser = { name: string; email: string; role: string };
 
@@ -136,10 +134,18 @@ function clearStaleAvatarCache(): void {
   if (typeof window === 'undefined') return;
   const key = '__cogni_vrm_ver__';
   if (localStorage.getItem(key) === COGNI_VRM_VERSION) return;
-  // Stale version detected — wipe all known avatar/VRM storage keys
+  // Stale version detected — wipe ALL avatar/VRM/gesture calibration storage keys.
+  // IMPORTANT: gesture calibration keys (mouse-gesture-arm-offsets-v1,
+  // cogni:gestureProfile:*, cogni:calibrationMemory:*) were tuned for VRM 0.x
+  // and will cause distortion on VRM 1.0 if not cleared.
   const keysToRemove = [
     'avatarBindPose', 'vrmBindPose', 'cogniAvatarState', 'vrm_cache_v',
     'avatarFloorY', 'avatarStandY', 'cogni_foot_calib',
+    // VRM 0.x gesture calibration — must clear on VRM 1.0 upgrade
+    'mouse-gesture-arm-offsets-v1',
+    'cogni:gestureProfile:v3-fullbody',
+    'cogni:calibrationMemory:v1-feedback',
+    'cogni:gestureProfile',  // legacy key
   ];
   keysToRemove.forEach(k => localStorage.removeItem(k));
   // Wipe stale IndexedDB caches
@@ -147,9 +153,7 @@ function clearStaleAvatarCache(): void {
     try { indexedDB.deleteDatabase(db); } catch { /* ignore */ }
   });
   localStorage.setItem(key, COGNI_VRM_VERSION);
-  if (process.env.NODE_ENV === 'development') {
-    console.log('[AvatarAgentClient] Stale avatar cache cleared for', COGNI_VRM_VERSION);
-  }
+  console.log('[AvatarAgentClient] ✅ VRM 0.x gesture calibration cleared for VRM 1.0:', COGNI_VRM_VERSION);
 }
 
 export default function AvatarAgentClient({
@@ -860,18 +864,6 @@ export default function AvatarAgentClient({
                 >
                   تدريب BTEC
                 </button>
-                {[
-                  { label: '🚶 تمشي', cmd: () => emitAvatarCmd('avatar:walk', { duration: 8 }) },
-                  { label: '👋 رحب', cmd: () => emitAvatarCmd('avatar:gesture', { type: 'wave' }) },
-                  { label: '👏 صفق', cmd: () => emitAvatarCmd('avatar:play', { clip: 'clap' }) },
-                  { label: '🤔 فكر', cmd: () => emitAvatarCmd('avatar:play', { clip: 'think' }) },
-                  { label: '🪑 اجلس', cmd: () => emitAvatarCmd('avatar:sit', { sitting: true }) },
-                  { label: '🧍 قف',  cmd: () => emitAvatarCmd('avatar:sit', { sitting: false }) },
-                ].map(b => (
-                  <button key={b.label} onClick={b.cmd} className="px-4 py-1.5 bg-white/5 border border-white/10 rounded-full text-white text-[11px] hover:bg-white/20 transition-all">
-                    {b.label}
-                  </button>
-                ))}
               </div>
 
               <CameraPerception
@@ -963,20 +955,6 @@ export default function AvatarAgentClient({
           </div>
       </>
     </main>
-    {process.env.NODE_ENV === 'development' && (
-      <div
-        style={{
-          position: 'fixed',
-          inset: 0,
-          pointerEvents: 'none',
-          zIndex: 99_990,
-        }}
-      >
-        <div style={{ pointerEvents: 'auto' }}>
-          <GestureCalibrator />
-        </div>
-      </div>
-    )}
     </>
   );
 }

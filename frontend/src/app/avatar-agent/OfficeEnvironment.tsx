@@ -3,6 +3,7 @@
 import { useLayoutEffect } from 'react';
 import * as THREE from 'three';
 import { useLoader } from '@react-three/fiber';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { AVATAR_OFFICE_SCENE_DEFAULTS } from '@/config/avatar';
 
@@ -21,7 +22,13 @@ export function OfficeEnvironment({
   position = [...AVATAR_OFFICE_SCENE_DEFAULTS.officePosition],
   scale = AVATAR_OFFICE_SCENE_DEFAULTS.officeScale,
 }: OfficeEnvironmentProps) {
-  const gltf = useLoader(GLTFLoader, url);
+  const gltf = useLoader(GLTFLoader, url, (loader) => {
+    const dracoLoader = new DRACOLoader();
+    dracoLoader.setDecoderPath('/draco/');
+    // حزمة npm لـ three لا ترفع draco_decoder.wasm؛ نستخدم فك glTF عبر JS فقط.
+    dracoLoader.setDecoderConfig({ type: 'js' });
+    loader.setDRACOLoader(dracoLoader);
+  });
 
   useLayoutEffect(() => {
     gltf.scene.traverse((obj) => {
@@ -39,5 +46,7 @@ export function OfficeEnvironment({
     });
   }, [gltf]);
 
+  // No Y compensation — the original avatarPosition.Y (-0.14) was calibrated
+  // to match the visible floor of this GLB at scale=0.52.
   return <primitive object={gltf.scene} position={position} scale={scale} />;
 }

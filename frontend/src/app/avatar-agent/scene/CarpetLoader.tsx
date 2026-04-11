@@ -13,6 +13,7 @@ import { useEffect } from 'react';
 import { Box3, DoubleSide, Group, Mesh, MeshStandardMaterial, Object3D, Vector3 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { useThree } from '@react-three/fiber';
+import { OFFICE_GLB_PUBLIC_PATH } from '@/config/avatar';
 import { ROOM_BOUNDS } from './RoomShell';
 
 const FLOOR_Y  = ROOM_BOUNDS.floorY;
@@ -29,7 +30,7 @@ type CarpetLoaderProps = {
 };
 
 export function CarpetLoader({
-  url   = '/assets/iranian_wool_carpet.glb',
+  url   = OFFICE_GLB_PUBLIC_PATH,
   debug = false,
 }: CarpetLoaderProps) {
   const { scene } = useThree();

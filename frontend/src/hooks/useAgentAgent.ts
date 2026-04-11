@@ -968,7 +968,6 @@ export function useAgentAgent({
                       pitch: avatarBehavior.gazeTarget === 'think' ? -0.12 : 0,
                       durationMs: 2000 },
           }));
-          // ✅ Re-enabled — ARM_OFFSETS calibrated 2026-04-11
           void unifiedGestureEngine.play(avatarBehavior.gesture, { priority: PRIORITY.NORMAL });
           // Extra: if hidden weakness detected, trigger concerned look
           if (intuitionReading.hiddenWeakness && typeof window !== 'undefined') {
@@ -991,15 +990,14 @@ export function useAgentAgent({
             dispatchAvatar('avatar:emotion', { emotion: emoOverlay.emotion, strength: emoOverlay.strength });
           }
 
-          // 2. Strategy-based gesture (high priority) — from intuition engine
-          // Already dispatched in the strategy block above (unifiedGestureEngine.play)
-
-          // 3. Intent gesture hint — ✅ re-enabled
+          // 2. Strategy gesture: unifiedGestureEngine.play above
+          // 3. Intent gesture hint
           if (gestureHint) {
             setTimeout(() => {
-              window.dispatchEvent(new CustomEvent('avatar:gesture', {
-                detail: { gesture: gestureHint, duration: 2200 },
-              }));
+              void unifiedGestureEngine.play(gestureHint, {
+                priority: PRIORITY.NORMAL,
+                durationMs: 2200,
+              });
             }, 80);
           }
 
@@ -1043,7 +1041,6 @@ export function useAgentAgent({
           window.dispatchEvent(
             new CustomEvent('avatar:emotion', { detail: { emotion: 'thinking', strength: 0.6 } }),
           );
-          // ✅ Re-enabled — ARM_OFFSETS calibrated 2026-04-11
           void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.HIGH });
         }
         break;
@@ -1398,9 +1395,16 @@ export function useAgentAgent({
             JSON.stringify({ type: 'auth', token: accessToken, v: 1.1 }),
           );
           console.log('[useAgentAgent] ✅ Auth frame sent (first text frame, v=1.1)');
+        } else if (
+          typeof process !== 'undefined' &&
+          process.env.NEXT_PUBLIC_COGNI_WS_GUEST_OK === 'true'
+        ) {
+          console.debug(
+            '[useAgentAgent] No JWT in localStorage — guest WS (NEXT_PUBLIC_COGNI_WS_GUEST_OK=true; API needs COGNI_WS_ALLOW_ANONYMOUS=true).',
+          );
         } else {
           console.warn(
-            '[useAgentAgent] No cogni_access_token — /ws/agent may close with auth_required. Log in or set COGNI_WS_ALLOW_ANONYMOUS=true on the API.',
+            '[useAgentAgent] No cogni_access_token — /ws/agent may close with auth_required. Log in, set COGNI_WS_ALLOW_ANONYMOUS=true on the API, or set NEXT_PUBLIC_COGNI_WS_GUEST_OK=true in the frontend env to silence this in dev.',
           );
         }
       } catch (e) {

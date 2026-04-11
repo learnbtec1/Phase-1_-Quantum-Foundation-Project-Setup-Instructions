@@ -15,6 +15,7 @@ import {
 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { useThree } from '@react-three/fiber';
+import { OFFICE_GLB_PUBLIC_PATH } from '@/config/avatar';
 import { ROOM_BOUNDS } from './RoomShell';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -46,7 +47,7 @@ type CabinetLoaderProps = {
 };
 
 export function CabinetLoader({
-  url    = '/assets/3d_tv_white_cabinet_with_decoration.glb',
+  url    = OFFICE_GLB_PUBLIC_PATH,
   posX   = 2.3,
   posY   = FLOOR_Y,
   posZ   = -4.2,

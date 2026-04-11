@@ -6,6 +6,9 @@ import type { VRM } from '@pixiv/three-vrm';
 import type { PerformanceCue } from '@/ai/avatar/performanceTags';
 import { resolvePerformanceCue } from '@/ai/avatar/performanceTags';
 
+/** Official baseline: performance-tag arm gestures ON — see `my memory/shared/COGNI_GESTURE_BASELINE.md`. */
+const DISPATCH_PERFORMANCE_ARM_GESTURES = true;
+
 export type SetExpressionMorph = (
   em: NonNullable<VRM['expressionManager']>,
   key: string,
@@ -33,6 +36,7 @@ export function createAvatarPerformanceHandler(
       return;
     }
     if (resolved.kind === 'gesture') {
+      if (!DISPATCH_PERFORMANCE_ARM_GESTURES) return;
       const dm = cue.duration_ms;
       const durationSec =
         typeof dm === 'number' && Number.isFinite(dm) && dm > 0

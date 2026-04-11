@@ -15,6 +15,8 @@ export interface CoSpeechPlan {
   emphasis?: 'eyebrow' | 'question_tilt';
 }
 
+export const CO_SPEECH_GESTURES_DISABLED = false;
+
 const DIACRITICS = /[\u064B-\u065F\u0670]/g;
 
 function norm(s: string): string {
@@ -66,7 +68,8 @@ export function planCoSpeechGestures(
   text: string,
   audioDurationMs: number,
 ): CoSpeechPlan[] {
-  // ✅ Re-enabled — ARM_OFFSETS calibrated with verified axis map 2026-04-11
+  if (CO_SPEECH_GESTURES_DISABLED) return [];
+
   const raw = text || '';
   const n = norm(raw);
   const estFallback = estimateDialogueDurationMs(raw);

@@ -21,7 +21,14 @@
  * ╚══════════════════════════════════════════════════════════════════════╝
  */
 
-export type ArmGestureId = 'explain' | 'point' | 'think' | 'clap' | 'wave' | 'agree';
+export type ArmGestureId =
+  | 'explain'
+  | 'point'
+  | 'think'
+  | 'clap'
+  | 'wave'
+  | 'agree'
+  | 'test_elbow';
 
 /** Euler local YXZ — same order as slerpArmEuler in VRMSkeletonManager. */
 export type ArmEulerOffset = {
@@ -60,82 +67,83 @@ const ZERO: ArmEulerOffset = {
 };
 
 /**
- * ARM_OFFSETS — delta added to ARM_IDLE for each gesture.
- * composed_absolute = ARM_IDLE + offset
- *
- * All values use VERIFIED axis map (2026-04-11):
- *   Right: ruaY+ = fwd | ruaZ- = up | Left: luaY- = fwd | luaZ+ = up
+ * ARM_OFFSETS — deltas added to ARM_IDLE per gesture.
  */
 export const ARM_OFFSETS: Record<ArmGestureId, ArmEulerOffset> = {
-
-  // ── WAVE ─────────────────────────────────────────────────────────────────
-  // Right arm raised forward-outward, elbow bent — friendly greeting.
-  // absolute: ruaY=+0.8 (fwd), ruaZ=-0.5 (raised), rlaX=+0.30
   wave: {
-    ruaX:  0.0,  ruaY: +0.8,  ruaZ: -1.9,   // offset = target(-0.5) − idle(+1.4)
-    luaX:  0.0,  luaY:  0.0,  luaZ:  0.0,   // left stays at idle
-    rlaX: +0.22, rlaZ:  0.0,                 // elbow bent
-    llaX:  0.0,  llaZ:  0.0,
-    rhX:   0.0,  rhY:   0.0,  rhZ:   0.0,
-    lhX:   0.0,  lhY:   0.0,  lhZ:   0.0,
+    ...ZERO,
+    ruaX: -1.13,
+    ruaY: 0.22,
+    ruaZ: -0.89,
+    rlaX: 2.12,
+    rlaZ: -2.2,
+    rhY: 0.0982,
+    rhZ: -0.06496,
+    luaX: 0.95,
+    luaY: -0.12,
+    luaZ: 1.12,
+    llaX: 0.47,
+    llaZ: -0.16,
+    lhX: 0.2,
+    lhY: -0.03,
+    lhZ: -0.08,
   },
-
-  // ── POINT ────────────────────────────────────────────────────────────────
-  // Right arm fully extended forward, nearly horizontal — pointing at student/board.
-  // absolute: ruaY=+1.5, ruaZ=+0.1
   point: {
-    ruaX:  0.0,  ruaY: +1.5,  ruaZ: -1.3,   // offset = target(+0.1) − idle(+1.4)
-    luaX:  0.0,  luaY:  0.0,  luaZ:  0.0,
-    rlaX: +0.02, rlaZ:  0.0,                 // nearly straight (pointing)
-    llaX:  0.0,  llaZ:  0.0,
-    rhX:   0.0,  rhY:   0.0,  rhZ:   0.0,
-    lhX:   0.0,  lhY:   0.0,  lhZ:   0.0,
+    ...ZERO,
+    ruaY: +1.5,   // full forward extension
   },
-
-  // ── THINK ────────────────────────────────────────────────────────────────
-  // Right hand raised toward chin/face, elbow bent — thoughtful pose.
-  // absolute: ruaY=+0.5, ruaZ=0.0 (T-pose level), rlaX=+0.80
   think: {
-    ruaX:  0.0,  ruaY: +0.5,  ruaZ: -1.4,   // offset = target(0.0) − idle(+1.4)
-    luaX:  0.0,  luaY:  0.0,  luaZ: +0.4,   // left slight raise: -1.0−(−1.4)=+0.4
-    rlaX: +0.72, rlaZ:  0.0,                 // strong elbow bend toward chin
-    llaX:  0.0,  llaZ:  0.0,
-    rhX:   0.0,  rhY:   0.0,  rhZ:   0.0,
-    lhX:   0.0,  lhY:   0.0,  lhZ:   0.0,
+    ...ZERO,
+    ruaY: +0.5,   // forward (clear vs idle)
+    ruaZ: -0.4,   // slight raise — was −0.3; stronger delta for visible procedural think
   },
-
-  // ── EXPLAIN ──────────────────────────────────────────────────────────────
-  // Both arms forward at chest level, open palms — presenting/explaining.
-  // Right: abs ruaY=+0.8, ruaZ=+0.2 | Left: abs luaY=-0.8, luaZ=-0.2
   explain: {
-    ruaX:  0.0,  ruaY: +0.8,  ruaZ: -1.2,   // right fwd: offset = +0.2−1.4
-    luaX:  0.0,  luaY: -0.8,  luaZ: +1.2,   // left fwd:  offset = −0.2−(−1.4)
-    rlaX: +0.07, rlaZ:  0.0,                 // slight forearm extension
-    llaX: +0.07, llaZ:  0.0,
-    rhX:   0.0,  rhY:   0.0,  rhZ:   0.0,
-    lhX:   0.0,  lhY:   0.0,  lhZ:   0.0,
+    ...ZERO,
+    ruaY: +0.8,   // right arm forward
+    luaY: -0.8,   // left arm forward (mirrored: -Y)
   },
-
-  // ── CLAP ─────────────────────────────────────────────────────────────────
-  // Both hands meeting in front of chest — celebration/applause.
-  // Right: abs ruaY=+1.2, ruaZ=0.0 | Left: abs luaY=-1.2, luaZ=0.0
   clap: {
-    ruaX:  0.0,  ruaY: +1.2,  ruaZ: -1.4,   // offset = 0.0−1.4
-    luaX:  0.0,  luaY: -1.2,  luaZ: +1.4,   // offset = 0.0−(−1.4)
-    rlaX: +0.32, rlaZ:  0.0,                 // elbows bent
-    llaX: +0.32, llaZ:  0.0,
-    rhX:   0.0,  rhY:   0.0,  rhZ:   0.0,
-    lhX:   0.0,  lhY:   0.0,  lhZ:   0.0,
+    ...ZERO,
+    ruaY: +1.2,   // right toward center
+    luaY: -1.2,   // left toward center
   },
-
-  // ── AGREE ────────────────────────────────────────────────────────────────
-  // Subtle affirmation — arms mostly at idle, head nods (handled by VRMSkeletonManager).
   agree: {
     ...ZERO,
-    ruaY: +0.1,   // very slight right arm forward
-    luaY: -0.1,   // mirrored left
+    ruaY: +0.2,   // slight forward nod (no neckY to avoid type errors)
   },
+  /** تشخيص: ثني كوع واضح + لف ساعد — للتحقق من تطبيق rlaZ/rlaX عبر السلسلة الإجرائية */
+  test_elbow: {
+    ...ZERO,
+    ruaZ: -0.7,
+    ruaY: 0.5,
+    rlaZ: -1.8,
+    rlaX: 0.5,
+    rhY: 0.2,
+  },
+};
 
+/** Which local Euler channel receives procedural oscillation (YXZ / slerpArmEuler). */
+export type GestureOscillationBone = 'rhZ' | 'rhY' | 'ruaZ' | 'luaZ';
+
+/** Parametric sine oscillation layered on top of static gesture targets (see VRMSkeletonManager). */
+export type GestureOscillationConfig = {
+  bone: GestureOscillationBone;
+  /** Peak deviation from the static target (radians). */
+  amplitude: number;
+  /** Full cycles per second (Hz). */
+  frequency: number;
+};
+
+/**
+ * Per-gesture wrist/arm oscillation (optional). Static `ARM_OFFSETS` stay unchanged;
+ * VRMSkeletonManager adds `sin(t * 2πf) * amplitude` to the listed bone while the gesture runs.
+ */
+export const GESTURE_OSCILLATIONS: Partial<Record<ArmGestureId, GestureOscillationConfig>> = {
+  wave: {
+    bone: 'rhZ',
+    amplitude: 0.35,
+    frequency: 2.5,
+  },
 };
 
 export function composeArmTargets(offset: ArmEulerOffset): ArmEulerOffset {

@@ -295,6 +295,11 @@ export default function LipSyncManager({
     if (audio && !Number.isNaN(audio.currentTime) && audio.currentTime > 0) {
       tSec = audio.currentTime;
     } else {
+      // Fallback: use elapsed time since speak:start anchor.
+      // In dev: warn if this happens when viseme cues are present (suggests timing gap).
+      if (process.env.NODE_ENV === 'development' && queue.length > 0) {
+        console.warn('[LipSyncManager] Using perf.now() anchor — audio.currentTime not ready yet. Viseme sync may drift on first syllable.');
+      }
       tSec = (nowMs - speakAnchorMsRef.current) / 1000;
     }
 

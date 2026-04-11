@@ -655,6 +655,9 @@ def _build_ssml(
             ssml_parts.append(_micro + f'<break time="{pause_ms}ms"/>')
 
     body = '\n'.join(ssml_parts)
+    # Azure rejects / cancels when inner prosody is empty (0 audio) — e.g. punctuation-only cleanup.
+    if not body.strip():
+        body = _plain_chunk_to_ssml(_xml_escape((text or "").strip() or "…"))
 
     # Wrap body in persona pitch prosody (skip wrapper when pitch is neutral)
     if persona_pitch and persona_pitch != '+0%':

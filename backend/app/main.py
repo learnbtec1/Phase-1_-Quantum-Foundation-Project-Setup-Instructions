@@ -1,3 +1,4 @@
+# app/main.py
 """
 Main FastAPI app for EDUVERSE.
 """
@@ -17,6 +18,14 @@ import asyncio
 import logging
 import time as _time
 
+# ChromaDB telemetry PostHog hook can error on some dependency pairs (noisy ERROR in logs).
+for _ch_log in (
+    "chromadb.telemetry.product.posthog",
+    "chromadb.telemetry.product",
+    "chromadb.telemetry",
+):
+    logging.getLogger(_ch_log).disabled = True
+
 # Force UTF-8 on stdout/stderr — prevents charmap/cp1252 errors on Windows when logging Arabic text
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -27,6 +36,38 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sentry initialization (must happen before creating the FastAPI app)
+# Keep backend boot resilient: if sentry_sdk is not installed, continue normally.
+try:
+    import sentry_sdk  # type: ignore
+    from sentry_sdk.integrations.fastapi import FastApiIntegration  # type: ignore
+    from sentry_sdk.integrations.starlette import StarletteIntegration  # type: ignore
+except Exception:
+    sentry_sdk = None  # type: ignore
+    FastApiIntegration = None  # type: ignore
+    StarletteIntegration = None  # type: ignore
+    logging.warning("sentry_sdk not installed — backend continues without Sentry")
+
+SENTRY_DSN = os.getenv("SENTRY_DSN")
+if SENTRY_DSN and sentry_sdk is not None:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.2")),
+        send_default_pii=os.getenv("SENTRY_SEND_PII", "false").lower() == "true",
+        environment=os.getenv("ENVIRONMENT", "development"),
+        integrations=[
+            StarletteIntegration(),
+            FastApiIntegration(),
+        ],
+    )
+    logging.info("Sentry initialized for backend")
+elif SENTRY_DSN and sentry_sdk is None:
+    logging.warning("SENTRY_DSN is set but sentry_sdk is missing — Sentry disabled")
+else:
+    logging.warning("SENTRY_DSN not set — error monitoring disabled")
+# ──────────────────────────────────────────────────────────────────────────────
 
 from app.api.v1.endpoints.assessment import router as assessment_router
 from app.api.v1.endpoints.chat import router as chat_router
@@ -337,26 +378,3 @@ async def api_health():
         "last_check_ts": _tts_health.get("ts") or None,
         "tts_counters":  tts_snap,
     }
-
-
-@app.get("/")
-async def health_check():
-    """Health‑check / status endpoint consumed by the Next.js frontend."""
-    if settings.is_production:
-        return {"status": "ok"}
-    try:
-        from app.archive.forensic_engine import MODEL_NAME  # type: ignore
-    except ImportError:
-        MODEL_NAME = "gpt-4o"
-    return {
-        "status": "Online",
-        "engine": f"EDUVERSE Forensic Engine v4.0 ({MODEL_NAME})",
-        "model": MODEL_NAME,
-        "system": "Connected to Next.js Frontend",
-    }
-
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)

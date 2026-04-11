@@ -9,7 +9,7 @@
  */
 
 /** Office GLB under `public/models/office/` — must be a browser-safe URL, never a Windows path. */
-export const OFFICE_GLB_PUBLIC_PATH = '/models/office/office_lite.glb' as const;
+export const OFFICE_GLB_PUBLIC_PATH = '/models/office/office.glb' as const;
 
 /**
  * Default placement for `office_lite.glb` + VRM in `AvatarCanvas` (metres, Y-up).
@@ -20,12 +20,16 @@ export const OFFICE_GLB_PUBLIC_PATH = '/models/office/office_lite.glb' as const;
  * Override fine-tuning with `NEXT_PUBLIC_AVATAR_STAND_Y_OFFSET` (added to avatar Y).
  */
 export const AVATAR_OFFICE_SCENE_DEFAULTS = {
-  officePosition: [0, 0, 0.42] as [number, number, number],
-  officeScale: 0.52,
-  avatarPosition: [0, -0.14, 0.26] as [number, number, number],
-  avatarScale: 0.88,
-  cameraPosition: [0, 1.34, -2.62] as [number, number, number],
-  orbitTarget: [0, 1.18, 0.2] as [number, number, number],
+  // office.glb: floor at Y≈0.30.
+  officePosition: [0, 0, 0.5] as [number, number, number],
+  officeScale: 1.0,
+  // Avatar at desk (Z=-0.7). Faces +X (toward desk) via AVATAR_GROUP_ROTATION_Y=-π/2.
+  // Y=0.30 = floor level (simulates seated-at-desk position from camera angle).
+  avatarPosition: [0, 0.30, -0.7] as [number, number, number],
+  avatarScale: 1.0,
+  // Camera on -X side (opposite to desk on +X side) — filming the avatar's face.
+  cameraPosition: [-3.2, 1.55, -0.7] as [number, number, number],
+  orbitTarget: [0, 1.25, -0.7] as [number, number, number],
 } as const;
 
 /**
@@ -57,14 +61,22 @@ const _envVrm = (
     : ''
 );
 
-/** Tried in order after `pickVrmUrl()` inside AvatarCanvas (deduped). */
+/**
+ * CANONICAL AVATAR: 195_Uta01/cogni.vrm — VRM 1.0 (converted from VRM 0.x via UniVRM in Unity 2022.3.22f1)
+ * - 16 preset expressions (aa/ih/oh/ou/ee + happy/angry/sad/relaxed + blink/blinkLeft/blinkRight + look*)
+ * - 54 humanoid bones (includes leftEye/rightEye + leftThumbMetacarpal/rightThumbMetacarpal)
+ * - VRM 1.0: no rotateVRM0 needed, no combineSkeletons, no VRM 0.x workarounds
+ * All old models (195_Uta01.vrm, avaturn_avatar.vrm) are DEPRECATED.
+ */
 export const VRM_FALLBACKS: readonly string[] = [
   ...(_envVrm ? [_envVrm] : []),
-  '/models/avaturn_avatar.vrm', // نموذج Avaturn (VRM 1.0) — احتياطي قبل cogni
-  '/models/cogni.vrm',
+  '/models/195_Uta01/cogni.vrm',  // PRIMARY — VRM 1.0 canonical model
 ];
 
-/** Returns the primary VRM URL. All components must call this — never hardcode paths. */
+/**
+ * Returns the primary VRM URL — always points to the canonical VRM 1.0 model.
+ * ALL components must call this — NEVER hardcode paths.
+ */
 export function pickVrmUrl(): string {
   if (
     typeof process !== 'undefined' &&
@@ -72,10 +84,10 @@ export function pickVrmUrl(): string {
   ) {
     return normalizePublicModelUrl(
       process.env.NEXT_PUBLIC_AVATAR_VRM_URL.trim(),
-      '/models/cogni.vrm',
+      '/models/195_Uta01/cogni.vrm',
     );
   }
-  return '/models/cogni.vrm';
+  return '/models/195_Uta01/cogni.vrm';
 }
 
 // ── Feature flags ─────────────────────────────────────────────────────────────
@@ -89,6 +101,15 @@ export const USE_IK =
 export const USE_CAMERA_GAZE =
   typeof process !== 'undefined' &&
   process.env.NEXT_PUBLIC_USE_CAMERA_GAZE === 'true';
+
+/**
+ * Level 6 — single-authority intent pipeline: AgentDirector stops `avatar:gesture` / `avatar:emotion`;
+ * `BehaviorBrainHost` owns motion side-effects. Enable with `NEXT_PUBLIC_LEVEL6_UNIFIED_BEHAVIOR=true`.
+ */
+export const LEVEL6_UNIFIED_BEHAVIOR =
+  typeof process !== 'undefined' &&
+  (process.env.NEXT_PUBLIC_LEVEL6_UNIFIED_BEHAVIOR === 'true' ||
+    process.env.NEXT_PUBLIC_LEVEL6_UNIFIED_BEHAVIOR === '1');
 
 /** Viseme prediction (lookahead). Default OFF — may cause mouth-pop artefacts. */
 export const USE_VISEME_PREDICT =
@@ -109,8 +130,19 @@ export const ENABLE_MIME_MODE: boolean =
  */
 export const ENABLE_PROCEDURAL_LIFE = true as boolean;
 
-/** Root Y rotation (rad) so the avatar faces the camera — π if the model exports facing +Z. */
-export const FORWARD_ROTATION_Y = Math.PI;
+/**
+ * VRM 1.0 faces +Z by default. Camera is on −Z looking toward +Z.
+ * rotateVRM0() is NOT called for VRM 1.0 models — they already face the right way.
+ * This constant is kept for the motion lab VrmPreview group (set to 0 = no extra rotation).
+ */
+export const FORWARD_ROTATION_Y = 0;
+
+/**
+ * Additional Y rotation on AvatarRoot group (on top of rotateVRM0's π).
+ * -Math.PI/2 → avatar faces +X direction (toward desk on right side).
+ * Camera placed on -X side (opposite to desk) to film the face.
+ */
+export const AVATAR_GROUP_ROTATION_Y = -Math.PI / 2;
 
 /** Ignore duplicate WS speech audio starts within this window (ms) — reduces echo from double dispatch. */
 export const AUDIO_DEDUP_WINDOW_MS = 300 as const;
@@ -343,8 +375,8 @@ export function readRugWalkSurfaceYExtraEnv(): number {
 export type ActiveEnvKey = 'DEFAULT' | 'OFFICE';
 
 /**
- * Registry for floor GLB + physics alignment. DEFAULT keeps legacy `/assets/carpet.glb` + AABB-driven floorY.
- * OFFICE uses fixed `physicsY` + `rugExtra` (no carpet AABB) so Rapier/V121 match the configured walk plane.
+ * Registry for floor GLB + physics alignment.
+ * DEFAULT and OFFICE both use the shipped office shell (`/models/office/office.glb`); legacy carpet GLBs were archived.
  */
 export const ENV_MODELS: Record<
   ActiveEnvKey,
@@ -357,9 +389,9 @@ export const ENV_MODELS: Record<
   }
 > = {
   DEFAULT: {
-    path: '/assets/carpet.glb',
-    physicsY: -2.95,
-    rugExtra: 0,
+    path: OFFICE_GLB_PUBLIC_PATH,
+    physicsY: 0,
+    rugExtra: 0.05,
   },
   OFFICE: {
     path: OFFICE_GLB_PUBLIC_PATH,
@@ -369,8 +401,8 @@ export const ENV_MODELS: Record<
 };
 
 /**
- * Build-time: `NEXT_PUBLIC_ACTIVE_ENV` → DEFAULT (سجادة `/assets/carpet.glb`) أو OFFICE (`OFFICE_GLB_PUBLIC_PATH`).
- * فارغ أو غير معروف → OFFICE (سلوك سابق).
+ * Build-time: `NEXT_PUBLIC_ACTIVE_ENV` → DEFAULT | OFFICE (كلاهما يستخدمان `OFFICE_GLB_PUBLIC_PATH` بعد أرشفة السجادات).
+ * فارغ أو غير معروف → OFFICE.
  */
 const ACTIVE_ENV_FROM_BUILD = (() => {
   if (typeof process === 'undefined') return '';

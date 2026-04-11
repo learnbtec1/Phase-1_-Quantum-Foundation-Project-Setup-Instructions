@@ -394,6 +394,8 @@ async def agent_ws(websocket: WebSocket):
     )
 
     heartbeat_task: Optional[asyncio.Task[Any]] = None
+    # Stops nested `send()` / heartbeat once the socket is closing or dead (avoids log spam).
+    _ws_connection_dead = False
 
     # Per-connection conversation history (last 6 turns = 3 exchanges)
     history: List[dict] = []
@@ -490,20 +492,38 @@ async def agent_ws(websocket: WebSocket):
     await _analytics.session_start(persona_level=persona_level)
 
     async def send(payload: dict) -> None:
+        nonlocal _ws_connection_dead
+        if _ws_connection_dead:
+            return
         payload.setdefault("v", 1.1)  # stamp all outgoing frames with WS protocol v1.1
         try:
             await websocket.send_text(json.dumps(payload, ensure_ascii=False))
             logger.debug("[WS_FRAME_SENT] type=%s id=%s", payload.get("type"), payload.get("id"))
-        except RuntimeError as e:
-            logger.warning("[WS WARNING] Tried to send on a closed websocket: %s", e)
         except Exception as e:
-            logger.warning("WS send error: %s", e)
+            _ws_connection_dead = True
+            err_low = str(e).lower()
+            benign = isinstance(e, WebSocketDisconnect) or any(
+                p in err_low
+                for p in (
+                    "websocket.send",
+                    "response already completed",
+                    "close message has been sent",
+                    "disconnect",
+                    "closed websocket",
+                )
+            )
+            if benign:
+                logger.debug("[AgentWS] send skipped (socket closed): %s", e)
+            else:
+                logger.warning("WS send error: %s", e)
 
     async def _heartbeat_sender() -> None:
         """Send a heartbeat frame every HEARTBEAT_INTERVAL_SEC seconds."""
         try:
             while True:
                 await asyncio.sleep(HEARTBEAT_INTERVAL_SEC)
+                if _ws_connection_dead:
+                    return
                 await send({"v": 1.1, "id": "hb", "type": "heartbeat"})
         except Exception as _hb_end:
             logger.debug("%s heartbeat sender ended: %s", _ws_ctx(session_id), _hb_end)
@@ -2327,6 +2347,7 @@ async def agent_ws(websocket: WebSocket):
                 logger.debug("[AgentWS] Unknown message type: %s", msg_type)
 
     except WebSocketDisconnect:
+        _ws_connection_dead = True
         logger.info(
             "[AgentWS] disconnected | req_id=%s user_id=%s client=%s",
             ws_req_id,
@@ -2345,6 +2366,7 @@ async def agent_ws(websocket: WebSocket):
                 _close_after_err,
             )
     finally:
+        _ws_connection_dead = True
         _persist_scope = user_uuid or linked_eval_uuid
         if _persist_scope:
             try:
@@ -2406,7 +2428,13 @@ async def agent_ws(websocket: WebSocket):
                 )
         if heartbeat_task is not None and not heartbeat_task.done():
             heartbeat_task.cancel()
-            logger.info("[AgentWS] Heartbeat ghost task successfully cancelled.")
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as _hb_join:
+                logger.debug("[AgentWS] heartbeat task join: %s", _hb_join)
+            logger.debug("[AgentWS] heartbeat task cancelled")
         try:
             await _analytics.session_end()
         except Exception as _analytics_end_exc:

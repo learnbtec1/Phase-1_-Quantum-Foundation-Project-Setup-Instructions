@@ -38,3 +38,11 @@ frontend/public/assets/*.exe
 *.winmd
 # Too large for GitHub (>100MB); host separately or use Git LFS
 frontend/public/assets/blue_carpet.glb
+
+# Never commit a Unity project under public (archive under E:\BTEC\archef instead)
+frontend/public/models/195_Uta01/Assets/
+frontend/public/models/195_Uta01/Library/
+frontend/public/models/195_Uta01/Logs/
+frontend/public/models/195_Uta01/Packages/
+frontend/public/models/195_Uta01/ProjectSettings/
+frontend/public/models/195_Uta01/UserSettings/

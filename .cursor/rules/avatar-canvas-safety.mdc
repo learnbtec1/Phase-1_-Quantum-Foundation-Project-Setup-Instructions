@@ -1,0 +1,95 @@
+---
+description: Prevents avatar black screen and null.addEventListener regressions. Apply when editing any avatar-related file.
+globs:
+  - frontend/src/app/avatar-agent/AvatarCanvas.tsx
+  - frontend/src/app/avatar-agent/VRMSkeletonManager.tsx
+  - frontend/src/app/avatar-agent/VRMAPlayer.tsx
+  - frontend/next.config.js
+  - frontend/src/config/avatar.ts
+alwaysApply: false
+---
+
+# Avatar Canvas Safety Rules
+
+## CRITICAL: Incident History
+
+This project has suffered **repeated black-screen / avatar-disappear** incidents from:
+1. `null.addEventListener` — Canvas mounted before outer div was in DOM (React 19 + Turbopack async configure)
+2. Static import of VRMAPlayer caused Turbopack build failure → black screen
+3. VRM model path 404 (`cogni.vrm` missing) → silent load failure → empty canvas
+
+## NON-NEGOTIABLE RULES
+
+### Rule 1 — Canvas Mount Guard (NEVER remove)
+`AvatarCanvas.tsx` MUST keep this exact pattern:
+```tsx
+const containerRef = useRef<HTMLDivElement>(null);
+const [domReady, setDomReady] = useState(false);
+useEffect(() => { setDomReady(true); }, []);
+// ...
+<div ref={containerRef}>
+  {domReady && <Canvas eventSource={containerRef as React.RefObject<HTMLElement>}>
+```
+- `domReady` gate ensures Canvas never mounts before DOM is ready
+- `useRef` not `useState` for the container (avoids re-render race)
+- `useEffect` runs only after DOM insert — guaranteed non-null
+
+### Rule 2 — VRMAPlayer (NEVER static import)
+```tsx
+// ❌ FORBIDDEN — causes Turbopack build failure → black screen
+import { VRMAPlayer } from './VRMAPlayer';
+
+// ✅ REQUIRED — dynamic import with catch, avatar renders even if VRMA fails
+const VRMAPlayerDynamic = dynamic(
+  () => import('./VRMAPlayer')
+    .then((m) => ({ default: m.VRMAPlayer }))
+    .catch(() => ({ default: () => null })),
+  { ssr: false },
+);
+```
+
+### Rule 3 — VRM Fallback Chain (NEVER remove)
+```tsx
+// Always try multiple paths; never fail hard on single URL
+const loadChain = [vrmUrl, ...VRM_FALLBACKS, '/models/avaturn_avatar.vrm', '/models/cogni.vrm']
+  .filter(Boolean)
+  .filter((u, i, arr) => arr.indexOf(u) === i);
+// tryLoadAt(0) tries each in order on failure
+```
+
+### Rule 4 — Primary VRM URL
+- `.env.local`: `NEXT_PUBLIC_AVATAR_VRM_URL=/models/avaturn_avatar.vrm`
+- `/models/cogni.vrm` is **404** on this machine — DO NOT set as primary
+- `/models/avaturn_avatar.vrm` returns **200** — always use this
+
+## MANDATORY PRE-CHECK (before any avatar edit)
+
+Run and confirm ALL of these before starting:
+```
+1. HTTP /models/avaturn_avatar.vrm → 200 ✅
+2. HTTP /models/cogni.vrm → may be 404 (not primary)
+3. AvatarCanvas.tsx contains: domReady gate, containerRef, VRMAPlayerDynamic
+4. NEXT_PUBLIC_AVATAR_VRM_URL=/models/avaturn_avatar.vrm in .env.local
+```
+
+## SAFE CHANGE PROTOCOL
+
+1. Make ONE file change at a time
+2. Run `npx tsc --noEmit --skipLibCheck` — must pass
+3. Confirm avatar visible (no black screen) before next change
+4. If avatar disappears: immediately revert last change, report exact console error
+
+## ROLLBACK COMMAND
+
+```bash
+git checkout HEAD -- frontend/src/app/avatar-agent/AvatarCanvas.tsx
+```
+
+## SCOPE LIMITS
+
+When editing avatar files, DO NOT also change:
+- `next.config.js` transpilePackages
+- `package.json` dependencies
+- Other unrelated features
+
+One concern per PR/session.

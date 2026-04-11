@@ -40,6 +40,24 @@ const EXPR_KEYS = ['happy', 'sad', 'angry', 'surprised', 'relaxed'] as const;
 type ExprKey = (typeof EXPR_KEYS)[number];
 
 /**
+ * VRM 1.0 canonical expression names (cogni.vrm — converted from 195_Uta01 via UniVRM).
+ * three-vrm v3.5.1 maps VRM0 presets → VRM1 names internally, so we use VRM1 names directly.
+ * No VRM 0.x fallbacks needed — model is canonical VRM 1.0.
+ *
+ * Available in cogni.vrm: happy, angry, sad, relaxed, aa, ih, oh, ou, ee,
+ *   blink, blinkLeft, blinkRight, lookUp, lookDown, lookLeft, lookRight, neutral
+ * NOTE: 'surprised' not present as preset — use 'happy+blinkLeft+blinkRight' composite if needed.
+ */
+const EXPR_DUAL_NAMES: Record<string, readonly string[]> = {
+  happy:     ['happy'],
+  sad:       ['sad'],
+  angry:     ['angry'],
+  surprised: ['happy'],    // VRM 1.0 cogni.vrm has no 'surprised' preset → map to happy
+  relaxed:   ['relaxed'],
+  blink:     ['blink'],
+} as const;
+
+/**
  * عند الدخول في عاطفة: دفعة تعبير قصيرة تذوب (ومضة سياقية).
  * القيم نسبية؛ تُضرب بـ intensity الواردة من الحدث.
  */
@@ -71,23 +89,63 @@ const _eyeWorldScratch = new THREE.Vector3();
 const _avatarWorldScratch = new THREE.Vector3();
 const _toCamScratch = new THREE.Vector3();
 
+/**
+ * Try the canonical name first, then all dual-alias alternatives.
+ * Returns the first non-zero value found, or 0 if none respond.
+ */
 function exprGet(em: VRM['expressionManager'], name: string): number {
   if (!em) return 0;
-  try {
-    const g = (em as { getValue?: (n: string) => number }).getValue;
-    if (typeof g === 'function') return g.call(em, name) ?? 0;
-  } catch {
-    /* */
+  const g = (em as { getValue?: (n: string) => number }).getValue;
+  if (typeof g !== 'function') return 0;
+  const aliases = EXPR_DUAL_NAMES[name] ?? [name];
+  for (const alias of aliases) {
+    try {
+      const v = g.call(em, alias);
+      if (typeof v === 'number' && v > 0) return v;
+    } catch { /* morph missing */ }
   }
   return 0;
 }
 
+/**
+ * Try the canonical name first, then all dual-alias alternatives.
+ * Sets the value on the FIRST alias that succeeds (no error thrown).
+ * Silently skips if all aliases are missing (avoids console spam).
+ */
 function exprSet(em: NonNullable<VRM['expressionManager']>, name: string, v: number) {
-  try {
-    em.setValue(name as never, v);
-  } catch {
-    /* morph missing */
+  const aliases = EXPR_DUAL_NAMES[name] ?? [name];
+  for (const alias of aliases) {
+    try {
+      em.setValue(alias as never, v);
+      return; // success — stop after first working alias
+    } catch { /* try next alias */ }
   }
+}
+
+/** One-time audit flag — runs expression probe on first VRM load */
+let _exprAuditDone = false;
+
+/**
+ * One-time audit for VRM 1.0 expressions (cogni.vrm).
+ * Expected: happy✅ sad✅ angry✅ relaxed✅ blink✅ blinkLeft✅ blinkRight✅
+ *           aa✅ ih✅ oh✅ ou✅ ee✅ lookUp✅ lookDown✅ lookLeft✅ lookRight✅
+ * Not present: surprised (no preset in this model)
+ */
+function runExprAudit(em: NonNullable<VRM['expressionManager']>): void {
+  if (_exprAuditDone || process.env.NODE_ENV !== 'development') return;
+  _exprAuditDone = true;
+  const probe = (n: string): string => {
+    try {
+      (em as { getValue?: (n: string) => number }).getValue?.call(em, n);
+      return '✅';
+    } catch { return '❌'; }
+  };
+  const audit: Record<string, string> = {};
+  const all = ['happy','sad','angry','relaxed','blink','blinkLeft','blinkRight',
+               'aa','ih','oh','ou','ee','lookUp','lookDown','lookLeft','lookRight','neutral'];
+  for (const n of all) audit[n] = probe(n);
+  console.table(audit);
+  console.log('[AnimationController] VRM 1.0 expression audit complete.');
 }
 
 export type AnimationControllerProps = {
@@ -252,6 +310,9 @@ export function AnimationController({
     const t = state.clock.elapsedTime;
     const nowMs = performance.now();
     const em = vrm.expressionManager;
+
+    // One-time expression audit (dev only) — reveals which VRM alias names work
+    runExprAudit(em);
 
     const phaseTalking = isTalkingRef.current;
     const skGesture =

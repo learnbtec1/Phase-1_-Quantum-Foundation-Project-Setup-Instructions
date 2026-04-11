@@ -1,4 +1,4 @@
-﻿# Shared Handoff
+# Shared Handoff
 
 ## ✅ VERIFIED ARM AXIS MAP — cogni.vrm VRM 1.0 (confirmed 2026-04-11)
 
@@ -21,18 +21,12 @@ luaZ: +1.3  → left arm raised UP ✅
 rlaX: +0.25 → right elbow slight bend ✅
 ```
 
-### Gesture System Status (2026-04-11)
-- `BLOCK_ALL_GESTURES = true` in VRMSkeletonManager — no gesture fires
-- `FREEZE_IDLE_ANIMATIONS = false` — breathing/head movement active
-- `coSpeechPlanner` — disabled (return [])
-- `unifiedGestureEngine.play('Thinking')` — disabled
-- `getStrategyAvatarBehavior gesture` — disabled
-- `intentToGestureHint` — disabled
-- All disabled until ARM_OFFSETS are calibrated per gesture
+### Gesture System Status (2026-04-11) — يطابق الخط الأساس الرسمي
+- المرجع: **`my memory/shared/COGNI_GESTURE_BASELINE.md`** (قفل مالك — لا تعديل بلا إذن).
+- `BLOCK_ALL_GESTURES = false`، `ARM_OFFSETS` معبأة، co-speech + performance gestures + strategy/intent + Thinking + SpontaneousBehavior مفعّلة حسب ذلك الملف.
 
-### Next Step: Calibrate ARM_OFFSETS
-Use verified axes above + motion-lab to set offsets for: explain, point, think, clap, wave, agree.
-Then set BLOCK_ALL_GESTURES=false and re-enable gesture dispatch points.
+### Next Step (عند الرغبة في تعديل لاحق)
+أي معايرة جديدة تمرّ عبر المالك ثم تحديث **`COGNI_GESTURE_BASELINE.md`** وسجل **SNT-NEXT-004** في `SONNET-0001.md`.
 
 ---
 
@@ -219,6 +213,16 @@ The avatar disappears and screen goes black. This is always caused by one of TWO
   - `key="avatar-canvas-singleton"` prevents hot-reload remounts
   - `frameloop="always"` forces continuous rendering
   - `webglcontextlost` handler in `onCreated` reloads page on context loss
+
+---
+
+## Draco + office GLB (2026-04-11)
+- التفاصيل الكاملة: `my memory/sonnet/SONNET-0001.md` → **SNT-NEXT-003**.
+- الملخص: `OfficeEnvironment` و`OfficeSetLoader` يربطان `DRACOLoader` مع `setDecoderPath('/draco/')`؛ الملف المستضاف `frontend/public/draco/draco_decoder.js` (نسخة glTF من حزمة `three`)؛ `setDecoderConfig({ type: 'js' })` لأن npm لا يشحن wasm الجاهز تحت `libs/draco`.
+
+## خط أساس الإيماءات الرسمي (2026-04-11) — **لا تغيير بلا إذن المالك**
+- المرجع الوحيد: **`my memory/shared/COGNI_GESTURE_BASELINE.md`** (جدول الأوفستات + التفعيلات + listening/headpose).
+- سجل تنفيذ: `my memory/sonnet/SONNET-0001.md` → **SNT-NEXT-004**.
 
 ---
 

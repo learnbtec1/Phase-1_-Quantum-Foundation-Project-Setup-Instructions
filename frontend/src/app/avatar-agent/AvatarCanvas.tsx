@@ -5,21 +5,27 @@ import React, {
   useRef,
   useCallback,
   useEffect,
+  useLayoutEffect,
+  useMemo,
   Suspense,
   type MutableRefObject,
   type RefObject,
 } from 'react';
 import * as THREE from 'three';
-import { Canvas } from '@react-three/fiber';
+import { Canvas, useThree, useLoader } from '@react-three/fiber';
+import type { ThreeEvent } from '@react-three/fiber';
 import {
   PerspectiveCamera,
   OrbitControls,
+  Text,
+  TransformControls,
 } from '@react-three/drei';
 import {
   GLTFLoader,
   type GLTF,
   type GLTFParser,
 } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { VRMLoaderPlugin, VRM } from '@pixiv/three-vrm';
 import { useBrainStore } from '@/store/useBrainStore';
 import { initBrainPersistence, flushBrainPersistence } from '@/lib/brainPersistence';
@@ -30,7 +36,9 @@ import ComfortLightingRig from '@/components/ComfortLightingRig';
 import LipSyncManager, { type VisemeCue } from './LipSyncManager';
 import { AnimationController } from './AnimationController';
 import { VRMSkeletonManager } from './VRMSkeletonManager';
+import type { BonePoseMap } from './motion/PoseComposer';
 import { GenerativeGestureManager } from './GenerativeGestureManager';
+import { BehaviorBrainHost } from './behavior';
 import { useAvatarEventBridge } from '@/hooks/useAvatarEventBridge';
 import { initGestureNormalizer } from '@/lib/gestureNormalizer';
 import { dispatchAvatar } from '@/utils/events/normalizeAvatarEvents';
@@ -39,10 +47,16 @@ import {
   getAvatarOfficeScenePosition,
   OFFICE_GLB_PUBLIC_PATH,
   pickVrmUrl,
-  FORWARD_ROTATION_Y,
   AVATAR_GROUP_ROTATION_Y,
+  PHYSICS_CONFIG,
 } from '@/config/avatar';
-import { OfficeEnvironment } from './OfficeEnvironment';
+import {
+  setDeskScene,
+  clearDeskScene,
+  computeChairAnchor,
+  markDeskSceneTransformDirty,
+  resolveIfEnabled,
+} from './physics/WorldColliders';
 import { createAvatarPerformanceHandler } from '@/app/avatar-agent/avatarPerformanceBridge';
 // VRMAPlayer معطَّل — يتطلب @pixiv/three-vrm-animation ويُسبّب build error مع Turbopack
 // لإعادة تفعيله: npm install @pixiv/three-vrm-animation ثم أزِل هذا التعليق
@@ -95,6 +109,209 @@ function ErrorFallback() {
   );
 }
 
+// ── Office scene editor (save/load layout JSON) — lives only in this file ─────
+
+type TransformMode = 'translate' | 'rotate' | 'scale';
+
+type OfficeSceneObjectSnapshot = {
+  uuid: string;
+  name: string;
+  position: [number, number, number];
+  rotation: [number, number, number];
+  scale: [number, number, number];
+};
+
+type OfficeSceneFileV1 = {
+  version: 1;
+  glbUrl: string;
+  officePosition: [number, number, number];
+  officeScale: number;
+  objects: OfficeSceneObjectSnapshot[];
+};
+
+function snapshotFromObject(obj: THREE.Object3D): OfficeSceneObjectSnapshot {
+  const e = new THREE.Euler().setFromQuaternion(obj.quaternion, 'YXZ');
+  return {
+    uuid: obj.uuid,
+    name: obj.name || '(unnamed)',
+    position: [obj.position.x, obj.position.y, obj.position.z],
+    rotation: [e.x, e.y, e.z],
+    scale: [obj.scale.x, obj.scale.y, obj.scale.z],
+  };
+}
+
+function collectOfficeMeshes(root: THREE.Object3D): THREE.Mesh[] {
+  const out: THREE.Mesh[] = [];
+  root.traverse((o) => {
+    if ((o as THREE.Mesh).isMesh) out.push(o as THREE.Mesh);
+  });
+  return out;
+}
+
+function buildOfficeSceneJson(
+  gltf: GLTF,
+  glbUrl: string,
+  officePosition: [number, number, number],
+  officeScale: number,
+): OfficeSceneFileV1 {
+  const objects = collectOfficeMeshes(gltf.scene).map(snapshotFromObject);
+  return {
+    version: 1,
+    glbUrl,
+    officePosition: [...officePosition],
+    officeScale,
+    objects,
+  };
+}
+
+function applyOfficeSceneJson(gltf: GLTF, data: OfficeSceneFileV1): void {
+  const byUuid = new Map(data.objects.map((o) => [o.uuid, o]));
+  const byName = new Map<string, OfficeSceneObjectSnapshot[]>();
+  for (const o of data.objects) {
+    const arr = byName.get(o.name) ?? [];
+    arr.push(o);
+    byName.set(o.name, arr);
+  }
+  collectOfficeMeshes(gltf.scene).forEach((mesh) => {
+    let snap = byUuid.get(mesh.uuid);
+    if (!snap) {
+      const arr = byName.get(mesh.name || '(unnamed)');
+      snap = arr?.shift();
+    }
+    if (!snap) return;
+    mesh.position.set(...snap.position);
+    mesh.rotation.set(snap.rotation[0], snap.rotation[1], snap.rotation[2], 'YXZ');
+    mesh.scale.set(...snap.scale);
+    mesh.updateMatrixWorld(true);
+  });
+  markDeskSceneTransformDirty();
+}
+
+function pickFirstMesh(hit: THREE.Object3D | null): THREE.Mesh | null {
+  let o: THREE.Object3D | null = hit;
+  while (o) {
+    if ((o as THREE.Mesh).isMesh) return o as THREE.Mesh;
+    o = o.parent;
+  }
+  return null;
+}
+
+type OfficeSceneWithEditorProps = {
+  url: string;
+  position: [number, number, number];
+  scale: number;
+  editorEnabled: boolean;
+  transformMode: TransformMode;
+  gizmoVisible: boolean;
+  selectedUuid: string | null;
+  onSelect: (uuid: string | null, snap: OfficeSceneObjectSnapshot | null) => void;
+  officeGltfRef: MutableRefObject<GLTF | null>;
+};
+
+function OfficeSceneWithEditor({
+  url,
+  position,
+  scale,
+  editorEnabled,
+  transformMode,
+  gizmoVisible,
+  selectedUuid,
+  onSelect,
+  officeGltfRef,
+}: OfficeSceneWithEditorProps) {
+  const gltf = useLoader(GLTFLoader, url, (loader) => {
+    const dracoLoader = new DRACOLoader();
+    dracoLoader.setDecoderPath('/draco/');
+    dracoLoader.setDecoderConfig({ type: 'js' });
+    loader.setDRACOLoader(dracoLoader);
+  });
+
+  useLayoutEffect(() => {
+    officeGltfRef.current = gltf;
+    gltf.scene.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh) {
+        const mesh = obj as THREE.Mesh;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        if (mesh.material) {
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          mats.forEach((m) => {
+            m.needsUpdate = true;
+          });
+        }
+      }
+    });
+    setDeskScene(gltf.scene);
+    return () => {
+      officeGltfRef.current = null;
+      clearDeskScene();
+    };
+  }, [gltf, officeGltfRef]);
+
+  useLayoutEffect(() => {
+    markDeskSceneTransformDirty();
+    computeChairAnchor();
+  }, [gltf, position, scale]);
+
+  const selectedObject = useMemo((): THREE.Object3D | null => {
+    if (!selectedUuid) return null;
+    let found: THREE.Object3D | null = null;
+    gltf.scene.traverse((o) => {
+      if ((o as THREE.Object3D).uuid === selectedUuid) found = o as THREE.Object3D;
+    });
+    return found;
+  }, [gltf, selectedUuid]);
+
+  useEffect(() => {
+    if (!editorEnabled) {
+      onSelect(null, null);
+    }
+  }, [editorEnabled, onSelect]);
+
+  const handleClick = useCallback(
+    (e: ThreeEvent<MouseEvent>) => {
+      if (!editorEnabled) return;
+      e.stopPropagation();
+      const mesh = pickFirstMesh(e.object);
+      if (!mesh) {
+        onSelect(null, null);
+        return;
+      }
+      onSelect(mesh.uuid, snapshotFromObject(mesh));
+    },
+    [editorEnabled, onSelect],
+  );
+
+  const handlePointerMissed = useCallback(() => {
+    if (!editorEnabled) return;
+    onSelect(null, null);
+  }, [editorEnabled, onSelect]);
+
+  const onTcChange = useCallback(() => {
+    markDeskSceneTransformDirty();
+    if (selectedObject) onSelect(selectedObject.uuid, snapshotFromObject(selectedObject));
+  }, [selectedObject, onSelect]);
+
+  return (
+    <group onPointerMissed={handlePointerMissed}>
+      <primitive
+        object={gltf.scene}
+        position={position}
+        scale={scale}
+        onClick={handleClick}
+      />
+      {editorEnabled && gizmoVisible && selectedObject && (
+        <TransformControls
+          object={selectedObject}
+          mode={transformMode}
+          space="local"
+          onObjectChange={onTcChange}
+        />
+      )}
+    </group>
+  );
+}
+
 /**
  * Invisible floor plane that intercepts right-clicks and emits the XZ position.
  * Placed at the avatar's floor level (Y = avatarPositionY).
@@ -119,6 +336,64 @@ function FloorClickDetector({
       <planeGeometry args={[40, 40]} />
       <meshBasicMaterial />
     </mesh>
+  );
+}
+
+/** Office: camera on +Z side of avatar (same X), elevated; one-shot align after VRM load + label. */
+const OFFICE_CAMERA_FACE_Y = 2.5;
+const OFFICE_CAMERA_Z_OFFSET = 5;
+const OFFICE_LOOK_AT_Y_OFFSET = 1.25;
+const OFFICE_CAMERA_LABEL_Y = 0.3;
+
+function OfficeAvatarCameraFaceSetup({
+  active,
+  hasVrm,
+  avatarX,
+  avatarY,
+  avatarZ,
+}: {
+  active: boolean;
+  hasVrm: boolean;
+  avatarX: number;
+  avatarY: number;
+  avatarZ: number;
+}) {
+  const { camera, controls } = useThree();
+  const appliedRef = useRef(false);
+
+  useLayoutEffect(() => {
+    if (!active || !hasVrm || appliedRef.current) return;
+    appliedRef.current = true;
+    const look = new THREE.Vector3(avatarX, avatarY + OFFICE_LOOK_AT_Y_OFFSET, avatarZ);
+    camera.position.set(avatarX, OFFICE_CAMERA_FACE_Y, avatarZ + OFFICE_CAMERA_Z_OFFSET);
+    camera.lookAt(look);
+    const ctrl = controls as { target?: THREE.Vector3; update?: () => void } | undefined;
+    if (ctrl?.target && typeof ctrl.update === 'function') {
+      ctrl.target.copy(look);
+      ctrl.update();
+    }
+  }, [active, hasVrm, avatarX, avatarY, avatarZ, camera, controls]);
+
+  if (!active || !hasVrm) return null;
+
+  const cx = avatarX;
+  const cz = avatarZ + OFFICE_CAMERA_Z_OFFSET;
+  const labelY = OFFICE_CAMERA_FACE_Y + OFFICE_CAMERA_LABEL_Y;
+
+  return (
+    <Suspense fallback={null}>
+      <Text
+        position={[cx, labelY, cz]}
+        fontSize={0.2}
+        color="#ffd54f"
+        anchorX="center"
+        anchorY="middle"
+        outlineWidth={0.02}
+        outlineColor="#0a0a12"
+      >
+        CAMERA
+      </Text>
+    </Suspense>
   );
 }
 
@@ -147,6 +422,16 @@ export default function AvatarCanvas({
     avatarPosition[0],
     avatarPosition[2],
   ]);
+  const floorClickScratchRef = useRef(new THREE.Vector3());
+  const onAvatarFloorNavigate = useCallback(
+    (x: number, z: number) => {
+      const v = floorClickScratchRef.current;
+      v.set(x, avatarPosition[1], z);
+      resolveIfEnabled(v, PHYSICS_CONFIG.avatar.capsuleRadius);
+      setAvatarXZ([v.x, v.z]);
+    },
+    [avatarPosition[1]],
+  );
 
   // Shared Refs for Managers
   const isTalkingRef = useRef<boolean>(false);
@@ -187,20 +472,124 @@ export default function AvatarCanvas({
 
   /** مرجع مشترك: VRMAPlayer يكتبه، VRMSkeletonManager يقرأه لتوقيف الإيماءات الإجرائية */
   const vrmaActiveRef = useRef<boolean>(false);
+  /** لقطة عظام VRMA (عند تفعيل VRMAPlayer) — يستهلكها PoseComposer */
+  const vrmaPoseRef = useRef<{ seq: number; bones: BonePoseMap } | null>(null);
+
+  /** GLB المكتب المحمّل داخل Canvas — للحفظ/التحميل JSON */
+  const officeGltfRef = useRef<GLTF | null>(null);
+  const sceneFileInputRef = useRef<HTMLInputElement>(null);
+  const [sceneEditorEnabled, setSceneEditorEnabled] = useState(false);
+  const [sceneTransformMode, setSceneTransformMode] = useState<TransformMode>('translate');
+  const [sceneGizmoVisible, setSceneGizmoVisible] = useState(true);
+  const [sceneSelectedUuid, setSceneSelectedUuid] = useState<string | null>(null);
+  const [sceneLive, setSceneLive] = useState<OfficeSceneObjectSnapshot | null>(null);
+
+  const onOfficeSceneSelect = useCallback((uuid: string | null, snap: OfficeSceneObjectSnapshot | null) => {
+    setSceneSelectedUuid(uuid);
+    setSceneLive(snap);
+  }, []);
+
+  /** أثناء محرر المشهد: تعطيل raycast على شبكة الـ VRM حتى لا يُختار الجسم بدل الأثاث */
+  useEffect(() => {
+    if (!vrm?.scene || !sceneEditorEnabled) return;
+    const restores: { m: THREE.Mesh; r: THREE.Mesh['raycast'] }[] = [];
+    const noopRaycast: THREE.Mesh['raycast'] = function (_raycaster, _intersects) {
+      /* editor: ignore hits on avatar skin */
+    };
+    vrm.scene.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh) {
+        restores.push({ m, r: m.raycast });
+        m.raycast = noopRaycast;
+      }
+    });
+    return () => {
+      restores.forEach(({ m, r }) => {
+        m.raycast = r;
+      });
+    };
+  }, [vrm, sceneEditorEnabled]);
+
+  useEffect(() => {
+    if (!sceneEditorEnabled) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setSceneSelectedUuid(null);
+        setSceneLive(null);
+        setSceneGizmoVisible(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [sceneEditorEnabled]);
+
+  const handleSaveOfficeScene = useCallback(() => {
+    const gltf = officeGltfRef.current;
+    if (!gltf || typeof window === 'undefined') return;
+    const data = buildOfficeSceneJson(
+      gltf,
+      officeGlbUrl,
+      [officePosition[0], officePosition[1], officePosition[2]],
+      officeScale,
+    );
+    const dataStr = JSON.stringify(data, null, 2);
+    const blob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'office_scene.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [officeGlbUrl, officePosition, officeScale]);
+
+  const handlePickSceneFile = useCallback(() => {
+    sceneFileInputRef.current?.click();
+  }, []);
+
+  const onSceneFileChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = '';
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const parsed = JSON.parse(String(reader.result ?? '{}')) as OfficeSceneFileV1;
+          if (parsed.version !== 1 || !Array.isArray(parsed.objects)) {
+            console.warn('[AvatarCanvas] Invalid office_scene.json (expected version 1)');
+            return;
+          }
+          const gltf = officeGltfRef.current;
+          if (!gltf) return;
+          applyOfficeSceneJson(gltf, parsed);
+          setSceneSelectedUuid(null);
+          setSceneLive(null);
+        } catch (err) {
+          console.error('[AvatarCanvas] Failed to parse scene JSON', err);
+        }
+      };
+      reader.readAsText(file);
+    },
+    [],
+  );
+
+  const spontaneousBehaviorEnabled = true;
 
   useEffect(() => {
     initGestureNormalizer();
     initBrainPersistence();
     initAvatarVoiceListener();
-    startSpontaneousBehavior({
-      isTalkingRef,
-      isThinkingRef,
-      motorSpeedMulRef,
-      isListeningRef,
-    });
+    if (spontaneousBehaviorEnabled) {
+      startSpontaneousBehavior({
+        isTalkingRef,
+        isThinkingRef,
+        motorSpeedMulRef,
+        isListeningRef,
+      });
+    }
     return () => {
       flushBrainPersistence();
-      stopSpontaneousBehavior();
+      if (spontaneousBehaviorEnabled) stopSpontaneousBehavior();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -499,9 +888,11 @@ export default function AvatarCanvas({
       const emotion = typeof d.emotion === 'string' ? d.emotion : '';
       const gesture = typeof d.gesture === 'string' ? d.gesture : '';
 
-      if (gesture) {
-        dispatchAvatar('avatar:gesture', { type: gesture, duration: 2 });
-      }
+      // Arm gestures from agent bridge disabled until recalibration
+      // if (gesture) {
+      //   dispatchAvatar('avatar:gesture', { type: gesture, duration: 2 });
+      // }
+      void gesture;
       if (emotion) {
         dispatchAvatar('avatar:emotion', { emotion, strength: 0.58 });
       }
@@ -513,11 +904,15 @@ export default function AvatarCanvas({
     return () => window.removeEventListener('agent:message', onAgentMessage as EventListener);
   }, [onAgentSpeak]);
 
+  const ax = avatarXZ[0];
+  const ay = avatarPosition[1];
+  const az = avatarXZ[1];
+
   const cameraPosition: [number, number, number] = showOfficeEnvironment
-    ? [...AVATAR_OFFICE_SCENE_DEFAULTS.cameraPosition]
+    ? [ax, OFFICE_CAMERA_FACE_Y, az + OFFICE_CAMERA_Z_OFFSET]
     : [0, 1.38, -2.65];
   const orbitTarget: [number, number, number] = showOfficeEnvironment
-    ? [...AVATAR_OFFICE_SCENE_DEFAULTS.orbitTarget]
+    ? [ax, ay + OFFICE_LOOK_AT_Y_OFFSET, az]
     : [0, 1.28, 0];
 
   // ROOT DIV MUST ALWAYS RENDER so r3fEventSourceRef.current is non-null when Canvas mounts.
@@ -525,6 +920,94 @@ export default function AvatarCanvas({
   // Loading/error overlays are positioned on top — never use early return before this div.
   return (
     <div ref={r3fEventSourceRef} className="relative w-full h-full bg-[#0a0a12]">
+      <BehaviorBrainHost motorSpeedMulRef={motorSpeedMulRef} isTalkingRef={isTalkingRef} />
+      {showOfficeEnvironment && (
+        <>
+          <input
+            ref={sceneFileInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={onSceneFileChange}
+          />
+          <div className="pointer-events-auto absolute top-3 right-3 z-30 max-w-[min(100%,18rem)] rounded-lg border border-white/15 bg-black/70 px-3 py-2 text-xs text-gray-200 shadow-lg backdrop-blur-sm">
+            <div className="mb-2 font-semibold text-white/90">محرّر المشهد (المكتب)</div>
+            <label className="mb-2 flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={sceneEditorEnabled}
+                onChange={(e) => {
+                  setSceneEditorEnabled(e.target.checked);
+                  if (!e.target.checked) {
+                    setSceneSelectedUuid(null);
+                    setSceneLive(null);
+                  }
+                }}
+                className="accent-sky-500"
+              />
+              <span>تفعيل التحريك / التحديد</span>
+            </label>
+            {sceneEditorEnabled && (
+              <>
+                <div className="mb-2 flex flex-wrap gap-1">
+                  {(['translate', 'rotate', 'scale'] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setSceneTransformMode(m)}
+                      className={`rounded px-2 py-0.5 capitalize ${
+                        sceneTransformMode === m
+                          ? 'bg-sky-600 text-white'
+                          : 'bg-white/10 text-gray-300 hover:bg-white/20'
+                      }`}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+                <label className="mb-2 flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={sceneGizmoVisible}
+                    onChange={(e) => setSceneGizmoVisible(e.target.checked)}
+                    className="accent-sky-500"
+                  />
+                  <span>إظهار Gizmo</span>
+                </label>
+                <div className="mb-2 rounded border border-white/10 bg-black/40 p-2 font-mono text-[10px] leading-relaxed text-gray-300">
+                  {sceneLive ? (
+                    <>
+                      <div className="mb-1 text-sky-300/90">المحدد: {sceneLive.name}</div>
+                      <div>pos: {sceneLive.position.map((n) => n.toFixed(3)).join(', ')}</div>
+                      <div>rot (rad YXZ): {sceneLive.rotation.map((n) => n.toFixed(3)).join(', ')}</div>
+                      <div>scl: {sceneLive.scale.map((n) => n.toFixed(3)).join(', ')}</div>
+                    </>
+                  ) : (
+                    <span className="text-gray-500">انقر على قطعة في الغرفة…</span>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  <button
+                    type="button"
+                    onClick={handleSaveOfficeScene}
+                    className="rounded bg-emerald-700/90 px-2 py-1 text-white hover:bg-emerald-600"
+                  >
+                    حفظ JSON
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handlePickSceneFile}
+                    className="rounded bg-sky-700/90 px-2 py-1 text-white hover:bg-sky-600"
+                  >
+                    تحميل JSON
+                  </button>
+                </div>
+                <p className="mt-1 text-[10px] text-gray-500">Escape: إخفاء Gizmo وإلغاء التحديد</p>
+              </>
+            )}
+          </div>
+        </>
+      )}
       {(loading && !error) && (
         <div className="pointer-events-none absolute inset-0 z-10">
           <LoadingFallback />
@@ -558,7 +1041,7 @@ export default function AvatarCanvas({
           position={cameraPosition}
           fov={45}
           near={0.05}
-          far={120}
+          far={8000}
         />
 
         <CameraUpLock />
@@ -587,24 +1070,42 @@ export default function AvatarCanvas({
         {/* fog disabled — was hiding room geometry at Z>4 */}
 
         <OrbitControls
-          enablePan={false}
-          enableZoom={true}
-          enableRotate={true}
-          minDistance={0.5}
-          maxDistance={6}
+          makeDefault
+          enablePan
+          enableZoom
+          enableRotate
+          minDistance={0.05}
+          maxDistance={5000}
           target={orbitTarget}
-          minPolarAngle={Math.PI / 3}
-          maxPolarAngle={Math.PI / 2 + 0.1}
-          minAzimuthAngle={-Math.PI / 4}
-          maxAzimuthAngle={Math.PI / 4}
+          minPolarAngle={0}
+          maxPolarAngle={Math.PI}
+          minAzimuthAngle={-Infinity}
+          maxAzimuthAngle={Infinity}
+          rotateSpeed={1}
+          zoomSpeed={1}
+          panSpeed={1}
+        />
+
+        <OfficeAvatarCameraFaceSetup
+          active={showOfficeEnvironment}
+          hasVrm={!!vrm}
+          avatarX={ax}
+          avatarY={ay}
+          avatarZ={az}
         />
 
         <Suspense fallback={null}>
           {showOfficeEnvironment && (
-            <OfficeEnvironment
+            <OfficeSceneWithEditor
               url={officeGlbUrl}
-              position={officePosition}
+              position={[officePosition[0], officePosition[1], officePosition[2]]}
               scale={officeScale}
+              editorEnabled={sceneEditorEnabled}
+              transformMode={sceneTransformMode}
+              gizmoVisible={sceneGizmoVisible}
+              selectedUuid={sceneSelectedUuid}
+              onSelect={onOfficeSceneSelect}
+              officeGltfRef={officeGltfRef}
             />
           )}
         </Suspense>
@@ -612,7 +1113,7 @@ export default function AvatarCanvas({
         {/* Invisible floor — right-click moves the avatar */}
         <FloorClickDetector
           floorY={avatarPosition[1]}
-          onRightClick={(x, z) => setAvatarXZ([x, z])}
+          onRightClick={onAvatarFloorNavigate}
         />
 
         <Suspense fallback={null}>
@@ -621,7 +1122,13 @@ export default function AvatarCanvas({
               ref={groupRef}
               name="AvatarRoot"
               position={[avatarXZ[0], avatarPosition[1], avatarXZ[1]]}
-              rotation={[0, AVATAR_GROUP_ROTATION_Y, 0]}
+              rotation={[
+                0,
+                showOfficeEnvironment
+                  ? AVATAR_GROUP_ROTATION_Y + Math.PI
+                  : AVATAR_GROUP_ROTATION_Y,
+                0,
+              ]}
               scale={avatarScale}
             >
               <primitive object={vrm.scene} />
@@ -652,6 +1159,7 @@ export default function AvatarCanvas({
                 isListeningRef={isListeningRef}
                 isThinkingRef={isThinkingRef}
                 vrmaActiveRef={vrmaActiveRef}
+                vrmaPoseRef={vrmaPoseRef}
               />
 
               {/* VRMAPlayer معطَّل — انظر تعليق الاستيراد في أعلى الملف */}

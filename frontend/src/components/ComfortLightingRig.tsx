@@ -93,20 +93,17 @@ export default function ComfortLightingRig({ emotion = 'neutral' }: ComfortLight
 
   return (
     <>
-      {/* ── Ambient — mood-reactive warm base */}
-      <ambientLight ref={ambientRef} intensity={0.12} color="#ffe8d6" />
+      {/* ── Ambient — warm natural base, bright enough to lift shadows */}
+      <ambientLight ref={ambientRef} intensity={0.55} color="#fff8f0" />
 
-      {/* ── Hemisphere — sky lavender / dark ground bounce */}
-      <hemisphereLight args={['#c8d8ff', '#0a0d14', 0.45]} />
+      {/* ── Hemisphere — warm sky / warm ground bounce (no more dark base) */}
+      <hemisphereLight args={['#ffe8d0', '#c8a87a', 0.65]} />
 
-      {/* ── Key light: mood-reactive warm, upper-left-front
-          Three.js r167+ added LightShadow.intensity → mapped to shadowIntensity uniform.
-          shadow-normalBias / shadow-bias prevent acne on curved VRM surfaces.
-          هذا الضوء هو الوحيد الذي يُلقي ظلالاً في المشهد (castShadow) — لا تُضِف آخر. */}
+      {/* ── Key light: warm-white studio, upper-left-front, casts shadow */}
       <directionalLight
         ref={keyLightRef}
         position={[-2.5, 5.5, 3.0]}
-        intensity={2.4}
+        intensity={3.2}
         color="#fff5e0"
         castShadow
         shadow-mapSize-width={2048}
@@ -119,36 +116,44 @@ export default function ComfortLightingRig({ emotion = 'neutral' }: ComfortLight
         shadow-camera-bottom={-2}
         shadow-bias={-0.0008}
         shadow-normalBias={0.04}
-        shadow-intensity={1}
+        shadow-intensity={0.6}
       />
 
-      {/* ── Fill light: cool lavender, right side */}
+      {/* ── Fill light: soft warm, right side — reduces harsh shadow contrast */}
       <directionalLight
-        position={[3.5, 3.0, 2.5]}
+        position={[3.5, 2.5, 2.0]}
+        intensity={1.6}
+        color="#ffe4c0"
+        castShadow={false}
+      />
+
+      {/* ── Front fill: straight-on soft light eliminates flat dark areas */}
+      <directionalLight
+        position={[0, 2.5, 4.0]}
+        intensity={1.2}
+        color="#fff8f4"
+        castShadow={false}
+      />
+
+      {/* ── Rim light: subtle warm-white edge from behind */}
+      <directionalLight
+        position={[0.5, 3.5, -4.5]}
         intensity={1.0}
-        color="#c9d4ff"
+        color="#ffe8d0"
         castShadow={false}
       />
 
-      {/* ── Rim light: bright white-blue, behind avatar */}
-      <directionalLight
-        position={[0.5, 4.0, -5.0]}
-        intensity={1.5}
-        color="#ddeeff"
-        castShadow={false}
-      />
-
-      {/* ── Face-level point: warm desk bounce */}
+      {/* ── Face-level point: warm natural bounce from below */}
       <pointLight
-        position={[0, 0.3, -1.2]}
-        intensity={0.55}
-        color="#ffd6a0"
-        distance={2.5}
+        position={[0, 1.0, 1.8]}
+        intensity={1.2}
+        color="#ffe8c8"
+        distance={4.0}
         decay={2}
       />
 
-      {/* ── PBR env map (HDR) — visible on materials; AvatarCanvas لا يكرّر Environment */}
-      <Environment preset="city" background={false} environmentIntensity={0.72} />
+      {/* ── PBR env map: apartment preset — warmer, more natural than city */}
+      <Environment preset="apartment" background={false} environmentIntensity={1.1} />
     </>
   );
 }

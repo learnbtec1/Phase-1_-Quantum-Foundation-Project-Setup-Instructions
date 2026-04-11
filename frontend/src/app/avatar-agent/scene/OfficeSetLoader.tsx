@@ -15,17 +15,19 @@
  *  - window event "officeSet:loaded" is dispatched.
  *
  * Props:
- *   url      — GLB path (default "/assets/office.glb")
+ *   url      — GLB path (default `OFFICE_GLB_PUBLIC_PATH` → `/models/office/office.glb`)
  *   targetZ  — world Z for the office group (default 0.9)
  *   scaleFix — uniform scale multiplier (1 = meters, 0.01 = centimetres)
  *   debug    — log details to console
  *   onReady  — called with (officeGroup, seatAnchor|null)
  */
 import React, { useEffect } from 'react';
+import { OFFICE_GLB_PUBLIC_PATH } from '@/config/avatar';
 import {
   Box3, BoxGeometry, Color, DoubleSide, Group, Mesh,
   MeshStandardMaterial, Object3D, Quaternion, Scene, Vector2, Vector3,
 } from 'three';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { useThree } from '@react-three/fiber';
 import { setDeskScene, computeChairAnchor } from '../physics/WorldColliders';
@@ -362,7 +364,7 @@ function setupOffice(
 
 // ── Component ─────────────────────────────────────────────────────────────────
 export function OfficeSetLoader({
-  url      = '/assets/office.glb',
+  url      = OFFICE_GLB_PUBLIC_PATH,
   targetZ  = 0.9,
   // 0.01 converts centimetre-unit GLB exports (typical 3D-marketplace assets) to metres.
   // Swap to 1.0 if your GLB was exported in metres (Blender default SI units).
@@ -384,6 +386,10 @@ export function OfficeSetLoader({
     // even when the resource exists, causing spurious fallback to placeholder).
     // GLTFLoader's own error handler covers 404 gracefully.
     const loader = new GLTFLoader();
+    const dracoLoader = new DRACOLoader();
+    dracoLoader.setDecoderPath('/draco/');
+    dracoLoader.setDecoderConfig({ type: 'js' });
+    loader.setDRACOLoader(dracoLoader);
     loader.load(
       url,
       (gltf) => {
@@ -397,7 +403,10 @@ export function OfficeSetLoader({
       },
     );
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      dracoLoader.dispose();
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene, url, targetZ, scaleFix, debug]);
 
