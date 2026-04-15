@@ -21,6 +21,12 @@
  */
 
 import type { MutableRefObject } from 'react';
+import {
+  motionAuthorityAllowsIdleLayer,
+  releaseMotion,
+  tryAcquireMotion,
+} from '@/lib/avatar/motionAuthority';
+import { getIdleSilenceProbability, getSpontaneousIdleGapMul } from '@/ai/avatar/avatarPersonality';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -285,6 +291,7 @@ const MAX_IDLE_MS = 14_000; // (was 22s) — tighter window = more organic feel
 
 let _timeoutId: ReturnType<typeof setTimeout> | null = null;
 let _running = false;
+let _lastIdleBehaviourAt = 0;
 
 function pickBehaviour(thinking: boolean): Behaviour {
   const eligible = BEHAVIOURS.filter(b => !b.thinkOnly || thinking);
@@ -299,7 +306,9 @@ function pickBehaviour(thinking: boolean): Behaviour {
 
 function scheduleNext(cfg: SpontaneousBehaviorConfig): void {
   if (!_running) return;
-  const delay = MIN_IDLE_MS + Math.random() * (MAX_IDLE_MS - MIN_IDLE_MS);
+  const gapMul = getSpontaneousIdleGapMul();
+  const delay =
+    (MIN_IDLE_MS + Math.random() * (MAX_IDLE_MS - MIN_IDLE_MS)) * gapMul;
   _timeoutId = setTimeout(() => {
     if (!_running) return;
     const talking     = cfg.isTalkingRef.current;
@@ -313,7 +322,33 @@ function scheduleNext(cfg: SpontaneousBehaviorConfig): void {
       return;
     }
 
+    if (!motionAuthorityAllowsIdleLayer()) {
+      scheduleNext(cfg);
+      return;
+    }
+
+    if (Math.random() < getIdleSilenceProbability()) {
+      scheduleNext(cfg);
+      return;
+    }
+
     const behaviour = pickBehaviour(thinking);
+
+    const LIGHT_SPONTANEOUS: Set<BehaviourId> = new Set([
+      'look_away',
+      'curious_tilt',
+      'deep_breath',
+      'eyebrow_raise',
+      'head_tilt_micro',
+      'memory_recall',
+      'contemplation_pause',
+    ]);
+    const now = performance.now();
+    const minSinceLast = LIGHT_SPONTANEOUS.has(behaviour.id) ? 3600 : 9200;
+    if (now - _lastIdleBehaviourAt < minSinceLast) {
+      scheduleNext(cfg);
+      return;
+    }
 
     // While actively listening: only micro/gaze allowed — heavy gestures distract
     const HEAVY_GESTURES: Set<BehaviourId> = new Set([
@@ -325,10 +360,24 @@ function scheduleNext(cfg: SpontaneousBehaviorConfig): void {
       dispatch('avatar:micro:gesture', { kind: 'nod', durationMs: 280 });
       dispatch('avatar:listening', { active: true }); // refresh listening body posture
     } else {
+      const LONG_LOCK_BEHAVIOURS = new Set<string>([
+        'self_touch', 'idle_nod', 'reset_breath', 'celebrate_micro', 'micro_wave',
+        'chin_scratch', 'excited_energy_burst', 'confidence_gesture', 'empathy_lean',
+        'curiosity_spark',
+      ]);
+      const lockMs = LONG_LOCK_BEHAVIOURS.has(behaviour.id) ? 2600 : 950;
+      if (!tryAcquireMotion('IDLE', lockMs)) {
+        scheduleNext(cfg);
+        return;
+      }
+      _lastIdleBehaviourAt = performance.now();
       try {
         behaviour.execute(cfg);
       } catch {
         /* silent — behaviour errors must not break animation loop */
+      }
+      if (typeof window !== 'undefined') {
+        window.setTimeout(() => releaseMotion('IDLE'), lockMs);
       }
     }
     scheduleNext(cfg);

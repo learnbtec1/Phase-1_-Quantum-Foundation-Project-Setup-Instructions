@@ -4,8 +4,22 @@ import React, { type MutableRefObject, type RefObject, useEffect, useRef } from 
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import type { VRM } from '@pixiv/three-vrm';
+import { DEBUG_AVATAR } from '@/app/avatar-agent/debugAvatar';
 import { lerp } from './utils';
 import { useBrainStore } from '@/store/useBrainStore';
+import { getIntentPresentation } from '@/ai/avatar/avatarIntent';
+import { getPersonality } from '@/ai/avatar/avatarPersonality';
+import { tickMicroExpressions } from '@/ai/avatar/microExpressionLayer';
+import { getEyeEmotionMods, PRE_SPEECH_DECAY_SEC } from '@/lib/avatar/eyeIntelligence';
+import {
+  computeThinkingGazeBias,
+  explainingContextualBias,
+  gazeConnectionHold,
+  getEyeIntentionScalars,
+} from '@/lib/avatar/eyeIntention';
+import { getUserMirrorMicroAdds } from '@/lib/avatar/userEmotionMirror';
+import { getEmbodimentHints } from '@/lib/avatar/emotionalMemory';
+import { getGazeIntentionPersonalityMods } from '@/lib/avatar/personalityEvolution';
 
 const TAB_SAFE_MAX_DELTA = 0.1;
 
@@ -88,6 +102,8 @@ const EMOTION_ENTER_FLASH: Record<string, Partial<Record<ExprKey, number>>> = {
 const _eyeWorldScratch = new THREE.Vector3();
 const _avatarWorldScratch = new THREE.Vector3();
 const _toCamScratch = new THREE.Vector3();
+const _camAnchorScratch = new THREE.Vector3();
+const _fusedEyeScratch = new THREE.Vector3();
 
 /**
  * Try the canonical name first, then all dual-alias alternatives.
@@ -144,8 +160,10 @@ function runExprAudit(em: NonNullable<VRM['expressionManager']>): void {
   const all = ['happy','sad','angry','relaxed','blink','blinkLeft','blinkRight',
                'aa','ih','oh','ou','ee','lookUp','lookDown','lookLeft','lookRight','neutral'];
   for (const n of all) audit[n] = probe(n);
-  console.table(audit);
-  console.log('[AnimationController] VRM 1.0 expression audit complete.');
+  if (DEBUG_AVATAR) {
+    console.table(audit);
+    console.log('[AnimationController] VRM 1.0 expression audit complete.');
+  }
 }
 
 export type AnimationControllerProps = {
@@ -173,6 +191,8 @@ export function AnimationController({
   const blinkPhaseRef = useRef(0);
   const nextBlinkAtRef = useRef(0);
   const blinkCountRef = useRef(1);
+  /** Full close-open cycle length (s), randomized per blink — ~100–200 ms */
+  const blinkDurationSecRef = useRef(0.14);
 
   const saccadeNextPickRef = useRef(0);
   const saccadeYawOffRef = useRef(0);
@@ -192,6 +212,9 @@ export function AnimationController({
   const gazeOverridePitchRef = useRef(0);
   const gazeOverrideBlendRef = useRef(0);  // 0=none 1=full
   const gazeOverrideUntilMsRef = useRef(0);
+
+  /** Smooth 0→1 when user has the floor (bypasses interactionIntent debounce). */
+  const userFocusBlendRef = useRef(0);
 
   /** Emphasis flash for expression (co-speech emphasis events) */
   const emphasisFlashRef = useRef<{ happy: number; surprised: number }>({ happy: 0, surprised: 0 });
@@ -222,6 +245,18 @@ export function AnimationController({
   const padArousalRef  = useRef(0);
   const padPleasureRef = useRef(0);
   const isThinkingBrainRef = useRef(false);
+
+  /** 1 = just fired cogni:pre_speech — thinking-before-speaking window */
+  const preSpeechStrengthRef = useRef(0);
+  /** Eyes lead: inner gaze tracks target fast; neck follows inner with lag (~80–120 ms feel) */
+  const innerGazeYawRef = useRef(0);
+  const innerGazePitchRef = useRef(0);
+  /** Slow attention drift (3–6 s) — soft gaze shift, not saccade */
+  const attnDriftYawSmRef = useRef(0);
+  const attnDriftPitchSmRef = useRef(0);
+  const attnDriftYawTgtRef = useRef(0);
+  const attnDriftPitchTgtRef = useRef(0);
+  const nextAttentionDriftAtRef = useRef(0);
 
   useEffect(() => {
     // Subscribe to PAD without causing re-renders (ref-only writes)
@@ -294,12 +329,19 @@ export function AnimationController({
       };
     };
     window.addEventListener('avatar:emotion', onEmotion as EventListener);
+
+    const onPreSpeech = (): void => {
+      preSpeechStrengthRef.current = 1;
+    };
+    window.addEventListener('cogni:pre_speech', onPreSpeech as EventListener);
+
     return () => {
       window.removeEventListener('avatar:speech:emphasis', onEmphasis as EventListener);
       window.removeEventListener('avatar:micro:gesture', onEmphasis as EventListener);
       window.removeEventListener('avatar:blink', onAvatarBlink as EventListener);
       window.removeEventListener('avatar:gaze', onGaze as EventListener);
       window.removeEventListener('avatar:emotion', onEmotion as EventListener);
+      window.removeEventListener('cogni:pre_speech', onPreSpeech as EventListener);
     };
   }, []);
 
@@ -314,12 +356,63 @@ export function AnimationController({
     // One-time expression audit (dev only) — reveals which VRM alias names work
     runExprAudit(em);
 
+    const brainEarly = useBrainStore.getState();
+    const userEngagedEarly = brainEarly.isUserSpeaking || brainEarly.physical.isListening;
+    const mirrorAdds = getUserMirrorMicroAdds(brainEarly.userMirrorEmotion, userEngagedEarly);
+    const microExpr = tickMicroExpressions(safeDelta, nowMs);
+    const eyeMods = getEyeEmotionMods(agentEmotionRef.current.emotion);
+
+    if (preSpeechStrengthRef.current > 0.002) {
+      preSpeechStrengthRef.current *= Math.exp(-safeDelta / PRE_SPEECH_DECAY_SEC);
+    } else {
+      preSpeechStrengthRef.current = 0;
+    }
+
     const phaseTalking = isTalkingRef.current;
     const skGesture =
       typeof window !== 'undefined'
         ? (window as Window & { __avatarSkeletonGesture?: string }).__avatarSkeletonGesture ?? 'idle'
         : 'idle';
-    const stabilizeGaze = skGesture === 'agree' || skGesture === 'think' || skGesture === 'explain';
+    const brain = brainEarly;
+    const interactionIntent = brain.interactionIntent;
+    const pres = getIntentPresentation(interactionIntent);
+    const { curiosity, calm } = getPersonality();
+    const userEngaged = brain.isUserSpeaking || brain.physical.isListening;
+    const userFocusRaw = userEngaged || interactionIntent === 'listening';
+    userFocusBlendRef.current = THREE.MathUtils.lerp(
+      userFocusBlendRef.current,
+      userFocusRaw ? 1 : 0,
+      Math.min(1, safeDelta * 2.85),
+    );
+    const structuralStabilize =
+      skGesture === 'agree' || skGesture === 'think' || skGesture === 'explain';
+    /** 1 = full address camera / damp drift; user path eases via userFocusBlendRef. */
+    const stabilizeMix = Math.max(structuralStabilize ? 1 : 0, userFocusBlendRef.current);
+
+    if (
+      typeof process !== 'undefined' &&
+      process.env.NEXT_PUBLIC_MOTION_PIPELINE_DEBUG === 'true' &&
+      typeof window !== 'undefined'
+    ) {
+      (window as Window & { __cogniStabilizeMix?: number }).__cogniStabilizeMix = stabilizeMix;
+    }
+
+    const cognitionEye = getEyeIntentionScalars({
+      intent: interactionIntent,
+      isUserSpeaking: brain.isUserSpeaking,
+      isListening: brain.physical.isListening,
+      phaseTalking,
+      preSpeechStrength: preSpeechStrengthRef.current,
+      comprehensionConfidence: brain.comprehensionConfidence,
+      emotionLabel: agentEmotionRef.current.emotion,
+      userMirrorEmotion: brain.userMirrorEmotion,
+    });
+    const peGaze = getGazeIntentionPersonalityMods();
+    cognitionEye.driftMul *= peGaze.driftMul;
+    cognitionEye.gazeDirectAdd += peGaze.gazeDirectAdd;
+    const embLt = getEmbodimentHints();
+    const connectionHold =
+      gazeConnectionHold(t, stabilizeMix, userEngaged) * embLt.gazeConnectionMul;
 
     // ── Gaze override decay ────────────────────────────────────────────────────
     const gazeOverrideActive = nowMs < gazeOverrideUntilMsRef.current;
@@ -330,10 +423,72 @@ export function AnimationController({
     }
 
     // أثناء الكلام: حركة رأس ملحوظة؛ خارج الكلام: تتبع أوضح للمؤشر.
-    let gazeScale = phaseTalking ? 0.18 : 0.28;
-    if (stabilizeGaze) gazeScale *= 0.22;
+    let gazeScale = (phaseTalking ? 0.18 : 0.28) * pres.animationGazeScaleMul;
+    gazeScale *= THREE.MathUtils.lerp(1, 0.2, stabilizeMix);
     let desireYaw = -pointer.x * gazeScale * 0.55;
     let desirePitch = pointer.y * gazeScale * 0.38;
+
+    const thinkCtx =
+      interactionIntent === 'thinking' || isThinkingBrainRef.current ? 1 : 0;
+    if (thinkCtx > 0) {
+      const off = Math.sin(t * 0.35 + eyeBobPhaseARef.current) * 0.048 * curiosity;
+      const pitchW = Math.cos(t * 0.27 + eyeBobPhaseBRef.current) * 0.024 * curiosity;
+      const dampThink = thinkCtx * (1 - stabilizeMix * 0.45);
+      desireYaw += off * dampThink * 0.52;
+      desirePitch += pitchW * dampThink * 0.52;
+    }
+    const thinkIntentionActive =
+      (interactionIntent === 'thinking' || isThinkingBrainRef.current) && !phaseTalking;
+    const tb = computeThinkingGazeBias(t, thinkIntentionActive);
+    const pszEarly = preSpeechStrengthRef.current;
+    const tbBlend =
+      (1 - stabilizeMix * 0.48) * (1 - THREE.MathUtils.clamp(pszEarly, 0, 1) * 0.88);
+    desireYaw += tb.yaw * tbBlend;
+    desirePitch += tb.pitch * tbBlend;
+    if (interactionIntent === 'explaining' && phaseTalking) {
+      const pull = Math.min(1, safeDelta * 2.4);
+      desireYaw = THREE.MathUtils.lerp(desireYaw, -pointer.x * gazeScale * 0.35, pull * 0.55);
+      desirePitch = THREE.MathUtils.lerp(desirePitch, pointer.y * gazeScale * 0.28, pull * 0.5);
+    }
+    {
+      const exb = explainingContextualBias(t, interactionIntent === 'explaining' && phaseTalking);
+      const exDamp = 1 - stabilizeMix * 0.55;
+      desireYaw += exb.yaw * exDamp;
+      desirePitch += exb.pitch * exDamp;
+    }
+    const idleEnv =
+      interactionIntent === 'idle' && !userFocusRaw && !phaseTalking ? 1 : 0;
+    if (idleEnv > 0) {
+      desireYaw += Math.sin(t * 0.19 + eyeBobPhaseBRef.current) * 0.062 * curiosity * idleEnv;
+      desirePitch += Math.cos(t * 0.23) * 0.028 * curiosity * idleEnv;
+    }
+
+    // ── Attention drift (3–6 s): slow gaze shift, damped when addressing user / speaking ──
+    if (nextAttentionDriftAtRef.current === 0) {
+      nextAttentionDriftAtRef.current = nowMs + 3000 + Math.random() * 3000;
+    }
+    if (nowMs >= nextAttentionDriftAtRef.current) {
+      attnDriftYawTgtRef.current = (Math.random() - 0.5) * 0.09;
+      attnDriftPitchTgtRef.current = (Math.random() - 0.5) * 0.06;
+      nextAttentionDriftAtRef.current = nowMs + 3000 + Math.random() * 3000;
+    }
+    const driftK = THREE.MathUtils.clamp(safeDelta * 3.2, 0.08, 0.18);
+    attnDriftYawSmRef.current = THREE.MathUtils.lerp(
+      attnDriftYawSmRef.current,
+      attnDriftYawTgtRef.current,
+      driftK,
+    );
+    attnDriftPitchSmRef.current = THREE.MathUtils.lerp(
+      attnDriftPitchSmRef.current,
+      attnDriftPitchTgtRef.current,
+      driftK,
+    );
+    const driftVis =
+      THREE.MathUtils.clamp(1 - stabilizeMix * 0.92, 0, 1) *
+      (phaseTalking ? 0.4 : 1) *
+      cognitionEye.driftMul;
+    desireYaw += attnDriftYawSmRef.current * driftVis * 0.48;
+    desirePitch += attnDriftPitchSmRef.current * driftVis * 0.48;
 
     // Blend in gaze override (look_away / spontaneous gaze shift)
     if (gazeOverrideBlendRef.current > 0.01) {
@@ -342,53 +497,89 @@ export function AnimationController({
       desirePitch = THREE.MathUtils.lerp(desirePitch, gazeOverridePitchRef.current, b);
     }
 
-    if (!stabilizeGaze && nowMs > saccadeNextPickRef.current) {
-      // Natural saccade rhythm: 900–2800ms between jumps (was 180–660ms — too jittery)
-      saccadeYawOffRef.current = (Math.random() - 0.5) * 0.12;
-      saccadePitchOffRef.current = (Math.random() - 0.5) * 0.08;
-      saccadeNextPickRef.current = nowMs + 900 + Math.random() * 1900;
+    // Pre-speech (~150–300 ms): slight “gathering thought” — eyes up/narrow, defer blink
+    const psz = preSpeechStrengthRef.current;
+    if (psz > 0.01) {
+      desirePitch += 0.034 * psz;
+      desireYaw *= THREE.MathUtils.lerp(1, 0.94, psz);
+      nextBlinkAtRef.current = Math.max(nextBlinkAtRef.current, nowMs + 180 * psz);
     }
-    if (stabilizeGaze) {
-      saccadeYawOffRef.current = THREE.MathUtils.lerp(saccadeYawOffRef.current, 0, Math.min(1, safeDelta * 5));
-      saccadePitchOffRef.current = THREE.MathUtils.lerp(saccadePitchOffRef.current, 0, Math.min(1, safeDelta * 5));
+
+    if (stabilizeMix < 0.82 && nowMs > saccadeNextPickRef.current) {
+      // Sparse micro-saccades (low frequency, small amplitude)
+      saccadeYawOffRef.current = (Math.random() - 0.5) * 0.1;
+      saccadePitchOffRef.current = (Math.random() - 0.5) * 0.07;
+      saccadeNextPickRef.current = nowMs + 1200 + Math.random() * 2400;
     }
-    desireYaw += saccadeYawOffRef.current;
-    desirePitch += saccadePitchOffRef.current;
-    if (stabilizeGaze) {
-      desireYaw = THREE.MathUtils.lerp(desireYaw, 0, Math.min(1, safeDelta * 4.5));
-      desirePitch = THREE.MathUtils.lerp(desirePitch, 0, Math.min(1, safeDelta * 4.5));
-    }
+    const saccadeDamp = Math.min(1, safeDelta * 5) * stabilizeMix;
+    saccadeYawOffRef.current = THREE.MathUtils.lerp(saccadeYawOffRef.current, 0, saccadeDamp);
+    saccadePitchOffRef.current = THREE.MathUtils.lerp(saccadePitchOffRef.current, 0, saccadeDamp);
+    const saccadeVis =
+      pres.animationSaccadeMul *
+      (1 - stabilizeMix * 0.92) *
+      eyeMods.saccadeMul *
+      cognitionEye.saccadeMul;
+    desireYaw += saccadeYawOffRef.current * saccadeVis;
+    desirePitch += saccadePitchOffRef.current * saccadeVis;
+    const centerPull =
+      Math.min(1, safeDelta * 4.2) * stabilizeMix * cognitionEye.centerPullMul;
+    desireYaw = THREE.MathUtils.lerp(desireYaw, 0, centerPull);
+    desirePitch = THREE.MathUtils.lerp(desirePitch, 0, centerPull);
 
     const cap = 0.34;
     desireYaw = THREE.MathUtils.clamp(desireYaw, -cap, cap);
     desirePitch = THREE.MathUtils.clamp(desirePitch, -cap, cap);
 
-    const gazeLerp = Math.min(1, safeDelta * 3.8);
+    // Eyes lead, neck follows (~80–120 ms equivalent via slower neck lerp)
+    let eyeMul = THREE.MathUtils.clamp(safeDelta * 5.5, 0.15, 0.22);
+    if (interactionIntent === 'thinking') {
+      eyeMul *= THREE.MathUtils.lerp(1, 0.82, calm * 0.95);
+    }
+    if (brain.userMirrorEmotion === 'confused') eyeMul *= 0.93;
+    if (brain.userMirrorEmotion === 'excited') eyeMul *= 1.04;
+    const neckMul = THREE.MathUtils.clamp(safeDelta * 3.9, 0.1, 0.16);
     if (vrmFirstFrameRef.current) {
       vrmFirstFrameRef.current = false;
+      innerGazeYawRef.current = desireYaw;
+      innerGazePitchRef.current = desirePitch;
       neckGazeYawRef.current = desireYaw;
       neckGazePitchRef.current = desirePitch;
     } else {
-      neckGazeYawRef.current = lerp(neckGazeYawRef.current, desireYaw, gazeLerp);
-      neckGazePitchRef.current = lerp(neckGazePitchRef.current, desirePitch, gazeLerp);
+      innerGazeYawRef.current = lerp(innerGazeYawRef.current, desireYaw, eyeMul);
+      innerGazePitchRef.current = lerp(innerGazePitchRef.current, desirePitch, eyeMul);
+      neckGazeYawRef.current = lerp(neckGazeYawRef.current, innerGazeYawRef.current, neckMul);
+      neckGazePitchRef.current = lerp(neckGazePitchRef.current, innerGazePitchRef.current, neckMul);
     }
 
-    // ── Blink — speed varies by style (slow = calm/sad/thinking, normal = default) ──
+    // ── Blink — natural interval 2–5 s, closure ~100–200 ms; slow style stretches both ──
     const blinkSlow = blinkStyleRef.current === 'slow';
-    const blinkSpeed     = blinkSlow ? 7  : 11;   // rad/s close speed
     const blinkLerpSpeed = blinkSlow ? 12 : 18;
-    const blinkIntervalMin = blinkSlow ? 2800 : 1800;
-    const blinkIntervalVar = blinkSlow ? 4200 : 3200;
+    const blinkIntervalMin =
+      (blinkSlow ? 3200 : 2000) *
+      microExpr.blinkIntervalScale *
+      mirrorAdds.blinkIntervalScaleMul *
+      eyeMods.blinkIntervalMul *
+      cognitionEye.blinkIntervalMul;
+    const blinkIntervalVar =
+      (blinkSlow ? 4800 : 3000) *
+      microExpr.blinkIntervalScale *
+      mirrorAdds.blinkIntervalScaleMul *
+      eyeMods.blinkIntervalMul *
+      cognitionEye.blinkIntervalMul;
 
     if (nextBlinkAtRef.current === 0) {
       nextBlinkAtRef.current = nowMs + blinkIntervalMin + Math.random() * blinkIntervalVar;
     }
     if (blinkPhaseRef.current <= 0 && nowMs >= nextBlinkAtRef.current) {
       blinkPhaseRef.current = 0.001;
-      blinkCountRef.current = Math.random() < 0.18 ? 2 : 1;
+      blinkCountRef.current = Math.random() < 0.14 ? 2 : 1;
+      blinkDurationSecRef.current =
+        (blinkSlow ? 0.14 : 0.12) + Math.random() * (blinkSlow ? 0.12 : 0.06);
     }
+    const blinkRadPerSec = Math.PI / Math.max(0.08, blinkDurationSecRef.current);
+
     if (blinkPhaseRef.current > 0) {
-      blinkPhaseRef.current += safeDelta * blinkSpeed;
+      blinkPhaseRef.current += safeDelta * blinkRadPerSec;
       const w = blinkPhaseRef.current < Math.PI ? Math.sin(blinkPhaseRef.current) : 0;
       const cur = exprGet(em, 'blink');
       exprSet(em, 'blink', lerp(cur, w, Math.min(1, safeDelta * blinkLerpSpeed)));
@@ -397,7 +588,7 @@ export function AnimationController({
         exprSet(em, 'blink', 0);
         if (blinkCountRef.current > 1) {
           blinkCountRef.current -= 1;
-          nextBlinkAtRef.current = nowMs + 90;
+          nextBlinkAtRef.current = nowMs + 70 + Math.random() * 55;
         } else {
           nextBlinkAtRef.current = nowMs + blinkIntervalMin + Math.random() * blinkIntervalVar;
         }
@@ -476,13 +667,15 @@ export function AnimationController({
         target = Math.max(target, pleasureFloor);
       }
 
-      target = THREE.MathUtils.clamp(target, 0, 1);
       if (phaseTalking && isNeutralAgent) {
         // Alive engaged expression while speaking (neutral agent only)
         // Reduced from 0.48/0.22 to softer values so it doesn't look manically happy
         if (key === 'happy')    target = Math.max(target, 0.30 + pleasure * 0.15);
         if (key === 'surprised') target = Math.max(target, 0.14); // alive eyebrows
       }
+      if (key === 'happy') target += microExpr.happyAdd + mirrorAdds.happyAdd;
+      if (key === 'surprised') target += microExpr.surprisedAdd + mirrorAdds.surprisedAdd;
+      target = THREE.MathUtils.clamp(target, 0, 1);
       const cur = exprGet(em, key);
 
       // ── Smooth emotional transitions — prevents jarring jumps ───────────────
@@ -505,15 +698,52 @@ export function AnimationController({
 
       const baseSpd = phaseTalking ? 3.2 : 1.8;
       const spd = baseSpd * emotionTransitionSpeedRef.current;
-      exprSet(em, key, lerp(cur, target, Math.min(1, safeDelta * spd)));
+      const alpha = THREE.MathUtils.clamp(safeDelta * spd, 0.08, 0.22);
+      exprSet(em, key, lerp(cur, target, alpha));
     }
 
+    // Subtle brow / eyes-up micro-layer (VRM lookUp morph; additive, capped)
+    {
+      const luCur = exprGet(em, 'lookUp');
+      const pszLu = preSpeechStrengthRef.current;
+      const luTgt = THREE.MathUtils.clamp(
+        microExpr.lookUpAdd +
+          mirrorAdds.lookUpAdd +
+          eyeMods.lookUpBias +
+          (pszLu > 0.01 ? 0.045 * pszLu : 0),
+        0,
+        0.14,
+      );
+      const luSpd = phaseTalking ? 4.0 : 2.5;
+      exprSet(em, 'lookUp', lerp(luCur, luTgt, Math.min(1, safeDelta * luSpd)));
+    }
+
+    {
+      const ihCur = exprGet(em, 'ih');
+      const ouCur = exprGet(em, 'ou');
+      const lipSpd = 2.8;
+      exprSet(
+        em,
+        'ih',
+        lerp(ihCur, mirrorAdds.ihTension, Math.min(1, safeDelta * lipSpd)),
+      );
+      exprSet(
+        em,
+        'ou',
+        lerp(ouCur, mirrorAdds.ouTension, Math.min(1, safeDelta * lipSpd)),
+      );
+    }
+
+    const lookAt = (vrm as { lookAt?: { autoUpdate?: boolean; lookAt?: (p: THREE.Vector3) => void } }).lookAt;
     const group = groupRef.current;
     if (group) {
       group.getWorldPosition(_avatarWorldScratch);
       _toCamScratch.copy(camera.position).sub(_avatarWorldScratch);
       if (_toCamScratch.lengthSq() > 1e-8) _toCamScratch.normalize();
       else _toCamScratch.set(0, 0, 1);
+      _camAnchorScratch.copy(_avatarWorldScratch).addScaledVector(_toCamScratch, 2.2);
+      _camAnchorScratch.y += 0.12;
+
       _eyeWorldScratch.copy(_avatarWorldScratch).addScaledVector(_toCamScratch, 2.2);
 
       if (nowMs >= eyeBobJitterNextRef.current) {
@@ -521,31 +751,33 @@ export function AnimationController({
         eyeBobPhaseBRef.current += (Math.random() - 0.5) * 1.1;
         eyeBobJitterNextRef.current = nowMs + 3200 + Math.random() * 9000;
       }
-      const bob = stabilizeGaze
-        ? 0
-        : Math.sin(t * 0.71 + eyeBobPhaseARef.current) * 0.0135 +
+      const bobMul = THREE.MathUtils.clamp(1 - stabilizeMix * 1.05, 0, 1);
+      const bob =
+        bobMul *
+        (Math.sin(t * 0.71 + eyeBobPhaseARef.current) * 0.0135 +
           Math.sin(t * 1.17 + eyeBobPhaseBRef.current) * 0.0085 +
-          Math.sin(t * 0.29) * Math.cos(t * 0.53 + eyeBobPhaseARef.current * 0.5) * 0.0055;
+          Math.sin(t * 0.29) * Math.cos(t * 0.53 + eyeBobPhaseARef.current * 0.5) * 0.0055);
       _eyeWorldScratch.y += 0.12 + bob;
 
-      const eyeSpd = Math.min(1, safeDelta * 10);
-      eyeAccumRef.current.lerp(_eyeWorldScratch, eyeSpd);
+      const directBlend = THREE.MathUtils.clamp(
+        stabilizeMix * (0.62 + 0.38 * eyeMods.gazeDirectMul) +
+          (phaseTalking ? 0.1 : 0) +
+          cognitionEye.gazeDirectAdd +
+          connectionHold,
+        0,
+        1,
+      );
+      _fusedEyeScratch.copy(_eyeWorldScratch).lerp(_camAnchorScratch, directBlend);
+      const eyeSpd = Math.min(
+        1,
+        safeDelta * THREE.MathUtils.lerp(11, 6.2, THREE.MathUtils.clamp(directBlend, 0, 1)),
+      );
+      eyeAccumRef.current.lerp(_fusedEyeScratch, eyeSpd);
     }
 
-    const lookAt = (vrm as { lookAt?: { autoUpdate?: boolean; lookAt?: (p: THREE.Vector3) => void } }).lookAt;
     if (lookAt?.lookAt && group) {
       lookAt.autoUpdate = false;
-      if (stabilizeGaze) {
-        group.getWorldPosition(_avatarWorldScratch);
-        _toCamScratch.copy(camera.position).sub(_avatarWorldScratch);
-        if (_toCamScratch.lengthSq() > 1e-8) _toCamScratch.normalize();
-        else _toCamScratch.set(0, 0, 1);
-        _eyeWorldScratch.copy(_avatarWorldScratch).addScaledVector(_toCamScratch, 2.2);
-        _eyeWorldScratch.y += 0.12;
-        lookAt.lookAt(_eyeWorldScratch);
-      } else {
-        lookAt.lookAt(eyeAccumRef.current);
-      }
+      lookAt.lookAt(eyeAccumRef.current);
     }
   }, -2);
 

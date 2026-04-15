@@ -19,6 +19,7 @@ import { apiBase, clearAccessToken, getAccessToken, notifyAuthChanged } from '@/
 import { BodyPortal } from '@/components/portal/BodyPortal';
 import { AvatarBodyPortal } from '@/components/portal/AvatarBodyPortal';
 import { Z_LAYERS } from '@/lib/z-layers';
+import { recordTypingActivity } from '@/lib/behavior/anticipationLayer';
 import { useCogniAvatarDebug } from '@/hooks/useCogniAvatarDebug';
 import { useTTSWithVisemes } from '@/hooks/useTTSWithVisemes';
 import type { VisemeCue } from '@/app/avatar-agent/LipSyncManager';
@@ -908,7 +909,10 @@ export default function AvatarAgentClient({
                   <input
                     ref={inputRef}
                     value={userInput}
-                    onChange={(e) => setUserInput(e.target.value)}
+                    onChange={(e) => {
+                      setUserInput(e.target.value);
+                      recordTypingActivity();
+                    }}
                     onKeyDown={(e) => e.key === 'Enter' && onSend()}
                     placeholder="تحدث أو اكتب سؤالك لكوجني هنا..."
                     className="w-full bg-white/5 border border-white/10 rounded-2xl px-6 py-4 text-white focus:outline-none focus:border-violet-500 transition-all placeholder:text-gray-600 shadow-inner"

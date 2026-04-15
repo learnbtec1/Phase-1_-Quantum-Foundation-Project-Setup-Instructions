@@ -14,7 +14,7 @@ type OfficeEnvironmentProps = {
 };
 
 /**
- * خلفية المكتب (office_lite.glb) داخل نفس الـ Canvas مع الأفاتار.
+ * خلفية المكتب (office.glb) داخل نفس الـ Canvas مع الأفاتار.
  * يُحمّل عبر useLoader داخل سياق R3F فقط.
  */
 export function OfficeEnvironment({

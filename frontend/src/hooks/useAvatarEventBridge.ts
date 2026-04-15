@@ -17,6 +17,7 @@ import {
 } from 'react';
 import { dispatchAvatar } from '@/utils/events/normalizeAvatarEvents';
 import type { VisemeCue } from '@/app/avatar-agent/LipSyncManager';
+import { resetSpeechIntentHints, setSpeechIntentHintsFromText } from '@/lib/avatar/speechIntentHints';
 
 // ─── Incoming message types (عقد JSON من الخادم أو اختبار) ───────────────────
 
@@ -246,6 +247,7 @@ export function useAvatarEventBridge({
     }
     visemeCueQueueRef.current = [];
     isTalkingRef.current = false;
+    resetSpeechIntentHints();
     window.dispatchEvent(new CustomEvent('avatar:speak:end'));
   }, [audioElementRef, isTalkingRef, visemeCueQueueRef]);
 
@@ -256,6 +258,7 @@ export function useAvatarEventBridge({
 
       if (!msg.audio?.trim()) {
         visemeCueQueueRef.current = cues;
+        setSpeechIntentHintsFromText((msg.text ?? '').trim());
         window.dispatchEvent(new CustomEvent('avatar:speak:start', { detail: {} }));
         isTalkingRef.current = true;
         return;
@@ -287,12 +290,14 @@ export function useAvatarEventBridge({
           // Dispatch audio:element FIRST so AvatarCanvas wires the analyser
           // before speak:start sets isTalkingRef — matches useAgentAgent ordering
           window.dispatchEvent(new CustomEvent('avatar:audio:element', { detail: { audio } }));
+          setSpeechIntentHintsFromText((msg.text ?? '').trim());
           window.dispatchEvent(new CustomEvent('avatar:speak:start', { detail: {} }));
           isTalkingRef.current = true;
         },
         (err) => {
           console.warn('[AvatarEventBridge] audio play failed', err);
           window.dispatchEvent(new CustomEvent('avatar:audio:element', { detail: { audio } }));
+          setSpeechIntentHintsFromText((msg.text ?? '').trim());
           window.dispatchEvent(new CustomEvent('avatar:speak:start', { detail: {} }));
           isTalkingRef.current = true;
         },

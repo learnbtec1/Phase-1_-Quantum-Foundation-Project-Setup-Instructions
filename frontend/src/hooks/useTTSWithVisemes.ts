@@ -16,6 +16,7 @@ import {
   estimateDialogueDurationMs,
 } from '@/ai/avatar/coSpeechPlanner';
 import { authHeaders } from '@/lib/auth';
+import { resetSpeechIntentHints, setSpeechIntentHintsFromText } from '@/lib/avatar/speechIntentHints';
 
 const ARABIC_RE = /[\u0600-\u06FF]/;
 const TICKS_TO_SEC = 1 / 10_000_000;
@@ -135,6 +136,7 @@ export function useTTSWithVisemes(
     revokeBlob();
     visemeCueQueueRef.current = [];
     if (typeof window !== 'undefined') {
+      resetSpeechIntentHints();
       window.dispatchEvent(new CustomEvent('avatar:speak:end'));
     }
   }, [audioElementRef, clearGestureTimers, revokeBlob, visemeCueQueueRef]);
@@ -228,6 +230,7 @@ export function useTTSWithVisemes(
               }
               revokeBlob();
               visemeCueQueueRef.current = [];
+              resetSpeechIntentHints();
               window.dispatchEvent(new CustomEvent('avatar:speak:end'));
               resolve();
             };
@@ -245,6 +248,7 @@ export function useTTSWithVisemes(
                     new CustomEvent('avatar:audio:element', { detail: { audio } }),
                   );
                 }
+                setSpeechIntentHintsFromText(trimmed);
                 window.dispatchEvent(
                   new CustomEvent('avatar:speak:start', { detail: {} }),
                 );
@@ -290,6 +294,7 @@ export function useTTSWithVisemes(
                 pendingEndedRef.current = null;
                 revokeBlob();
                 visemeCueQueueRef.current = [];
+                resetSpeechIntentHints();
                 window.dispatchEvent(new CustomEvent('avatar:speak:end'));
                 reject(err instanceof Error ? err : new Error(String(err)));
               });

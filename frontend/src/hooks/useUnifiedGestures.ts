@@ -21,6 +21,13 @@ export interface GesturePlayOptions {
   priority?: PriorityValue;
   durationMs?: number;
   crossFade?: boolean;
+  intensity?: number;
+  mood?: string;
+  humanTiming?: boolean;
+  replyText?: string;
+  responseClass?: import('@/ai/avatar/responsePersonality').ReplyBehaviorClass;
+  intentDepth?: import('@/ai/avatar/responsePersonality').IntentDepthClass;
+  behaviorBrain?: boolean;
 }
 
 export function useUnifiedGestures() {

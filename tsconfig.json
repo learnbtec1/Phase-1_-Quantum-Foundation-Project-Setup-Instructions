@@ -42,6 +42,9 @@
   "exclude": [
     "node_modules",
     "app.txt",
-    "frontend"
+    "frontend",
+    "backend",
+    "cogni-desktop-companion",
+    "HabibiJordan"
   ]
 }

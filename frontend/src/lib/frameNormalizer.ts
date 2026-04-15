@@ -86,6 +86,15 @@ export function toAgentFrame(
 ): AgentFrame {
   const thinkingMs = raw.thinking_ms;
   const speechRate = raw.speech_rate;
+  const cognitive_intent = parseCognitiveIntent(raw.cognitive_intent ?? raw.cognitiveIntent);
+  const cognitive_intensity = parseCognitiveIntensity(raw.cognitive_intensity ?? raw.cognitiveIntensity);
+  const cognitive_tone =
+    typeof raw.cognitive_tone === 'string'
+      ? raw.cognitive_tone
+      : typeof raw.cognitiveTone === 'string'
+        ? raw.cognitiveTone
+        : undefined;
+
   return {
     text: n.dialogue,
     emotion: n.emotionRaw,
@@ -98,5 +107,20 @@ export function toAgentFrame(
     },
     thinking_time_ms: typeof thinkingMs === 'number' ? thinkingMs : 400,
     ...(n.userPad ? { user_pad: n.userPad } : {}),
+    ...(cognitive_intent !== undefined ? { cognitive_intent } : {}),
+    ...(cognitive_intensity !== undefined ? { cognitive_intensity } : {}),
+    ...(cognitive_tone !== undefined ? { cognitive_tone } : {}),
   };
+}
+
+function parseCognitiveIntent(raw: unknown): 'explaining' | 'thinking' | 'listening' | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const k = raw.trim().toLowerCase();
+  if (k === 'explaining' || k === 'thinking' || k === 'listening') return k;
+  return undefined;
+}
+
+function parseCognitiveIntensity(raw: unknown): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined;
+  return Math.max(0, Math.min(1, raw));
 }

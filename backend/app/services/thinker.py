@@ -18,6 +18,7 @@ from typing import Awaitable, Callable, Optional
 
 from app.core.config import settings
 from app.archive.emotional_memory_manager import EmotionalMemoryManager
+from app.services.cognitive_roles import COGNITIVE_ROLE_THINKER_SYSTEM
 from app.services.llm_client import cogni_chat_completion
 
 logger = logging.getLogger(__name__)
@@ -162,15 +163,17 @@ class AutonomousThinker:
         """Revise stored lesson plan when inner thought signals confusion."""
         cur = self.memory.get_active_lesson_plan() or ""
         sys = (
-            "أنت مخطّط تعليمي لمنهج BTEC إدارة الأعمال. لديك خطة حالية؛ راجعها بإيجاز وأضف خطوة توضيحية "
-            "أو مثالاً إذا لزم. أخرج JSON فقط: {\"lesson_plan\": \"...\"}\n"
-            f"سبب المراجعة (داخلي): {reason_hint[:400]}"
+            COGNITIVE_ROLE_THINKER_SYSTEM.strip()
+            + "\n\n"
+            + "أنت مخطّط تعليمي لمنهج BTEC إدارة الأعمال. لديك خطة حالية؛ راجعها بإيجاز وأضف خطوة توضيحية "
+            + "أو مثالاً إذا لزم. أخرج JSON فقط: {\"lesson_plan\": \"...\"}\n"
+            + f"سبب المراجعة (داخلي): {reason_hint[:400]}"
         )
         user = f"الخطة الحالية:\n{cur[:4000]}"
         try:
             raw = await cogni_chat_completion(
                 [{"role": "system", "content": sys}, {"role": "user", "content": user}],
-                model=getattr(settings, "TUTOR_MODEL_FREE", "gpt-4o-mini"),
+                model=getattr(settings, "THINKER_MODEL", None) or getattr(settings, "TUTOR_MODEL_FREE", "gpt-4o-mini"),
                 max_tokens=400,
                 temperature=0.55,
                 user_id=self.memory.user_id if getattr(self.memory, "user_id", None) else None,
@@ -234,14 +237,16 @@ class AutonomousThinker:
             )
 
         system_prompt = (
-            "أنت العقل الباطن للمعلّم «كوجني» في منصة إيدوفيرس — **مختص في BTEC إدارة الأعمال** (وليس كامل المناهج الأردنية).\n"
-            "تفكير داخلي لا يُقرأ للطالب كما هو؛ ركّز على تقييم الفهم، والتخطيط، والخطوة التالية ضمن إطار الوحدة/المعايير.\n\n"
-            "قواعد:\n"
-            "- لا أفكار ترفيهية/سياسية بعيدة عن الدرس.\n"
-            "- فكرة داخلية قصيرة بالعربية (1–2 جملة).\n"
-            f"{plan_instructions}"
-            "أخرج JSON فقط بدون markdown، بالشكل:\n"
-            '{"thought": "...", "goal": "مهمة قصيرة أو null", "lesson_plan": "خطوات أو null"}\n'
+            COGNITIVE_ROLE_THINKER_SYSTEM.strip()
+            + "\n\n"
+            + "أنت العقل الباطن للمعلّم «كوجني» في منصة إيدوفيرس — **مختص في BTEC إدارة الأعمال** (وليس كامل المناهج الأردنية).\n"
+            + "تفكير داخلي لا يُقرأ للطالب كما هو؛ ركّز على تقييم الفهم، والتخطيط، والخطوة التالية ضمن إطار الوحدة/المعايير.\n\n"
+            + "قواعد:\n"
+            + "- لا أفكار ترفيهية/سياسية بعيدة عن الدرس.\n"
+            + "- فكرة داخلية قصيرة بالعربية (1–2 جملة).\n"
+            + f"{plan_instructions}"
+            + "أخرج JSON فقط بدون markdown، بالشكل:\n"
+            + '{"thought": "...", "goal": "مهمة قصيرة أو null", "lesson_plan": "خطوات أو null"}\n'
         )
 
         user_context = (
@@ -264,7 +269,7 @@ class AutonomousThinker:
             # • Keeps premium gpt-4o budget for actual student turns
             response = await cogni_chat_completion(
                 messages,
-                model=getattr(settings, "TUTOR_MODEL_FREE", "gpt-4o-mini"),
+                model=getattr(settings, "THINKER_MODEL", None) or getattr(settings, "TUTOR_MODEL_FREE", "gpt-4o-mini"),
                 max_tokens=420 if want_plan else 220,
                 temperature=0.65,
                 user_id=self.memory.user_id if getattr(self.memory, "user_id", None) else None,

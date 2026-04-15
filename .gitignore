@@ -28,6 +28,7 @@ backend/data/store/
 backend/data/btec-bus/*.pdf
 backend/data/btec-bus/*.docx
 backend/data/chroma_cogni/
+**/chroma.sqlite3
 tts.wav
 
 # Local / vendor bundles (do not ship in repo)

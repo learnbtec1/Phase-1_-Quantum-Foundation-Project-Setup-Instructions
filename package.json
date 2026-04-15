@@ -1,10 +1,19 @@
 {
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start"
+    "dev": "node scripts/run-canonical-frontend.mjs dev",
+    "build": "node scripts/run-canonical-frontend.mjs build",
+    "start": "node scripts/run-canonical-frontend.mjs start",
+    "typecheck": "cd frontend && npx tsc --noEmit",
+    "typecheck:frontend": "cd frontend && npx tsc --noEmit",
+    "dev:frontend": "cd frontend && npm run dev",
+    "build:frontend": "cd frontend && npm run build",
+    "start:frontend": "cd frontend && npm run start",
+    "dev:root-legacy": "next dev",
+    "build:root-legacy": "next build",
+    "start:root-legacy": "next start"
   },
   "dependencies": {
+    "@pinecone-database/pinecone": "^6.1.4",
     "@pixiv/three-vrm": "^3.5.1",
     "@pixiv/three-vrm-animation": "^3.5.1",
     "@react-three/drei": "^10.7.7",

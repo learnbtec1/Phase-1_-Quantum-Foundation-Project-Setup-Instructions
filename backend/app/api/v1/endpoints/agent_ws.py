@@ -1162,22 +1162,28 @@ async def agent_ws(websocket: WebSocket):
                             usage_user_id=user_uuid,
                         )
 
-                        if mp3_bytes:
-                            audio_b64 = base64.b64encode(mp3_bytes).decode('ascii')
-                            log_tts_success(
-                                source=tts_provider,
-                                text_len=_dlen,
-                                audio_bytes=len(mp3_bytes),
-                                viseme_n=len(viseme_cues),
-                                word_n=len(word_cues),
-                                voice=_vname,
+                        if tts_provider != "azure":
+                            raise RuntimeError(
+                                f"TTS integrity violation: expected Azure, got {tts_provider!r}"
                             )
+                        if not mp3_bytes:
+                            raise RuntimeError("Azure TTS returned empty audio")
+
+                        audio_b64 = base64.b64encode(mp3_bytes).decode('ascii')
+                        log_tts_success(
+                            source=tts_provider,
+                            text_len=_dlen,
+                            audio_bytes=len(mp3_bytes),
+                            viseme_n=len(viseme_cues),
+                            word_n=len(word_cues),
+                            voice=_vname,
+                        )
                     except Exception as e:
                         _code, _human = classify_tts_failure(
-                            e, azure_key_set=_ak, azure_region=_ar, edge_attempted=True,
+                            e, azure_key_set=_ak, azure_region=_ar, edge_attempted=False,
                         )
                         logger.error(
-                            "[AgentWS] TTS synthesis failed after Azure+edge policy in tts_service | "
+                            "[AgentWS] TTS synthesis failed (Azure-only) | "
                             "code=%s | detail=%s | exc_type=%s | exc=%s",
                             _code,
                             _human,

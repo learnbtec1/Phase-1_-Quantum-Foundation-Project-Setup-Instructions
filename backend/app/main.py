@@ -111,7 +111,7 @@ async def _tts_ping_loop() -> None:
     await asyncio.sleep(8)   # slight startup delay — let the app warm up first
     while True:
         try:
-            from app.api.v1.endpoints.tts_timing import _synthesize_azure_sync
+            from app.services.azure_tts import _synthesize_azure_sync
             key    = settings.AZURE_SPEECH_KEY
             region = settings.AZURE_SPEECH_REGION
             voice  = settings.TTS_ARABIC_VOICE
@@ -144,6 +144,9 @@ async def lifespan(app_instance):
     import asyncio
     loop = asyncio.get_running_loop()
 
+    if bool(getattr(settings, "TTS_AZURE_ONLY", True)):
+        logger.info("TTS Provider: AZURE ONLY")
+
     # 0) Re-patch logging handlers that uvicorn registered AFTER our module-top
     #    patch ran.  This prevents cp1252 UnicodeEncodeError in Windows consoles.
     try:
@@ -169,15 +172,7 @@ async def lifespan(app_instance):
     except Exception as e:
         logger.warning("TTS data dirs setup: %s", e)
 
-    # 1) Kokoro TTS (local)
-    try:
-        from app.services.kokoro_tts import _init_kokoro
-        await loop.run_in_executor(None, _init_kokoro)
-        logger.info("Kokoro TTS pre‑warmed")
-    except Exception as e:
-        logger.warning("Kokoro pre‑warm failed: %s", e)
-
-    # 2) Whisper STT (local)
+    # 1) Whisper STT (local)
     try:
         from app.services.whisper_stt import _init_whisper
         await loop.run_in_executor(None, _init_whisper)
@@ -185,7 +180,7 @@ async def lifespan(app_instance):
     except Exception as e:
         logger.warning("Whisper pre‑warm failed: %s", e)
 
-    # 3) Azure Neural TTS (cloud) – store in app.state for dependency injection
+    # 2) Azure Neural TTS (cloud) – store in app.state for dependency injection
     try:
         app_instance.state.tts_service = AzureTTSService(
             speech_key=settings.AZURE_SPEECH_KEY,
@@ -203,7 +198,7 @@ async def lifespan(app_instance):
         logger.error("Azure TTS service initialization failed: %s", e)
         app_instance.state.tts_service = None
 
-    # 4) TTS health-ping background task — updates _tts_health every 5 min
+    # 3) TTS health-ping background task — updates _tts_health every 5 min
     _ping_task = asyncio.create_task(_tts_ping_loop())
     app_instance.state.tts_ping_task = _ping_task
 
@@ -259,7 +254,7 @@ async def lifespan(app_instance):
 app = FastAPI(
     lifespan=lifespan,
     title="EDUVERSE Assessment API",
-    description="Smart grading engine for P/M/D criteria (GPT-4o / Claude via GRADER_MODEL env var).",
+    description="Smart grading engine for P/M/D criteria (GPT-5 / Claude via GRADER_MODEL env var).",
     version="4.0.0",
 )
 

@@ -29,7 +29,7 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 | المتغير | الوصف | افتراضي |
 |--------|--------|---------|
 | `ANTHROPIC_API_KEY` | مفتاح Claude API | مطلوب |
-| `GRADER_MODEL` | نموذج التقييم | `claude-sonnet-4-20250514` |
+| `GRADER_MODEL` | نموذج التقييم (BTEC forensic) | `gpt-5` (استخدم `claude-*` إن رغبت في Claude) |
 | `PORT` | منفذ الخادم | `8000` |
 | `HOST` | عنوان الاستماع | `127.0.0.1` |
 | `PLAGIARISM_MIN_LEN` | حد أدنى لطول النص لفحص الانتحال | `80` |

@@ -55,6 +55,12 @@ except ImportError:
     def get_calibration_block(band: str) -> str:  # type: ignore[misc]
         return ""
 
+try:
+    from app.services.cognitive_roles import prepend_grader_role
+except ImportError:
+    def prepend_grader_role(s: str) -> str:  # type: ignore[misc]
+        return s
+
 load_dotenv()
 
 logging.basicConfig(
@@ -64,7 +70,8 @@ logging.basicConfig(
 logger = logging.getLogger("forensic.v4")
 
 # ========= Configuration =========
-MODEL = os.getenv("GRADER_MODEL", "claude-sonnet-4-5").strip() or "claude-sonnet-4-5"
+# Default aligns with Settings.DEFAULT_MODEL (gpt-5). Override with GRADER_MODEL=claude-* for Anthropic.
+MODEL = os.getenv("GRADER_MODEL", "gpt-5").strip() or "gpt-5"
 MODEL_NAME = MODEL  # Alias exported for the health-check endpoint in main.py
 
 # Initialize clients based on model name
@@ -926,7 +933,8 @@ async def evaluate_one(
 
     calibration_block = get_calibration_block(band)
 
-    prompt = f"""أنت مقيّم أكاديمي معتمد من Pearson لمؤهلات BTEC International Level 3.
+    prompt = prepend_grader_role(
+        f"""أنت مقيّم أكاديمي معتمد من Pearson لمؤهلات BTEC International Level 3.
 {effective_corpus}
 مهمتك: تقييم المعيار {code} بعد فهم السيناريو الكامل للواجب أولاً — لا تشدد ولا تساهل.
 
@@ -1058,6 +1066,7 @@ async def evaluate_one(
     "سؤال إرشادي 3 اختياري — أو مصفوفة فارغة إن achieved=true ولا حاجة لدعم إضافي"
   ]
 }}"""
+    )
 
     async with semaphore:
         try:

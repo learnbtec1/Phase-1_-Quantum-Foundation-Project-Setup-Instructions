@@ -16,6 +16,22 @@
 
 import { useBrainStore } from '@/store/useBrainStore';
 import type { LongTermMemory } from '@/types/ai';
+import {
+  flushPersistentEmotionalMemory,
+  initPersistentEmotionalMemory,
+  resetPersistentEmotionalMemory,
+} from '@/lib/avatar/emotionalMemory';
+import {
+  flushPersonalityEvolution,
+  initPersonalityEvolution,
+  resetPersonalityEvolution,
+} from '@/lib/avatar/personalityEvolution';
+import { flushOpinionEngine, initOpinionEngine, resetOpinionEngine } from '@/lib/avatar/opinionEngine';
+import {
+  flushCompanionship,
+  initCompanionship,
+  resetCompanionship,
+} from '@/lib/avatar/companionship';
 
 const KEY_LTM = 'cogni:ltm';
 const KEY_CTX = 'cogni:ctx';
@@ -61,6 +77,10 @@ function safeSave(key: string, value: unknown): void {
 export function initBrainPersistence(): void {
   if (typeof window === 'undefined') return;
 
+  initPersistentEmotionalMemory();
+  initPersonalityEvolution();
+  initOpinionEngine();
+
   // 1. Restore longTermMemory
   const savedLtm = safeParse<LongTermMemory>(KEY_LTM);
   if (savedLtm) {
@@ -103,6 +123,25 @@ export function initBrainPersistence(): void {
     );
     // Expose on window for AgentDirector to build a contextual greeting
     (window as unknown as Record<string, unknown>).__cogniLastSession = ctx;
+  }
+
+  if (process.env.NODE_ENV === 'development') {
+    (window as unknown as Record<string, unknown>).__cogniResetPersistentEmotion = (): void => {
+      resetPersistentEmotionalMemory();
+      console.log('[BrainPersist] Persistent emotional memory cleared');
+    };
+    (window as unknown as Record<string, unknown>).__cogniResetPersonalityEvolution = (): void => {
+      resetPersonalityEvolution();
+      console.log('[BrainPersist] Personality evolution reset to baseline');
+    };
+    (window as unknown as Record<string, unknown>).__cogniResetOpinionEngine = (): void => {
+      resetOpinionEngine();
+      console.log('[BrainPersist] Opinion engine topic memory cleared');
+    };
+    (window as unknown as Record<string, unknown>).__cogniResetCompanionship = (): void => {
+      resetCompanionship();
+      console.log('[BrainPersist] Companionship session/visit counters reset');
+    };
   }
 
   // 3. Auto-save every 60 s
@@ -149,6 +188,10 @@ export function flushBrainPersistence(): void {
     lastMood:    last?.userMood ?? 'neutral',
   };
   safeSave(KEY_CTX, ctx);
+  flushPersistentEmotionalMemory();
+  flushPersonalityEvolution();
+  flushOpinionEngine();
+  flushCompanionship();
 }
 
 /** Returns last-session context (null if first ever session). */

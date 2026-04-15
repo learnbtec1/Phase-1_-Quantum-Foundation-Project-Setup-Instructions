@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     # LLM / Grader configuration
     # ----------------------------
     OPENAI_API_KEY: str = Field("", env="OPENAI_API_KEY")
-    DEFAULT_MODEL: str = Field("gpt-4o", env="GRADER_MODEL")
+    DEFAULT_MODEL: str = Field("gpt-5", env="GRADER_MODEL")
     HARD_DEADLINE_SEC: int = Field(70, env="GRADER_HARD_DEADLINE_SEC")
     SELF_CONSISTENCY: int = Field(1, env="GRADER_SELF_CONSISTENCY")
     MAX_TOKENS: int = Field(2600, env="GRADER_MAX_TOKENS")
@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     # ----------------------------
     TUTOR_MODEL: str = Field("gpt-4o", env="TUTOR_MODEL")
     TUTOR_MODEL_FREE: str = Field("gpt-4o-mini", env="TUTOR_MODEL_FREE")
+    # Inner monologue / planning — same family as free tier by default; override via THINKER_MODEL.
+    THINKER_MODEL: str = Field("gpt-4o-mini", env="THINKER_MODEL")
 
     # ----------------------------
     # Plagiarism Guard
@@ -152,20 +154,18 @@ class Settings(BaseSettings):
     TTS_ARABIC_VOICE:        str = Field("ar-JO-TaimNeural",   env="TTS_ARABIC_VOICE")
     TTS_ARABIC_VOICE_FEMALE: str = Field("ar-JO-SanaNeural",   env="TTS_ARABIC_VOICE_FEMALE")
     COGNI_ARABIC_TTS_VOICE_LOCKED: str = Field("ar-JO-TaimNeural", env="COGNI_ARABIC_TTS_VOICE_LOCKED")
-    # When True: `/tts-with-timing` does not fall back to edge-tts/gTTS after most Azure failures.
-    # Authentication failures (401/403) still fall back so Cogni can speak.
-    # Default False keeps edge-tts available as a resilient path after Azure errors.
-    TTS_DISABLE_NON_AZURE_FALLBACK: bool = Field(False, env="TTS_DISABLE_NON_AZURE_FALLBACK")
-    # HTTP + WebSocket synthesis: "azure" tries Azure Speech first (default for Cogni WS).
-    # "edge" uses edge-tts first when set explicitly.
+    # When True: WebSocket TTS uses Azure only (no Edge/Kokoro/gTTS fallbacks).
+    TTS_AZURE_ONLY: bool = Field(True, env="TTS_AZURE_ONLY")
+    # When True: legacy flag — no non-Azure TTS fallbacks (default True; Cogni is Azure-only).
+    TTS_DISABLE_NON_AZURE_FALLBACK: bool = Field(True, env="TTS_DISABLE_NON_AZURE_FALLBACK")
+    # Ignored when TTS_AZURE_ONLY=True (Edge is disabled).
     TTS_PRIMARY_PROVIDER: str = Field("azure", env="TTS_PRIMARY_PROVIDER")
-    # When True, skip Azure and use edge-tts only (diagnostics / broken Azure environments).
+    # Must stay False in production — Edge TTS is disabled when TTS_AZURE_ONLY=True.
     TTS_FORCE_FALLBACK: bool = Field(False, env="TTS_FORCE_FALLBACK")
     # Retries inside AzureTTSService.synthesize on transient 429 / rate-limit errors
     TTS_AZURE_RETRY_COUNT: int = Field(3, env="TTS_AZURE_RETRY_COUNT")
     TTS_AZURE_RETRY_DELAY_SEC: float = Field(2.5, env="TTS_AZURE_RETRY_DELAY_SEC")
-    # When True: if Azure returns 429/rate-limit, fall through to edge-tts (same ar-JO voice name) instead of HTTP 503.
-    # Ignored if TTS_DISABLE_NON_AZURE_FALLBACK is True.
+    # Legacy (unused): Edge fallback removed; Azure retries only.
     TTS_AZURE_429_FALLBACK_EDGE: bool = Field(False, env="TTS_AZURE_429_FALLBACK_EDGE")
 
     # Jordanian dialect lock (TTS + optional text pass)
@@ -212,6 +212,21 @@ class Settings(BaseSettings):
             environment_is_production,
             validate_jwt_secret_for_production,
         )
+
+        if self.TTS_AZURE_ONLY:
+            if not (self.AZURE_SPEECH_KEY or "").strip():
+                raise ValueError(
+                    "TTS_AZURE_ONLY=true requires AZURE_SPEECH_KEY. "
+                    "Set Azure Speech credentials or TTS_AZURE_ONLY=false for local dev without Azure."
+                )
+            if not (self.AZURE_SPEECH_REGION or "").strip():
+                raise ValueError(
+                    "TTS_AZURE_ONLY=true requires AZURE_SPEECH_REGION."
+                )
+            if self.TTS_FORCE_FALLBACK:
+                raise ValueError(
+                    "TTS_FORCE_FALLBACK must be false when TTS_AZURE_ONLY=true (Azure-only enforcement)."
+                )
 
         is_prod = environment_is_production(self.ENVIRONMENT)
         if self.AUTO_CREATE_TABLES is None:

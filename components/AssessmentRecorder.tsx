@@ -6,7 +6,7 @@ import {
   ScanEye, Fingerprint, Activity, Percent, ShieldAlert 
 } from 'lucide-react';
 import { saveAs } from 'file-saver';
-import { Document, Packer, Paragraph, Table, TableRow, TableCell, WidthType, Alignment } from 'docx';
+import { Document, Packer, Paragraph, Table, TableRow, TableCell, WidthType } from 'docx';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 import { motion, AnimatePresence } from 'framer-motion';

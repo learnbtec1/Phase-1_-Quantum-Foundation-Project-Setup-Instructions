@@ -17,6 +17,7 @@ import { PRIORITY, resolveEmotionGesturePlay } from '@/constants/gestures';
 import type { TeachingStrategy } from '@/ai/teaching/TeachingStrategyEngine';
 import { checkGestureCooldown, recordGestureLog, getLastGestureLog } from '@/ai/memory/store';
 import { dispatchAvatar }                    from '@/utils/events/normalizeAvatarEvents';
+import { resetSpeechIntentHints, setSpeechIntentHintsFromText } from '@/lib/avatar/speechIntentHints';
 import { speakWithTTS, stopTTSGlobally, resolveSpeakRate } from '@/ai/io/tts';
 import { COGNI_PERSONA, AVATAR_PERSONALITY } from '@/config/personality';
 import { ENABLE_MIME_MODE, LEVEL6_UNIFIED_BEHAVIOR } from '@/config/avatar';
@@ -29,6 +30,10 @@ import {
   estimateSpeechDurationMs,
   gesturePrerollMs,
 } from '@/utils/TimingUtils';
+import {
+  computeInteractionIntent,
+  type InteractionIntent,
+} from '@/ai/avatar/avatarIntent';
 
 declare global {
   interface Window {
@@ -105,7 +110,10 @@ function emit(name: string, detail: Record<string, unknown>): void {
   }
 }
 
-/** Level 6: direct VRMA / engine plays are disabled — intent pipeline owns body motion. */
+/**
+ * UnifiedGestureEngine → `avatar:vrma:play`. No-op when Level 6 is on (BehaviorBrainHost owns motion;
+ * see `NEXT_PUBLIC_LEVEL6_UNIFIED_BEHAVIOR` in avatar.ts).
+ */
 function directorGesturePlay(name: string, opts?: Record<string, unknown>): void {
   if (LEVEL6_UNIFIED_BEHAVIOR) return;
   void unifiedGestureEngine.play(
@@ -120,7 +128,7 @@ function cogniDelayMs(base: number): number {
 }
 
 const EMOTION_GESTURE_MAP: Partial<Record<EmotionLabel, string>> = {
-  excited: 'clap', happy: 'openHand', encouraging: 'openHand', proud: 'clap',
+  excited: 'openHand', happy: 'openHand', encouraging: 'openHand', proud: 'openHand',
   surprised: 'openHand', angry: 'point', thinking: 'openHand', curious: 'beat',
   attentive: 'beat', concerned: 'openHand', calm: 'openHand', relaxed: 'openHand',
   empathetic: 'openHand', sad: 'beat', anxious: 'beat', bored: 'beat', sleepy: 'beat', neutral: 'beat',
@@ -131,10 +139,10 @@ const EMOTION_GESTURE_MAP: Partial<Record<EmotionLabel, string>> = {
  * so the priority queue and cross-fade system are respected.
  */
 const EMOTION_TO_VRMA: Partial<Record<EmotionLabel, string>> = {
-  excited:      'Clapping',
-  happy:        'Clapping',
-  encouraging:  'Clapping',
-  proud:        'standing-cheering',
+  excited:      'Agreeing',
+  happy:        'Agreeing',
+  encouraging:  'Agreeing',
+  proud:        'Agreeing',
   surprised:    'Surprised',
   sad:          'Sad',
   angry:        'Angry',
@@ -171,6 +179,8 @@ export class AgentDirector {
   private _lastEmotionReact    = 0;
   private _lastPADReact        = 0;
   private _lastEmotion:        EmotionLabel | '' = '';
+  /** Debounced intent recompute (emotion + speech → presentation). */
+  private _intentDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── Lifecycle ───────────────────────────────────────────────────────────────
 
@@ -270,6 +280,15 @@ export class AgentDirector {
       window.addEventListener('cogni:student_contagion', onContagion);
       this._unsubs.push(() => window.removeEventListener('cogni:student_contagion', onContagion));
     }
+
+    const scheduleIntent = () => this._scheduleInteractionIntentUpdate();
+    this._unsubs.push(useBrainStore.subscribe(s => s.talking, scheduleIntent));
+    this._unsubs.push(useBrainStore.subscribe(s => s.thinking, scheduleIntent));
+    this._unsubs.push(useBrainStore.subscribe(s => s.isUserSpeaking, scheduleIntent));
+    this._unsubs.push(useBrainStore.subscribe(s => s.physical.isListening, scheduleIntent));
+    this._unsubs.push(useBrainStore.subscribe(s => s.emotionLabel, scheduleIntent));
+    this._unsubs.push(useBrainStore.subscribe(s => s.lastFrame, scheduleIntent));
+    this._later(320, () => this._flushInteractionIntent());
   }
 
   stop(): void {
@@ -283,7 +302,71 @@ export class AgentDirector {
       clearTimeout(this._neutralBreakTimerId);
       this._neutralBreakTimerId = null;
     }
+    if (this._intentDebounceTimer !== null) {
+      clearTimeout(this._intentDebounceTimer);
+      this._intentDebounceTimer = null;
+    }
     console.log('[AgentDirector] STOPPED — All systems cleared');
+  }
+
+  /** Batch rapid brain updates; avoids snapping intent every frame. */
+  private _scheduleInteractionIntentUpdate(): void {
+    if (!this._running) return;
+    if (this._intentDebounceTimer) clearTimeout(this._intentDebounceTimer);
+    this._intentDebounceTimer = setTimeout(() => {
+      this._intentDebounceTimer = null;
+      this._flushInteractionIntent();
+    }, 280);
+  }
+
+  private _flushInteractionIntent(): void {
+    if (!this._running) return;
+    const s = useBrainStore.getState();
+    const next = computeInteractionIntent({
+      talking: s.talking,
+      thinking: s.thinking,
+      isUserSpeaking: s.isUserSpeaking,
+      isListening: s.physical.isListening,
+      emotionLabel: s.emotionLabel,
+      lastFrame: s.lastFrame,
+    });
+    if (next === s.interactionIntent) return;
+    s.setInteractionIntent(next);
+    this._emitIntentPresentationCue(next);
+  }
+
+  /**
+   * One-shot head/face cues when intent changes — blends with AnimationController gaze lerp.
+   * Does not touch VRMA or gesture engine.
+   */
+  private _emitIntentPresentationCue(intent: InteractionIntent): void {
+    if (typeof window === 'undefined') return;
+    if (LEVEL6_UNIFIED_BEHAVIOR) {
+      emitBehaviorText(`[intent:${intent}]`, 'system');
+      return;
+    }
+    if (intent === 'thinking') {
+      window.dispatchEvent(new CustomEvent('avatar:blink', { detail: { style: 'slow' } }));
+      window.dispatchEvent(
+        new CustomEvent('avatar:gaze', { detail: { yaw: 0.11, pitch: -0.055, durationMs: 2200 } }),
+      );
+      return;
+    }
+    if (intent === 'listening') {
+      window.dispatchEvent(new CustomEvent('avatar:blink', { detail: { style: 'normal' } }));
+      window.dispatchEvent(
+        new CustomEvent('avatar:gaze', { detail: { yaw: 0, pitch: 0.035, durationMs: 1800 } }),
+      );
+      return;
+    }
+    if (intent === 'explaining') {
+      window.dispatchEvent(new CustomEvent('avatar:blink', { detail: { style: 'normal' } }));
+      window.dispatchEvent(
+        new CustomEvent('avatar:gaze', { detail: { yaw: -0.02, pitch: -0.018, durationMs: 1500 } }),
+      );
+      return;
+    }
+    window.dispatchEvent(new CustomEvent('avatar:blink', { detail: { style: 'normal' } }));
   }
 
   // ── Reaction Handlers ───────────────────────────────────────────────────────
@@ -373,7 +456,10 @@ export class AgentDirector {
   }
 
   private _reactToFrame(frame: AgentFrame): void {
-    const delay = jitter(frame.thinking_time_ms, 0.15) * COGNI_TIMING.deliberationScale;
+    const rhythm = useBrainStore.getState().userSpeechRhythm;
+    const rhythmMul = rhythm === 'fast' ? 0.9 : rhythm === 'slow' ? 1.08 : 1;
+    const delay =
+      jitter(frame.thinking_time_ms, 0.15) * COGNI_TIMING.deliberationScale * rhythmMul;
     this._later(0, () => emit('avatar:voice', {
       rate: frame.voice.rate * COGNI_VOICE.rate,
       pitch: frame.voice.pitch * COGNI_VOICE.pitchScale,
@@ -569,7 +655,7 @@ export class AgentDirector {
         // Alternate between procedural (fast) and VRMA-based (named) idle gestures
         const useVrma = Math.random() < 0.35;
         if (useVrma) {
-          const vrmaIdles = ['look-around', 'look-around2', 'Relax', 'Idle1', 'Idle2', 'Idle3', 'Idle4'];
+          const vrmaIdles = ['Acknowledging', 'Agreeing', 'Relax', 'Idle1', 'Idle2', 'Idle3', 'Idle4'];
           const pick = vrmaIdles[Math.floor(Math.random() * vrmaIdles.length)];
           directorGesturePlay(pick, { priority: PRIORITY.LOW });
         } else {
@@ -593,8 +679,12 @@ export class AgentDirector {
     // If speak:start fires first, onSpeakStart sees no active gesture and
     // immediately plays sitTalk, killing the gesture animation.
     this._applyEmotionContract(emotion);
+    setSpeechIntentHintsFromText(text);
     emit('avatar:speak:start', {});
-    this._later(estimateSpeechDurationMs(text), () => emit('avatar:speak:end', {}));
+    this._later(estimateSpeechDurationMs(text), () => {
+      resetSpeechIntentHints();
+      emit('avatar:speak:end', {});
+    });
   }
 
   // ── Emotion Contracts ───────────────────────────────────────────────────────
@@ -682,18 +772,14 @@ export class AgentDirector {
         : Math.random;
     const durJitterSec = (rnd() - 0.5) * 0.35 * v;
     const durationSec = Math.max(0.45, (o.durationSec ?? 1.8) + durJitterSec);
-    const variance = rnd() * 0.12 * v;
     const ampScale = 0.85 + rnd() * 0.3;
-    const wristTwist = (rnd() - 0.5) * 0.09 * v;
     const asym = (rnd() - 0.5) * 0.04;
     intensity = Math.min(0.95, intensity * ampScale + asym);
 
     this._later(Math.max(0, gesturePrerollMs() - 200), () => {
       devLog('gesture →', mapped, 'dur≈', durationSec.toFixed(2), 's', 'side=', o.side, 'I=', intensity.toFixed(2));
 
-      // Route through UnifiedGestureEngine.play() when the gesture is a known VRMA/canonical name.
-      // This preserves vrmaStem, priority, and goes through the full VRMA system.
-      // Fallback to legacy dispatchAvatar for procedural tokens (openHand, beat, etc.)
+      // Single pipeline: UnifiedGestureEngine → avatar:vrma:play + head-only gesture (no procedural arm path).
       const VRMA_GESTURES_SET = new Set([
         'Thinking', 'thinking', 'think',
         'Waving', 'waving', 'wave',
@@ -709,26 +795,25 @@ export class AgentDirector {
         'standing-cheering', 'Clapping',
         'listening', 'processing',
       ]);
+      const PROCEDURAL_TO_VRMA: Record<string, string> = {
+        openHand: 'Acknowledging',
+        beat: 'Thinking',
+        explain: 'Thinking',
+        lean_forward: 'Thinking',
+        look: 'Acknowledging',
+        relax: 'Relax',
+        head_down: 'Sad',
+      };
+      const resolved = VRMA_GESTURES_SET.has(mapped)
+        ? mapped
+        : (PROCEDURAL_TO_VRMA[mapped] ?? 'Acknowledging');
 
-      if (VRMA_GESTURES_SET.has(mapped)) {
-        // Full VRMA pipeline: gesture + priority + crossfade + correct bone state
-        directorGesturePlay(mapped, {
-          priority: PRIORITY.NORMAL,
-          durationMs: Math.round(durationSec * 1000),
-          intensity,
-          mood: useBrainStore.getState().emotionLabel ?? 'neutral',
-        });
-      } else {
-        // Legacy procedural path (openHand, beat, lean_forward, etc.)
-        emit('avatar:gesture', {
-          type: mapped,
-          gesture: mapped,   // also set gesture field for VRMSkeletonManager
-          side: o.side,
-          duration: durationSec,
-          intensity,
-          variance: variance + wristTwist,
-        });
-      }
+      directorGesturePlay(resolved, {
+        priority: PRIORITY.NORMAL,
+        durationMs: Math.round(durationSec * 1000),
+        intensity,
+        mood: useBrainStore.getState().emotionLabel ?? 'neutral',
+      });
     });
   }
 
@@ -751,15 +836,24 @@ export class AgentDirector {
     if (ENABLE_MIME_MODE) {
       await new Promise<void>(res => {
         this._later(delay, () => {
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(
+              new CustomEvent('cogni:pre_speech', {
+                detail: { text: trimmed.slice(0, 160), emotion: String(emotion) },
+              }),
+            );
+          }
           stopTTSGlobally();
           emitAgentMessage(trimmed, emotion);
           if (LEVEL6_UNIFIED_BEHAVIOR) emitBehaviorText(trimmed, 'conversation');
           useBrainStore.getState().setTalking(true);
+          setSpeechIntentHintsFromText(trimmed);
           emit('avatar:speak:start', {});
           const simulatedMs = Math.max(400, Math.min(120_000, trimmed.length * 65));
           const endT = setTimeout(() => {
             this._timers = this._timers.filter(x => x !== endT);
             useBrainStore.getState().setTalking(false);
+            resetSpeechIntentHints();
             emit('avatar:speak:end', {});
             res();
           }, simulatedMs);
@@ -778,6 +872,13 @@ export class AgentDirector {
         if (LEVEL6_UNIFIED_BEHAVIOR) emitBehaviorText(trimmed, 'conversation');
 
         if (clientAzure) {
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(
+              new CustomEvent('cogni:pre_speech', {
+                detail: { text: trimmed.slice(0, 160), emotion: String(emotion) },
+              }),
+            );
+          }
           // الصوت يُشغَّل من `AvatarCanvas` عبر `onAgentSpeak` (Azure SDK + visemes).
           res();
           return;
@@ -794,6 +895,7 @@ export class AgentDirector {
           }, 
           onEnd: () => { 
             useBrainStore.getState().setTalking(false); 
+            resetSpeechIntentHints();
             emit('avatar:speak:end', {}); 
             res(); 
           } 
@@ -952,7 +1054,7 @@ export class AgentDirector {
           bow:      'Acknowledging',
           think:    'Thinking',
           explain:  'Pointing',
-          celebrate:'standing-cheering',
+          celebrate:'Agreeing',
           wait:     'Idle1',
           listen:   'listening',
           process:  'processing',

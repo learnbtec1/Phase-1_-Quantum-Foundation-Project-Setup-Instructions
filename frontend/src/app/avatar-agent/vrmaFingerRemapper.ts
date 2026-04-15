@@ -636,6 +636,91 @@ function applySwizzleToTrack(track: THREE.KeyframeTrack): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Upper-body constraint (production): remove hips / legs / feet — no root drift or locomotion.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LOWER_BODY_VRMA_BONES = new Set<string>([
+  'hips',
+  'leftUpperLeg',
+  'rightUpperLeg',
+  'leftLowerLeg',
+  'rightLowerLeg',
+  'leftFoot',
+  'rightFoot',
+  'leftToes',
+  'rightToes',
+]);
+
+function stripLowerBodyVrmaTracks(clip: THREE.AnimationClip): void {
+  const kept: THREE.KeyframeTrack[] = [];
+  for (const track of clip.tracks) {
+    const dotIdx = track.name.indexOf('.');
+    if (dotIdx === -1) {
+      kept.push(track);
+      continue;
+    }
+    const bone = track.name.slice(0, dotIdx);
+    if (LOWER_BODY_VRMA_BONES.has(bone)) continue;
+    kept.push(track);
+  }
+  clip.tracks = kept;
+}
+
+/** No translation / scale from VRMA — prevents root drift and floating. */
+function stripNonRotationTracks(clip: THREE.AnimationClip): void {
+  const kept: THREE.KeyframeTrack[] = [];
+  for (const track of clip.tracks) {
+    const dotIdx = track.name.indexOf('.');
+    if (dotIdx === -1) {
+      kept.push(track);
+      continue;
+    }
+    const prop = track.name.slice(dotIdx);
+    if (prop === '.position' || prop === '.scale') continue;
+    kept.push(track);
+  }
+  clip.tracks = kept;
+}
+
+const _qId = new THREE.Quaternion(0, 0, 0, 1);
+const _qClamp = new THREE.Quaternion();
+const _qOut = new THREE.Quaternion();
+
+/** Max angle (rad) from identity per keyframe — stops runaway spins. Fingers allowed slightly more. */
+const MAX_VRMA_QUAT_ANGLE_RAD = 0.72;
+const MAX_VRMA_QUAT_ANGLE_FINGER_RAD = 1.05;
+
+function clampQuaternionTracks(clip: THREE.AnimationClip): void {
+  for (const track of clip.tracks) {
+    if (!track.name.endsWith('.quaternion')) continue;
+    const bone = track.name.slice(0, track.name.indexOf('.'));
+    const maxAng = /Finger|Thumb|Proximal|Intermediate|Distal|Hand|Metacarpal/i.test(bone)
+      ? MAX_VRMA_QUAT_ANGLE_FINGER_RAD
+      : MAX_VRMA_QUAT_ANGLE_RAD;
+    const values = track.values as Float32Array;
+    for (let i = 0; i < values.length; i += 4) {
+      _qClamp.set(values[i], values[i + 1], values[i + 2], values[i + 3]);
+      _qClamp.normalize();
+      const w = THREE.MathUtils.clamp(_qClamp.w, -1, 1);
+      const angle = 2 * Math.acos(Math.abs(w));
+      if (angle <= maxAng || angle < 1e-7) {
+        values[i] = _qClamp.x;
+        values[i + 1] = _qClamp.y;
+        values[i + 2] = _qClamp.z;
+        values[i + 3] = _qClamp.w;
+        continue;
+      }
+      const t = maxAng / angle;
+      _qOut.copy(_qId).slerp(_qClamp, t);
+      values[i] = _qOut.x;
+      values[i + 1] = _qOut.y;
+      values[i + 2] = _qOut.z;
+      values[i + 3] = _qOut.w;
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC API
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -679,6 +764,10 @@ export function remapClipForVRM(clip: THREE.AnimationClip, vrm: VRM): THREE.Anim
       applySwizzleToTrack(track as THREE.QuaternionKeyframeTrack);
     }
   }
+
+  stripLowerBodyVrmaTracks(clip);
+  stripNonRotationTracks(clip);
+  clampQuaternionTracks(clip);
 
   if (process.env.NODE_ENV === 'development') {
     if (renamed.length > 0) {

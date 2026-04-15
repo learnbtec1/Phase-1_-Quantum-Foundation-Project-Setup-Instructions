@@ -13,7 +13,12 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 _use_db = os.getenv("USE_DB", "false").lower() in ("true", "1", "yes")
 _env_db = (os.getenv("DATABASE_URL") or "").strip()
 if _use_db:
-    DATABASE_URL = _env_db or "postgresql+psycopg2://eduverse:eduverse_secret@localhost:5432/eduverse_db"
+    if not _env_db:
+        raise RuntimeError(
+            "USE_DB=true requires DATABASE_URL to be set. "
+            "Do not rely on embedded defaults; configure Postgres in the environment or docker-compose."
+        )
+    DATABASE_URL = _env_db
 else:
     DATABASE_URL = _env_db or "sqlite:///./test.db"
 

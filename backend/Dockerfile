@@ -5,14 +5,19 @@ FROM python:3.10-slim-bullseye AS builder
 
 WORKDIR /install
 
-# System libs needed to compile psycopg2 + audio libs
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Reduce flaky apt mirror timeouts (common on Docker Desktop / slow networks)
+RUN printf 'Acquire::Retries "8";\nAcquire::http::Timeout "120";\nAcquire::https::Timeout "120";\n' \
+    > /etc/apt/apt.conf.d/99retry
+
+# System libs needed to compile wheels (chromadb, etc.) + libpq headers if needed
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
         build-essential \
         libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-# Includes pysqlite3-binary (SQLite >= 3.35 for Chroma) and edge-tts>=7.x
+# Includes pysqlite3-binary (SQLite >= 3.35 for Chroma) and azure-cognitiveservices-speech
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir --prefix=/install/pkgs -r requirements.txt
 
@@ -21,6 +26,9 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
 FROM python:3.10-slim-bullseye
 
 WORKDIR /app
+
+RUN printf 'Acquire::Retries "8";\nAcquire::http::Timeout "120";\nAcquire::https::Timeout "120";\n' \
+    > /etc/apt/apt.conf.d/99retry
 
 # Only runtime system libs — no compiler, no headers
 # libssl1.1 provides OpenSSL 1.1.x needed by Azure Speech SDK on Debian 11

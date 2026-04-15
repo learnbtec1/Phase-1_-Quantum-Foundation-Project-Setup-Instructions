@@ -80,6 +80,14 @@ export interface AgentFrame {
   };
   /** Thinker goal update — forwarded from goal_update WS frame if bundled. */
   thinker_goal?: string;
+
+  /**
+   * Optional LLM-authoritative embodiment (when set, cognitive orchestrator uses these
+   * instead of heuristic intent; backend should emit structured JSON alongside dialogue).
+   */
+  cognitive_intent?: 'explaining' | 'thinking' | 'listening';
+  cognitive_intensity?: number;
+  cognitive_tone?: string;
 }
 
 // ─── Behavior output ───────────────────────────────────────────────────────────

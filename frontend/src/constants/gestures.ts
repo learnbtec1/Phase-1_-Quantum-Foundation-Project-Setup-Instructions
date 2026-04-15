@@ -9,7 +9,7 @@
  *
  * NOTE: VRMSkeletonManager owns actual bone-level playback.
  *       This module only defines metadata used by UnifiedGestureEngine
- *       to dispatch `avatar:gesture` and `avatar:vrma:request` events.
+ *       to dispatch `avatar:vrma:play` and head-only `avatar:gesture` (motion: vrma) events.
  */
 
 // ─── Confirmed VRMA filenames (public/models/animations/) ───────────────────
@@ -126,10 +126,17 @@ export const VRMA_GESTURES = {
  */
 export const GESTURE_FILENAME_MAP: Readonly<Record<string, string>> = {
   // Interactive
+  explain:            'Pointing',
+  nod:                'Agreeing',
+  /** Ambient idle shift — same family as look-around2 (scheduler). */
+  idle_shift:         'look-around2',
   thinking:           'Thinking',
   think:              'Thinking',
   waving:             'Waving',
   wave:               'Waving',
+  greeting:           'greeting',
+  greet:              'greeting',
+  welcome:            'greeting',
   clapping:           'Clapping',
   clap:               'Clapping',
   pointing:           'Pointing',
@@ -151,19 +158,19 @@ export const GESTURE_FILENAME_MAP: Readonly<Record<string, string>> = {
   sleepy:             'Sleepy',
   sleep:              'Sleepy',
   // Movement
-  walking:            'Walking',
-  walk:               'Walking',
-  jump:               'Jump',
-  jumping:            'Jump',
-  'jump-high':        'jump-high',
-  jumphigh:           'jump-high',
-  'stop-walking':     'stop-walking',
-  stopwalking:        'stop-walking',
-  pacing:             'pacing-and-talking-on-a-phone',
-  'pacing-and-talking-on-a-phone': 'pacing-and-talking-on-a-phone',
+  walking:            'Acknowledging',
+  walk:               'Acknowledging',
+  jump:               'Acknowledging',
+  jumping:            'Acknowledging',
+  'jump-high':        'Acknowledging',
+  jumphigh:           'Acknowledging',
+  'stop-walking':     'Acknowledging',
+  stopwalking:        'Acknowledging',
+  pacing:             'Acknowledging',
+  'pacing-and-talking-on-a-phone': 'Acknowledging',
   // Activity
-  typing:             'Typing',
-  type:               'Typing',
+  typing:             'Acknowledging',
+  type:               'Acknowledging',
   // Sitting
   sitting:            'sitting',
   sit:                'sitting',
@@ -175,10 +182,10 @@ export const GESTURE_FILENAME_MAP: Readonly<Record<string, string>> = {
   sittingdisapproval: 'sitting-disapproval',
   'sitting-talking':  'sitting-talking',
   // Social
-  'standing-cheering':'standing-cheering',
-  standingcheering:   'standing-cheering',
-  cheering:           'standing-cheering',
-  cheer:              'standing-cheering',
+  'standing-cheering':'Clapping',
+  standingcheering:   'Clapping',
+  cheering:           'Clapping',
+  cheer:              'Clapping',
   'look-around':      'look-around',
   lookaround:         'look-around',
   'look-around2':     'look-around2',
@@ -237,6 +244,9 @@ export const GESTURE_PRIORITY_MAP: Readonly<Record<string, PriorityValue>> = {
   jump:        PRIORITY.HIGH,
   'jump-high': PRIORITY.HIGH,
   // NORMAL
+  explain:     PRIORITY.NORMAL,
+  nod:         PRIORITY.LOW,
+  idle_shift:  PRIORITY.LOW,
   thinking:    PRIORITY.NORMAL,
   think:       PRIORITY.NORMAL,
   pointing:    PRIORITY.NORMAL,
@@ -274,6 +284,9 @@ export const GESTURE_PRIORITY_MAP: Readonly<Record<string, PriorityValue>> = {
 // ─── Duration hints (ms) ─────────────────────────────────────────────────────
 
 export const GESTURE_DURATION_MS: Readonly<Record<string, number>> = {
+  explain: 2200,
+  nod: 1800,
+  idle_shift: 2200,
   default:       2000,
   test_elbow:    2800,
   testelbow:     2800,
@@ -330,13 +343,13 @@ export const GESTURE_FALLBACKS: Readonly<Record<string, FallbackConfig>> = {
   // Virtual states — no direct VRMA
   listening: {
     strategy: 'blend',
-    gestures: ['look-around', 'Idle1'],
+    gestures: ['Acknowledging', 'Idle1'],
     blendMs: 300,
     eachDurationMs: 3000,
   },
   processing: {
     strategy: 'blend',
-    gestures: ['Thinking', 'look-around2'],
+    gestures: ['Thinking', 'Agreeing'],
     blendMs: 200,
     eachDurationMs: 2500,
   },
@@ -348,25 +361,25 @@ export const GESTURE_FALLBACKS: Readonly<Record<string, FallbackConfig>> = {
   },
   curious: {
     strategy: 'blend',
-    gestures: ['look-around', 'Pointing'],
+    gestures: ['Agreeing', 'Pointing'],
     blendMs: 400,
     eachDurationMs: 2000,
   },
   // Aliases / alternative spellings for gestures not in GESTURE_FILENAME_MAP
   greet:      { strategy: 'single', gestures: ['Waving'],     eachDurationMs: 2000 },
   greeting:   { strategy: 'single', gestures: ['Waving'],     eachDurationMs: 2000 },
-  celebrate:  { strategy: 'sequence', gestures: ['Clapping', 'standing-cheering'], gapMs: 100, eachDurationMs: 2000 },
+  celebrate:  { strategy: 'sequence', gestures: ['Agreeing', 'Acknowledging'], gapMs: 120, eachDurationMs: 2000 },
   talking:    { strategy: 'single', gestures: ['sitting-and-talking'], eachDurationMs: 0 },
   explain:    { strategy: 'single', gestures: ['Pointing'],   eachDurationMs: 2200 },
   explan:     { strategy: 'single', gestures: ['Pointing'],   eachDurationMs: 2200 },
   board:      { strategy: 'single', gestures: ['Pointing'],   eachDurationMs: 2200 },
   thankful:   { strategy: 'single', gestures: ['Acknowledging'], eachDurationMs: 2000 },
-  meeting:    { strategy: 'single', gestures: ['sitting-and-talking'], eachDurationMs: 0 },
-  havingameeting: { strategy: 'single', gestures: ['sitting-and-talking'], eachDurationMs: 0 },
-  'standing-clapping': { strategy: 'single', gestures: ['Clapping'], eachDurationMs: 2200 },
-  standingclapping: { strategy: 'single', gestures: ['Clapping'], eachDurationMs: 2200 },
-  'sitting-victory': { strategy: 'single', gestures: ['standing-cheering'], eachDurationMs: 2000 },
-  sittingvictory: { strategy: 'single', gestures: ['standing-cheering'], eachDurationMs: 2000 },
+  meeting:    { strategy: 'blend', gestures: ['Acknowledging', 'Idle1'], blendMs: 300, eachDurationMs: 2800 },
+  havingameeting: { strategy: 'blend', gestures: ['Acknowledging', 'Idle1'], blendMs: 300, eachDurationMs: 2800 },
+  'standing-clapping': { strategy: 'single', gestures: ['Agreeing'], eachDurationMs: 2200 },
+  standingclapping: { strategy: 'single', gestures: ['Agreeing'], eachDurationMs: 2200 },
+  'sitting-victory': { strategy: 'single', gestures: ['Acknowledging'], eachDurationMs: 2000 },
+  sittingvictory: { strategy: 'single', gestures: ['Acknowledging'], eachDurationMs: 2000 },
   // Fallback idle alias
   idle:  { strategy: 'single', gestures: ['Idle1'], eachDurationMs: 3000 },
 };
@@ -390,6 +403,7 @@ export const CANONICAL_GESTURES = new Set<CanonicalGesture>([
 export const VRMA_TO_CANONICAL: Readonly<Record<string, CanonicalGesture>> = {
   Thinking:    'think',
   Waving:      'wave',
+  greeting:    'wave',
   Clapping:    'clap',
   Pointing:    'point',
   Agreeing:    'agree',
@@ -444,6 +458,110 @@ export function vrmaUrl(stem: string): string {
 }
 
 /**
+ * Game-like / locomotion / full-body pack clips — replace with conversational upper-body-safe stems.
+ * Files remain on disk; callers should run stems through this before `vrmaUrl()`.
+ */
+export const VRMA_CONVERSATIONAL_REDIRECT: Readonly<Record<string, string>> = {
+  Typing: 'Acknowledging',
+  Walking: 'Acknowledging',
+  Jump: 'Acknowledging',
+  'jump-high': 'Acknowledging',
+  'stop-walking': 'Acknowledging',
+  'pacing-and-talking-on-a-phone': 'Acknowledging',
+  'standing-cheering': 'Clapping',
+  VRMA_01: 'VRMA_02',
+  VRMA_03: 'VRMA_02',
+  VRMA_04: 'VRMA_02',
+  VRMA_05: 'VRMA_02',
+  VRMA_06: 'VRMA_02',
+  VRMA_07: 'VRMA_02',
+  Untitled: 'Acknowledging',
+  havingameeting: 'Acknowledging',
+  'look-around': 'Acknowledging',
+  'look-around2': 'Agreeing',
+};
+
+/** Stems permitted after redirects — anything else maps to {@link PRODUCTION_FALLBACK_STEMS}. */
+export const PRODUCTION_ALLOWED_VRMA_STEMS: ReadonlySet<string> = new Set([
+  'Acknowledging',
+  'Thinking',
+  'Agreeing',
+  'VRMA_02',
+  'Waving',
+  'greeting',
+  'Pointing',
+  'Clapping',
+  'Idle1',
+  'Idle2',
+  'Idle3',
+  'Idle4',
+  'Relax',
+  'Goodbye',
+  'Beckoning',
+  'Surprised',
+  'Sad',
+  'Angry',
+  'Sleepy',
+  'Blush',
+  'thankful',
+  'explan',
+  'board',
+  'talking',
+  'sitting',
+  'sitting-and-talking',
+  'sitting-and-pointing',
+  'sitting-disapproval',
+  'sitting-talking',
+  'sitting-victory',
+]);
+
+/** Deterministic fallback pool when a stem is not production-safe. */
+export const PRODUCTION_FALLBACK_STEMS = ['Acknowledging', 'Thinking', 'Agreeing', 'VRMA_02'] as const;
+
+function stemHash32(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+/** Last step in resolution: conversational redirects + whitelist. */
+export function enforceProductionVrmaStem(stem: string): string {
+  const base = stem.replace(/\.vrma$/i, '').trim();
+  if (PRODUCTION_ALLOWED_VRMA_STEMS.has(base)) return base;
+  const idx = stemHash32(base) % PRODUCTION_FALLBACK_STEMS.length;
+  return PRODUCTION_FALLBACK_STEMS[idx];
+}
+
+/** Normalize engine stem (no extension) to a conversational-safe VRMA stem. */
+export function sanitizeVrmaStem(stem: string): string {
+  const base = stem.replace(/\.vrma$/i, '').trim();
+  const redirected = VRMA_CONVERSATIONAL_REDIRECT[base] ?? base;
+  return enforceProductionVrmaStem(redirected);
+}
+
+/**
+ * Last-line defense when a full URL is dispatched (bypasses stem map). Same policy as {@link sanitizeVrmaStem}.
+ */
+export function sanitizeVrmaAssetUrl(url: string): string {
+  if (!url || typeof url !== 'string') return url;
+  const n = url.replace(/\\/g, '/').toLowerCase();
+  if (n.includes('typing.vrma')) return `${VRMA_BASE_PATH}Acknowledging.vrma`;
+  if (n.includes('walking.vrma')) return `${VRMA_BASE_PATH}Acknowledging.vrma`;
+  if (n.includes('jump-high.vrma')) return `${VRMA_BASE_PATH}Acknowledging.vrma`;
+  if (n.includes('/jump.vrma')) return `${VRMA_BASE_PATH}Acknowledging.vrma`;
+  if (n.includes('stop-walking.vrma')) return `${VRMA_BASE_PATH}Acknowledging.vrma`;
+  if (n.includes('pacing-and-talking-on-a-phone.vrma')) return `${VRMA_BASE_PATH}Acknowledging.vrma`;
+  if (n.includes('standing-cheering.vrma')) return `${VRMA_BASE_PATH}Clapping.vrma`;
+  if (n.includes('vrma_01.vrma')) return `${VRMA_BASE_PATH}VRMA_MotionPack/vrma/VRMA_02.vrma`;
+  if (/vrma_0[3-7]\.vrma/i.test(n)) return `${VRMA_BASE_PATH}VRMA_MotionPack/vrma/VRMA_02.vrma`;
+  if (n.includes('havingameeting.vrma')) return `${VRMA_BASE_PATH}Acknowledging.vrma`;
+  return url;
+}
+
+/**
  * Maps free-form mood / heuristic labels (usually lowercase) → `UnifiedGestureEngine.play()` name.
  * Values are VRMA stems, virtual keys in GESTURE_FALLBACKS, or GESTURE_FILENAME_MAP aliases.
  */
@@ -451,11 +569,11 @@ export const EMOTION_TO_GESTURE_PLAY: Readonly<Record<string, string>> = {
   surprised: 'Surprised',
   angry: 'Angry',
   error: 'Surprised',
-  excited: 'standing-cheering',
-  proud: 'standing-cheering',
-  joy: 'Clapping',
-  happy: 'Clapping',
-  encouraging: 'Clapping',
+  excited: 'Agreeing',
+  proud: 'Agreeing',
+  joy: 'Agreeing',
+  happy: 'Agreeing',
+  encouraging: 'Agreeing',
   thinking: 'Thinking',
   confused: 'Thinking',
   processing: 'processing',
@@ -475,8 +593,8 @@ export const EMOTION_TO_GESTURE_PLAY: Readonly<Record<string, string>> = {
   explan: 'Pointing',
   teaching: 'board',
   board: 'board',
-  meeting: 'havingameeting',
-  havingameeting: 'havingameeting',
+  meeting: 'listening',
+  havingameeting: 'listening',
   neutral: 'Idle1',
   calm: 'Relax',
   relaxed: 'Relax',

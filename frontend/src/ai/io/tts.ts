@@ -1,18 +1,25 @@
 /**
  * Client-side TTS: speaks text via /api/tts-with-timing, dispatches avatar:speak for lip-sync.
  * Supports avatar:interrupt to stop playback when user types or speaks.
- * Phase 2: schedules avatar:viseme events from real word-boundary timing (edge-tts).
+ * Phase 2: schedules avatar:viseme events from Azure viseme + word-boundary timing.
  */
 import type { WordTiming } from '@/ai/lipsync/timing';
-import { azureVisemeToWeights } from '@/ai/lipsync/azureViseme';
 import { COGNI_PERSONA } from '@/config/personality';
 import { authHeaders } from '@/lib/auth';
-import { estimateSpeechDurationMs } from '@/utils/TimingUtils';
+import { resetSpeechIntentHints, setSpeechIntentHintsFromText } from '@/lib/avatar/speechIntentHints';
+import { resumeSharedAudioContext } from '@/lib/audio/avatarAudioContext';
+import { waitAudioReady } from '@/lib/audio/waitAudioReady';
+import { visemeEventsToCues } from '@/lib/audio/visemeCueFromApi';
+import { inferEmotionFromText } from '@/ai/voice/emotionFromText';
+import { getPauseMicroHeadMul } from '@/ai/voice/emotionalCoupling';
+import { getSpeechEmotionSnapshot, setSpeechEmotionBridge } from '@/ai/voice/speechEmotionBridge';
 
 export type { WordTiming };
 
 export interface SpeakOptions {
-  emotion?:  string;   // Phase 4: maps to edge-tts prosody via backend
+  emotion?:  string;   // Phase 4: maps to Azure SSML prosody via backend
+  /** 0–1; merged with emotionFromText when omitted */
+  emotionIntensity?: number;
   rate?:     number;   // Hybrid Persona Kernel: direct speed override (1.0 = normal)
   pitch?:    string;   // Phase 4: explicit Hz offset e.g. "+5Hz" (overrides emotion default)
   /** Override Jordanian Arabic voice: "male" (ar-JO-OmarNeural) | "female" (ar-JO-MaysoonNeural) */
@@ -23,17 +30,6 @@ export interface SpeakOptions {
 
 /** Detect Arabic unicode block (U+0600–U+06FF) */
 const _ARABIC_RE = /[\u0600-\u06FF]/;
-
-const _SECONDARY_TTS_PROVIDERS = new Set(['edge-tts', 'gtts']);
-
-function _notifySecondaryTtsEngine(source: 'http' | 'response'): void {
-  if (typeof window === 'undefined') return;
-  window.dispatchEvent(
-    new CustomEvent('cogni:tts-secondary-voice', {
-      detail: { message: 'Using secondary voice engine...', source },
-    }),
-  );
-}
 
 // Emotion speed mapping (كما هو)
 /** Emotion → default TTS speed; exported for AgentDirector + Cogni persona blending */
@@ -110,86 +106,10 @@ export function registerAzureClientTTSStop(fn: (() => void) | null): void {
 let _ttsSessionId = 0;
 /** Pending viseme setTimeout IDs — cleared on interrupt. */
 const _visemeTimers: ReturnType<typeof setTimeout>[] = [];
+/** Sentence-end nod timers from `scheduleNods` — must not outlive interrupt (race + leak). */
+const _nodTimers: ReturnType<typeof setTimeout>[] = [];
 /** True while client `/api/tts-with-timing` audio is actively playing (after successful play()). */
 let _clientTtsPlaying = false;
-
-/** Approximate word timings + viseme schedule when the TTS API returns 503 (no audio). */
-function runLocalTtsLipSyncSimulation(
-  text: string,
-  options: SpeakOptions | undefined,
-  mySid: number,
-): boolean {
-  const trimmed = text.replace(/\s+/g, ' ').trim();
-  if (!trimmed) return false;
-
-  const words = trimmed.split(/\s+/).filter(Boolean);
-  const msPerWord = 200;
-  const wordTimings: WordTiming[] = words.map((word, i) => ({
-    word,
-    start_time: i * msPerWord,
-    end_time: (i + 1) * msPerWord,
-  }));
-
-  const durationMs = estimateSpeechDurationMs(trimmed, options?.rate ?? 1);
-
-  window.dispatchEvent(
-    new CustomEvent('avatar:speak', {
-      detail: { text: trimmed, timings: wordTimings, sampleRate: 24000, audio: null },
-    }),
-  );
-  options?.onStart?.();
-
-  if (words.length > 0) {
-    window.dispatchEvent(new CustomEvent('avatar:viseme:start'));
-    words.forEach((word, i) => {
-      const t = i * msPerWord;
-      const firstAr = [...word].find((ch) => /[\u0600-\u06FF]/.test(ch));
-      const vid = firstAr ? 2 : 1;
-      _visemeTimers.push(
-        setTimeout(() => {
-          if (mySid !== _ttsSessionId) return;
-          window.dispatchEvent(
-            new CustomEvent('avatar:viseme', {
-              detail: { id: vid, weights: azureVisemeToWeights(vid) },
-            }),
-          );
-        }, Math.max(0, t)),
-      );
-    });
-  }
-
-  const sentenceEnd = /[.!?\u061f\u060c]+$/;
-  wordTimings.forEach((wt) => {
-    if (sentenceEnd.test(wt.word ?? '') && wt.end_time > 0) {
-      _visemeTimers.push(
-        setTimeout(() => {
-          if (mySid !== _ttsSessionId) return;
-          window.dispatchEvent(
-            new CustomEvent('avatar:nod', {
-              detail: {
-                intensity: 0.16 + Math.random() * 0.18,
-                duration: (360 + Math.random() * 160) / 1000,
-              },
-            }),
-          );
-        }, wt.end_time + 120),
-      );
-    }
-  });
-
-  _visemeTimers.push(
-    setTimeout(() => {
-      if (mySid !== _ttsSessionId) return;
-      window.dispatchEvent(
-        new CustomEvent('avatar:viseme', { detail: { id: 0, weights: { aa: 0, ih: 0, ou: 0 } } }),
-      );
-      window.dispatchEvent(new CustomEvent('avatar:speak:end'));
-      options?.onEnd?.();
-    }, durationMs),
-  );
-
-  return true;
-}
 
 /** Stop module-scoped TTS and viseme timers; clears playing flag. Call from useAgentAgent for unified pipeline. */
 export function stopTTSGlobally(): void {
@@ -228,9 +148,87 @@ function pcmBytesToWavBlob(pcmBytes: Uint8Array, sampleRate: number): Blob {
 }
 
 /**
+ * Fade out client `/api/tts-with-timing` audio then release (barge-in).
+ * Does not hard-cut unless fadeMs is 0.
+ */
+export function fadeOutStopTTS(
+  fadeMs = 120,
+  opts?: { skipSpeakEnd?: boolean; skipNeutralViseme?: boolean },
+): void {
+  _ttsSessionId += 1;
+  _clientTtsPlaying = false;
+  while (_visemeTimers.length) clearTimeout(_visemeTimers.pop()!);
+  while (_nodTimers.length) clearTimeout(_nodTimers.pop()!);
+  try {
+    _stopAzureClientTTS?.();
+  } catch {
+    /* */
+  }
+  if (typeof window !== 'undefined' && !opts?.skipNeutralViseme) {
+    window.dispatchEvent(
+      new CustomEvent('avatar:viseme', { detail: { id: 0, weights: { aa: 0, ih: 0, ou: 0 } } }),
+    );
+    window.dispatchEvent(new CustomEvent('avatar:visemes:clear'));
+  }
+  if (typeof window !== 'undefined') {
+    setSpeechEmotionBridge(null);
+    if (!opts?.skipSpeakEnd) {
+      resetSpeechIntentHints();
+      window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+    }
+  }
+
+  const a = currentAudio;
+  const finish = (): void => {
+    if (currentAudio === a) currentAudio = null;
+    if (currentUrl) {
+      try {
+        URL.revokeObjectURL(currentUrl);
+      } catch { /* ignore */ }
+      currentUrl = null;
+    }
+  };
+
+  if (!a || fadeMs <= 0.001) {
+    if (a) {
+      try {
+        a.pause();
+        a.currentTime = 0;
+      } catch { /* ignore */ }
+    }
+    finish();
+    return;
+  }
+
+  const v0 = typeof a.volume === 'number' && Number.isFinite(a.volume) ? a.volume : 1;
+  const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const step = (): void => {
+    if (currentAudio !== a) return;
+    const t = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0;
+    const u = Math.min(1, t / fadeMs);
+    try {
+      a.volume = Math.max(0, v0 * (1 - u));
+    } catch { /* ignore */ }
+    if (u < 1) {
+      if (typeof requestAnimationFrame !== 'undefined') requestAnimationFrame(step);
+      else window.setTimeout(step, 16);
+    } else {
+      try {
+        a.pause();
+        a.currentTime = 0;
+      } catch { /* ignore */ }
+      finish();
+    }
+  };
+  if (typeof requestAnimationFrame !== 'undefined') requestAnimationFrame(step);
+  else window.setTimeout(step, 16);
+}
+
+/**
  * Stop current TTS playback. Called when user interrupts (types or speaks).
  */
 export function stopTTS(): void {
+  _ttsSessionId += 1;
   _clientTtsPlaying = false;
   try {
     _stopAzureClientTTS?.();
@@ -239,8 +237,10 @@ export function stopTTS(): void {
   }
   // Cancel pending viseme events
   while (_visemeTimers.length) clearTimeout(_visemeTimers.pop()!);
+  while (_nodTimers.length) clearTimeout(_nodTimers.pop()!);
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('avatar:viseme', { detail: { id: 0, weights: { aa: 0, ih: 0, ou: 0 } } }));
+    window.dispatchEvent(new CustomEvent('avatar:visemes:clear'));
   }
   if (currentAudio) {
     try {
@@ -256,13 +256,15 @@ export function stopTTS(): void {
     currentUrl = null;
   }
   if (typeof window !== 'undefined') {
+    resetSpeechIntentHints();
+    setSpeechEmotionBridge(null);
     window.dispatchEvent(new CustomEvent('avatar:speak:end'));
   }
 }
 
 if (typeof window !== 'undefined') {
   window.addEventListener('cogni:avatar:interrupt', () => {
-    stopTTS();
+    fadeOutStopTTS(130);
   });
 }
 
@@ -279,12 +281,14 @@ export async function speakWithTTS(
 
   try {
     // FIX: voice stability — blend emotion speed with Cogni persona rate/pitch consistently
+    const inferred = inferEmotionFromText(text);
+    const resolvedEmotion = options?.emotion ?? inferred.emotion;
+    const resolvedIntensity = options?.emotionIntensity ?? inferred.intensity;
     const personaRate = COGNI_PERSONA.voiceParameters.rate;
-    const emotionKey  = options?.emotion ?? 'neutral';
     // Consume any PAD-driven voice hint emitted by AgentDirector via avatar:voice
     const padHint     = consumePadVoiceHint();
     const blendedSpeed =
-      options?.rate ?? padHint.rate ?? resolveSpeakRate(emotionKey, personaRate);
+      options?.rate ?? padHint.rate ?? resolveSpeakRate(resolvedEmotion, personaRate);
     const defaultPitchFromPersona =
       COGNI_PERSONA.voiceParameters.pitchScale > 1.005
         ? `+${Math.round((COGNI_PERSONA.voiceParameters.pitchScale - 1) * 45)}Hz`
@@ -294,8 +298,10 @@ export async function speakWithTTS(
 
     const ttsBody = JSON.stringify({
       text,
+      provider: 'azure',
       speed: blendedSpeed,
-      emotion: emotionKey,
+      emotion: resolvedEmotion,
+      emotion_intensity: resolvedIntensity,
       ...(resolvedPitch ? { pitch: resolvedPitch } : {}),
       ar_voice: options?.arVoice ?? (_ARABIC_RE.test(text) ? 'male' : undefined),
     });
@@ -353,11 +359,11 @@ export async function speakWithTTS(
           res = await doTtsFetch();
         } else {
           if (res.status === 503 || res.status === 502) {
-            console.warn(
-              `[speakWithTTS] TTS unavailable (${res.status}) — local lip-sync only (no audio).`,
+            console.error(
+              `[speakWithTTS] Azure TTS unavailable (${res.status}) — no fallback (Azure-only policy).`,
               errBody.slice(0, 220),
             );
-            return runLocalTtsLipSyncSimulation(text, options, mySid);
+            return false;
           }
           console.warn(
             `[speakWithTTS] /api/tts-with-timing HTTP ${res.status}:`,
@@ -381,11 +387,11 @@ export async function speakWithTTS(
         return false;
       }
       if (res.status === 503 || res.status === 502) {
-        console.warn(
-          `[speakWithTTS] TTS unavailable (${res.status}) after retry — local lip-sync only.`,
+        console.error(
+          `[speakWithTTS] Azure TTS unavailable (${res.status}) after retry — no fallback.`,
           errTail.slice(0, 220),
         );
-        return runLocalTtsLipSyncSimulation(text, options, mySid);
+        return false;
       }
       console.warn(
         `[speakWithTTS] /api/tts-with-timing HTTP ${res.status} after retry:`,
@@ -395,41 +401,60 @@ export async function speakWithTTS(
     }
 
     const data = await res.json().catch(() => null);
+    const prov = typeof data?.provider === 'string' ? data.provider.toLowerCase() : '';
+    if (prov && prov !== 'azure') {
+      console.error('[speakWithTTS] TTS provider must be azure — got:', data?.provider);
+      return false;
+    }
+    const visRaw = data?.viseme_events;
+    if (!Array.isArray(visRaw) || visRaw.length === 0) {
+      console.error(
+        '[speakWithTTS] Missing or empty viseme_events — lip sync cannot run (Azure integrity).',
+        JSON.stringify(data)?.slice(0, 240),
+      );
+      return false;
+    }
     const audioBase64 = data?.audio_base64;
     const wordTimings = (data?.word_timings ?? []) as WordTiming[];
     const sampleRate = data?.sample_rate ?? 24000;
 
     if (!audioBase64) {
-      console.warn(
-        '[speakWithTTS] Backend returned no audio — local lip-sync only.',
+      console.error(
+        '[speakWithTTS] Backend returned no audio — Azure-only: cannot play.',
         JSON.stringify(data)?.slice(0, 300),
       );
-      return runLocalTtsLipSyncSimulation(text, options, mySid);
-    }
-
-    const _prov = typeof data?.provider === 'string' ? data.provider.toLowerCase() : '';
-    if (_prov && _SECONDARY_TTS_PROVIDERS.has(_prov)) {
-      _notifySecondaryTtsEngine('response');
+      return false;
     }
 
     const binary = Uint8Array.from(atob(audioBase64), (c) => c.charCodeAt(0));
-    const fmt = (data?.format ?? 'mp3') as string;
+    const fmt = (data?.format ?? 'wav') as string;
     const blob = fmt === 'pcm'
       ? pcmBytesToWavBlob(binary, sampleRate)
-      : new Blob([binary], { type: 'audio/mpeg' });
+      : new Blob([binary], { type: fmt === 'wav' ? 'audio/wav' : 'audio/mpeg' });
     const url = URL.createObjectURL(blob);
     currentUrl = url;
-    const audio = new Audio(url);
+    const audio = new Audio();
+    audio.crossOrigin = 'anonymous';
+    audio.preload = 'auto';
+    /** Slight headroom to reduce perceived clipping on neural voices */
+    audio.volume = 0.94;
+    audio.src = url;
     currentAudio = audio;
+
+    const visemeCues = visemeEventsToCues(data?.viseme_events);
 
     // Cleanup function to be called after playback ends or on fatal error
     const cleanup = () => {
       _clientTtsPlaying = false;
+      while (_nodTimers.length) clearTimeout(_nodTimers.pop()!);
       URL.revokeObjectURL(url);
       if (mySid === _ttsSessionId) {
         currentAudio = null;
         currentUrl   = null;
       }
+      resetSpeechIntentHints();
+      setSpeechEmotionBridge(null);
+      window.dispatchEvent(new CustomEvent('avatar:visemes:clear'));
       window.dispatchEvent(new CustomEvent('avatar:speak:end'));
       options?.onEnd?.();
     };
@@ -437,42 +462,23 @@ export async function speakWithTTS(
     audio.addEventListener('ended', cleanup);
     audio.addEventListener('error', cleanup);
 
-    options?.onStart?.();
-
-    // We will NOT dispatch avatar:speak:start until we confirm playback has actually started.
-    // Instead, we store the events to be dispatched after successful play.
-
-    // ── Phase 2: Real viseme scheduling from edge-tts word-boundary events ──
-    const visemeEvents = (data?.viseme_events ?? []) as Array<{ offset_ms: number; viseme_id: number }>;
-    const scheduleVisemes = () => {
-      if (visemeEvents.length > 0) {
-        window.dispatchEvent(new CustomEvent('avatar:viseme:start'));
-        visemeEvents.forEach((ve) => {
-          _visemeTimers.push(
-            setTimeout(() => {
-              if (mySid !== _ttsSessionId) return;
-              window.dispatchEvent(new CustomEvent('avatar:viseme', {
-                detail: { id: ve.viseme_id, weights: azureVisemeToWeights(ve.viseme_id) },
-              }));
-            }, Math.max(0, ve.offset_ms))
-          );
-        });
-      }
-    };
-
     const scheduleNods = () => {
       if (wordTimings.length > 0) {
         const sentenceEnd = /[.!?\u061f\u060c]+$/;
         wordTimings.forEach((wt) => {
           if (sentenceEnd.test(wt.word ?? '') && wt.end_time > 0) {
-            setTimeout(() => {
-              window.dispatchEvent(new CustomEvent('avatar:nod', {
-                detail: {
-                  intensity: 0.16 + Math.random() * 0.18,
-                  duration: (360 + Math.random() * 160) / 1000,
-                },
-              }));
-            }, wt.end_time + 120);
+            _nodTimers.push(
+              setTimeout(() => {
+                if (mySid !== _ttsSessionId) return;
+                const headMul = getPauseMicroHeadMul(getSpeechEmotionSnapshot());
+                window.dispatchEvent(new CustomEvent('avatar:nod', {
+                  detail: {
+                    intensity: (0.16 + Math.random() * 0.18) * headMul,
+                    duration: (360 + Math.random() * 160) / 1000,
+                  },
+                }));
+              }, wt.end_time + 120),
+            );
           }
         });
       } else if (text.split(/[.!?\u061f]+/).filter(s => s.trim().length > 3).length > 1) {
@@ -482,57 +488,85 @@ export async function speakWithTTS(
         sentences.slice(0, -1).forEach((s) => {
           cumLen += s.length + 1;
           const delay = Math.max(300, (cumLen / text.length) * totalMs) + 80;
-          setTimeout(() => {
-            window.dispatchEvent(new CustomEvent('avatar:nod', {
-              detail: { intensity: 0.14 + Math.random() * 0.16, duration: (340 + Math.random() * 130) / 1000 },
-            }));
-          }, delay);
+          _nodTimers.push(
+            setTimeout(() => {
+              if (mySid !== _ttsSessionId) return;
+              const headMul = getPauseMicroHeadMul(getSpeechEmotionSnapshot());
+              window.dispatchEvent(new CustomEvent('avatar:nod', {
+                detail: {
+                  intensity: (0.14 + Math.random() * 0.16) * headMul,
+                  duration: (340 + Math.random() * 130) / 1000,
+                },
+              }));
+            }, delay),
+          );
         });
       }
     };
 
-    // Handle autoplay policy
-    try {
-      // Try normal playback
-      await audio.play();
-      _clientTtsPlaying = true;
-      // Success! Now we can dispatch start events.
-      window.dispatchEvent(new CustomEvent('avatar:speak', {
-        detail: { text, timings: wordTimings, sampleRate, audio },
-      }));
-      window.dispatchEvent(new CustomEvent('avatar:speak:start'));
-      scheduleVisemes();
+    const dispatchPlaybackStarted = (): void => {
+      window.dispatchEvent(
+        new CustomEvent('cogni:pre_speech', {
+          detail: { emotion: resolvedEmotion, intensity: resolvedIntensity },
+        }),
+      );
+      setSpeechEmotionBridge({
+        emotion: resolvedEmotion,
+        intensity: resolvedIntensity,
+      });
+      window.dispatchEvent(
+        new CustomEvent('avatar:audio:element', { detail: { audio } }),
+      );
+      if (visemeCues.length > 0) {
+        window.dispatchEvent(
+          new CustomEvent('avatar:visemes:timeline', { detail: { cues: visemeCues } }),
+        );
+      } else {
+        window.dispatchEvent(new CustomEvent('avatar:visemes:clear'));
+      }
+      window.dispatchEvent(
+        new CustomEvent('avatar:speak', {
+          detail: { text, timings: wordTimings, sampleRate, audio },
+        }),
+      );
+      setSpeechIntentHintsFromText(text);
+      window.dispatchEvent(
+        new CustomEvent('avatar:speak:start', {
+          detail: { emotion: resolvedEmotion, intensity: resolvedIntensity },
+        }),
+      );
+      options?.onStart?.();
       scheduleNods();
+    };
+
+    try {
+      await resumeSharedAudioContext();
+      await audio.play();
+      await waitAudioReady(audio);
+      _clientTtsPlaying = true;
+      dispatchPlaybackStarted();
       return true;
     } catch (playErr: unknown) {
       const err = playErr as Error;
       if (err.name === 'NotAllowedError') {
         console.warn('[speakWithTTS] 🔇 Autoplay blocked — starting muted. User must unmute.');
-        // Restart with muted audio to establish playback context
         audio.muted = true;
-        await audio.play(); // إذا فشلت هذه أيضاً، نتركها ترمي الخطأ
+        await resumeSharedAudioContext();
+        await audio.play();
+        await waitAudioReady(audio);
         _clientTtsPlaying = true;
         console.log('[speakWithTTS] 🔊 Muted playback started — UI should show Unmute button');
-
-        // Dispatch events even though muted – the audio is technically playing
-        window.dispatchEvent(new CustomEvent('avatar:speak', {
-          detail: { text, timings: wordTimings, sampleRate, audio },
-        }));
-        window.dispatchEvent(new CustomEvent('avatar:speak:start'));
-        scheduleVisemes();
-        scheduleNods();
-
-        // Signal UI to show unmute button
-        window.dispatchEvent(new CustomEvent('cogni:autoplay-blocked', {
-          detail: { audio, text },
-        }));
+        dispatchPlaybackStarted();
+        window.dispatchEvent(
+          new CustomEvent('cogni:autoplay-blocked', {
+            detail: { audio, text },
+          }),
+        );
         return true;
-      } else {
-        // Some other play error (network, decode, etc.)
-        console.error('[speakWithTTS] Audio play failed:', err);
-        cleanup(); // clean up the blob and events
-        return false;
       }
+      console.error('[speakWithTTS] Audio play failed:', err);
+      cleanup();
+      return false;
     }
   } catch (err) {
     // Catch errors from fetch, JSON, or blob creation
@@ -545,6 +579,8 @@ export async function speakWithTTS(
       currentUrl   = null;
     }
     // Dispatch end event in case anything was already sent (though unlikely)
+    resetSpeechIntentHints();
+    setSpeechEmotionBridge(null);
     window.dispatchEvent(new CustomEvent('avatar:speak:end'));
     options?.onEnd?.();
     return false;

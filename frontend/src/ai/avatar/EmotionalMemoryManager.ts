@@ -25,6 +25,11 @@ import type {
   PADVector,
 } from '@/types/ai';
 import { useBrainStore } from '@/store/useBrainStore';
+import {
+  getAdaptationHints,
+  getCompactSummaryForPrompt,
+} from '@/lib/avatar/emotionalMemory';
+import { getPersonalityEvolutionSummary } from '@/lib/avatar/personalityEvolution';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -328,6 +333,14 @@ export class EmotionalMemoryManager {
       lines.push(`Dominant recent emotion: ${dominant} (${trajectory.sampleCount} samples)`);
     }
 
+    const persist = getCompactSummaryForPrompt();
+    const hints = getAdaptationHints();
+    lines.push(`Persistent: ${persist}`);
+    lines.push(getPersonalityEvolutionSummary());
+    if (hints.recallHintAr) {
+      lines.push(`Recall hint (optional): ${hints.recallHintAr}`);
+    }
+
     const summary = lines.join(' | ');
     console.log('[EmotionalMemory] Context summary:', summary);
     return summary;
@@ -361,6 +374,9 @@ export class EmotionalMemoryManager {
     voiceRateMultiplier: number;
     preferPointingGestures: boolean;
     playfulGestureChance: number;
+    /** Long-term emotional memory: clarity / warmth (0..1) */
+    persistentClarityBias: number;
+    persistentWarmthBias: number;
   } {
     const { longTermMemory } = useBrainStore.getState();
     const blob = longTermMemory.userInterests.join(' ').toLowerCase();
@@ -372,6 +388,9 @@ export class EmotionalMemoryManager {
       voiceRateMultiplier = 1.05;
       preferPointingGestures = true;
     }
+
+    const lt = getAdaptationHints();
+    voiceRateMultiplier *= lt.voiceRateMul;
 
     const traj = this.getTrajectory();
     let playfulGestureChance = 0.12;
@@ -385,7 +404,18 @@ export class EmotionalMemoryManager {
       playfulGestureChance = Math.min(0.35, playfulGestureChance + 0.08);
     }
 
-    return { voiceRateMultiplier, preferPointingGestures, playfulGestureChance };
+    playfulGestureChance = Math.min(
+      0.38,
+      playfulGestureChance + lt.warmthBias * 0.06,
+    );
+
+    return {
+      voiceRateMultiplier,
+      preferPointingGestures,
+      playfulGestureChance,
+      persistentClarityBias: lt.clarityBias,
+      persistentWarmthBias: lt.warmthBias,
+    };
   }
 
   // ── Private utilities ────────────────────────────────────────────────────────

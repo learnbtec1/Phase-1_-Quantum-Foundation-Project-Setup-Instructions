@@ -17,6 +17,7 @@
 
 import { create }                  from 'zustand';
 import { subscribeWithSelector }   from 'zustand/middleware';
+import { setCognitiveOrchestratorLLMOutput } from '@/lib/ai/cognitiveOrchestrator';
 import type {
   EmotionLabel,
   PADVector,
@@ -25,6 +26,8 @@ import type {
   EmotionalMemoryEntry,
   LongTermMemory,
 } from '@/types/ai';
+import type { InteractionIntent } from '@/ai/avatar/avatarIntent';
+import type { UserMirrorEmotion, UserSpeechRhythm } from '@/lib/avatar/userEmotionMirror';
 
 // ─── Conversation turn ────────────────────────────────────────────────────────
 
@@ -55,6 +58,9 @@ export interface BrainState {
   isUserSpeaking:     boolean;
   physical:           { isListening: boolean };
 
+  /** AgentDirector-driven mode for head/gaze/blink (VRMA body unchanged). */
+  interactionIntent: InteractionIntent;
+
   // ── Awareness / Teacher consciousness layer ──────────────────────────────
   currentTeachingGoal:      string | null;
   latestInternalMonologue:  string | null;
@@ -71,6 +77,10 @@ export interface BrainState {
   comprehensionConfidence:  number;
   /** علامات الضغط المكتشفة */
   stressSignals:            string[];
+
+  /** Subtle user→avatar mirroring (transcript + pace), not mimic */
+  userMirrorEmotion:        UserMirrorEmotion;
+  userSpeechRhythm:         UserSpeechRhythm;
 
   // ── Persuasion layer ─────────────────────────────────────────────────────
   /** آخر توجيه إقناعي */
@@ -100,6 +110,7 @@ export interface BrainState {
   /** Explicitly set currentAction (used by AgentDirector._reactToPAD after decideBehaviorFromPAD) */
   setCurrentAction: (action: BehaviorOutput | null) => void;
   setPhysical: (v: Partial<{ isListening: boolean }>) => void;
+  setInteractionIntent: (intent: InteractionIntent) => void;
   /** Update teacher's current goal from Thinker goal_update */
   setTeachingGoal:  (goal: string | null) => void;
   setAwarenessCues: (cues: AgentFrame['awareness_cues'] | null, monologue?: string | null) => void;
@@ -122,6 +133,7 @@ export interface BrainState {
   /** Store post-session reflection */
   setSessionReflection: (reflection: string) => void;
   setUserPad:  (pad: PADVector | null) => void;
+  setUserMirrorState: (v: Partial<Pick<BrainState, 'userMirrorEmotion' | 'userSpeechRhythm'>>) => void;
 
   /** Push a conversation turn (user or avatar). */
   pushTurn: (turn: { role: string; text: string; emotion?: EmotionLabel }) => void;
@@ -248,7 +260,7 @@ function blendPad(a: PADVector, b: PADVector, wB: number): PADVector {
 
 const INITIAL: Omit<BrainState,
   | 'setTalking' | 'setThinking' | 'setUserSpeaking' | 'setCurrentAction'
-  | 'setPhysical' | 'setUserPad' | 'setTeachingGoal' | 'setAwarenessCues'
+  | 'setPhysical' | 'setInteractionIntent' | 'setUserPad' | 'setUserMirrorState' | 'setTeachingGoal' | 'setAwarenessCues'
   | 'setIntuitionReading' | 'setTemporalContext' | 'setPersuasionMode' | 'setSessionReflection'
   | 'pushTurn' | 'processFrame' | 'interrupt' | 'reset' | 'applyStreamingEmbodiment'
   | 'recordEmotionalMoment' | 'addImportantMoment' | 'learnInterest'
@@ -262,6 +274,7 @@ const INITIAL: Omit<BrainState,
   thinking:                 false,
   isUserSpeaking:           false,
   physical:                 { isListening: false },
+  interactionIntent:        'idle',
   currentTeachingGoal:      null,
   latestInternalMonologue:  null,
   latestAwarenessCues:      null,
@@ -271,6 +284,8 @@ const INITIAL: Omit<BrainState,
   studentRealNeed:          null,
   comprehensionConfidence:  0.5,
   stressSignals:            [],
+  userMirrorEmotion:        'calm',
+  userSpeechRhythm:         'neutral',
   // Persuasion
   lastPersuasionMode:       null,
   // Temporal
@@ -318,7 +333,14 @@ export const useBrainStore = create<BrainState>()(
       physical: { ...s.physical, ...v },
     })),
 
+    setInteractionIntent: (intent) => set({ interactionIntent: intent }),
+
     setUserPad: (pad) => set({ userPad: pad }),
+
+    setUserMirrorState: (v) => set(s => ({
+      ...(v.userMirrorEmotion !== undefined ? { userMirrorEmotion: v.userMirrorEmotion } : {}),
+      ...(v.userSpeechRhythm !== undefined ? { userSpeechRhythm: v.userSpeechRhythm } : {}),
+    })),
 
     pushTurn: (turn) => set(s => {
       const entry: ConversationTurn = { ...turn, ts: Date.now() };
@@ -344,6 +366,18 @@ export const useBrainStore = create<BrainState>()(
         pad = blendPad(pad, frame.user_pad, 0.38);
       } else if (userPad) {
         pad = blendPad(pad, userPad, 0.35);
+      }
+
+      const hasCognitive =
+        frame.cognitive_intent !== undefined
+        || frame.cognitive_intensity !== undefined
+        || frame.cognitive_tone !== undefined;
+      if (hasCognitive) {
+        setCognitiveOrchestratorLLMOutput({
+          intent: frame.cognitive_intent,
+          intensity: frame.cognitive_intensity,
+          tone: frame.cognitive_tone,
+        });
       }
 
       // NOTE: currentAction is intentionally NOT derived here.
@@ -395,21 +429,39 @@ export const useBrainStore = create<BrainState>()(
       };
     }),
 
-    interrupt: () => set({ talking: false, thinking: false, isUserSpeaking: false, currentAction: null, latestAwarenessCues: null }),
+    interrupt: () => {
+      setCognitiveOrchestratorLLMOutput(null);
+      set({
+        talking: false,
+        thinking: false,
+        isUserSpeaking: false,
+        currentAction: null,
+        latestAwarenessCues: null,
+        interactionIntent: 'idle',
+        userMirrorEmotion: 'calm',
+        userSpeechRhythm: 'neutral',
+      });
+    },
 
-    reset: () => set({
-      ...INITIAL,
-      pad:                    { ...DEFAULT_PAD },
-      userPad:                null,
-      physical:               { isListening: false },
-      conversationHistory:    [],
-      emotionalMemory:        [],
-      longTermMemory:         { userInterests: [], importantMoments: [] },
-      isUserSpeaking:         false,
-      currentTeachingGoal:    null,
-      latestInternalMonologue: null,
-      latestAwarenessCues:    null,
-    }),
+    reset: () => {
+      setCognitiveOrchestratorLLMOutput(null);
+      set({
+        ...INITIAL,
+        pad:                    { ...DEFAULT_PAD },
+        userPad:                null,
+        physical:               { isListening: false },
+        interactionIntent:      'idle',
+        conversationHistory:    [],
+        emotionalMemory:        [],
+        longTermMemory:         { userInterests: [], importantMoments: [] },
+        isUserSpeaking:         false,
+        currentTeachingGoal:    null,
+        latestInternalMonologue: null,
+        latestAwarenessCues:    null,
+        userMirrorEmotion:      'calm',
+        userSpeechRhythm:       'neutral',
+      });
+    },
   })),
 );
 

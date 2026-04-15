@@ -4,6 +4,27 @@
 
 ---
 
+## Canonical Next.js app (production)
+
+The **only** supported Next.js application for Cogni / avatar / BFF is **`frontend/`**.  
+Repository root `app/api/*` routes return **410 Gone** (`Legacy route — do not use`) — all BFF calls must go through **`frontend/src/app/api/*`** with **`Authorization: Bearer`** to the Python API.
+
+**Commands:**
+
+```bash
+npm run dev:frontend
+npm run build:frontend
+npm run start:frontend
+```
+
+From the repository root, `npm run dev`, `npm run build`, and `npm run start` **delegate to `frontend/`** (same outcome).
+
+On server startup you should see: `[Cogni] ACTIVE APP: frontend/ (production mode)` (see `frontend/src/instrumentation.ts`).
+
+Emergency / unsupported: `npm run dev:root-legacy` — do not use for production.
+
+---
+
 ## نظرة عامة
 
 هذا المشروع يقدم **أقوى برومبت تعليمي في العالم العربي**، مصمم لتحويل أي نموذج ذكاء اصطناعي (خاصة Claude Sonnet 4.6) إلى وكيل تعليمي مستقل يتمتع بـ **20 طبقة من المحاكاة البشرية**. الوكيل د. حمزة:

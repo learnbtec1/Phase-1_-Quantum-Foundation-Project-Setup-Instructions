@@ -3,12 +3,10 @@
 /**
  * VRMAPlayer — مشغّل إيماءات VRMA الشامل.
  *
- * التدفق:
- *   1. يستمع لحدث `avatar:gesture` → يحدد VRMA المقابل من GESTURE_VRMA_MAP.
- *   2. يُحاول تحميل الملف (تسلسل URL مع cache) → يُشغّل عبر AnimationMixer.
- *   3. عند الفشل (ملف غير موجود): يبقى `vrmaActiveRef = false` → النظام الإجرائي يعمل.
- *   4. يُعيّن `vrmaActiveRef.current = true` أثناء التشغيل → يُوقف الإيماءات الإجرائية.
- *   5. يدعم `avatar:vrma:play` لتشغيل ملف VRMA مباشرةً بمساره.
+ * التدفق الأساسي:
+ *   • `avatar:vrma:play` { url | path, name?: 'idle', durationMs, loop } — المسار الوحيد لتشغيل الـ mixer (UnifiedGestureEngine / window.VRM_ANIMATION).
+ *   • `avatar:gesture` مع `motion: 'vrma'` لا يُحمّل الـ mixer هنا (تجنبًا لازدواجية مع `avatar:vrma:play` من UnifiedGestureEngine) — الرأس/الاتجاه في VRMSkeletonManager.
+ *   • `avatar:gesture` بدون `motion: 'vrma'`: تحميل من GESTURE_VRMA_MAP (مسارات قديمة / اختبار فقط).
  *
  * ترتيب useFrame: priority -1 (قبل VRMSkeletonManager=0) → mixer + لقطة vrmaPoseRef دون ترك العظام على وضع الـ mixer.
  *
@@ -24,11 +22,23 @@ import {
 } from './motion/PoseComposer';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
-import type { VRM } from '@pixiv/three-vrm';
+import { avatarDebug } from '@/app/avatar-agent/debugAvatar';
+import { motionDebug } from '@/lib/avatar/motionDebug';
 import {
-  GLTFLoader,
-  type GLTFParser,
-} from 'three/examples/jsm/loaders/GLTFLoader.js';
+  DEFAULT_BASE_LOOP_VRMA_URL,
+  readVrmaPlayOnLoadUrl,
+} from '@/config/avatar';
+import { sanitizeVrmaAssetUrl } from '@/constants/gestures';
+import {
+  forceReleaseMotion,
+  recordGesturePlayed,
+  releaseMotion,
+  setVrmaBaselineLayerActive,
+  shouldBlockGestureRepeat,
+  tryAcquireMotion,
+} from '@/lib/avatar/motionAuthority';
+import type { VRM } from '@pixiv/three-vrm';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import {
   VRMAnimationLoaderPlugin,
   createVRMAnimationClip,
@@ -100,22 +110,22 @@ const GESTURE_VRMA_MAP: Readonly<Record<string, readonly string[]>> = {
   beckoning:       ['/models/animations/Beckoning.vrma'],
 
   // ── حركة / نشاط ──────────────────────────────────────────────────────
-  walk:            ['/models/animations/Walking.vrma'],
-  walking:         ['/models/animations/Walking.vrma'],
-  jump:            ['/models/animations/Jump.vrma'],
-  jumping:         ['/models/animations/Jump.vrma'],
-  'jump-high':     ['/models/animations/jump-high.vrma'],
-  jumphigh:        ['/models/animations/jump-high.vrma'],
-  'stop-walking':  ['/models/animations/stop-walking.vrma'],
-  stopwalking:     ['/models/animations/stop-walking.vrma'],
-  pacing:          ['/models/animations/pacing-and-talking-on-a-phone.vrma'],
-  'pacing-and-talking-on-a-phone': ['/models/animations/pacing-and-talking-on-a-phone.vrma'],
-  typing:          ['/models/animations/Typing.vrma'],
-  type:            ['/models/animations/Typing.vrma'],
+  walk:            ['/models/animations/Acknowledging.vrma'],
+  walking:         ['/models/animations/Acknowledging.vrma'],
+  jump:            ['/models/animations/Acknowledging.vrma'],
+  jumping:         ['/models/animations/Acknowledging.vrma'],
+  'jump-high':     ['/models/animations/Acknowledging.vrma'],
+  jumphigh:        ['/models/animations/Acknowledging.vrma'],
+  'stop-walking':  ['/models/animations/Acknowledging.vrma'],
+  stopwalking:     ['/models/animations/Acknowledging.vrma'],
+  pacing:          ['/models/animations/Acknowledging.vrma'],
+  'pacing-and-talking-on-a-phone': ['/models/animations/Acknowledging.vrma'],
+  typing:          ['/models/animations/Acknowledging.vrma'],
+  type:            ['/models/animations/Acknowledging.vrma'],
   talking:         ['/models/animations/talking.vrma'],
-  cheer:           ['/models/animations/standing-cheering.vrma'],
-  cheering:        ['/models/animations/standing-cheering.vrma'],
-  'standing-cheering': ['/models/animations/standing-cheering.vrma'],
+  cheer:           ['/models/animations/Clapping.vrma'],
+  cheering:        ['/models/animations/Clapping.vrma'],
+  'standing-cheering': ['/models/animations/Clapping.vrma'],
 
   // ── جلوس ──────────────────────────────────────────────────────────────
   sit:             ['/models/animations/sitting.vrma'],
@@ -139,30 +149,26 @@ const GESTURE_VRMA_MAP: Readonly<Record<string, readonly string[]>> = {
   havingameeting:  ['/models/animations/havingameeting.vrma'],
 
   // ── حزم VRMA ──────────────────────────────────────────────────────────
-  vrma_01:   ['/models/animations/VRMA_MotionPack/vrma/VRMA_01.vrma'],
-  vrma01:    ['/models/animations/VRMA_MotionPack/vrma/VRMA_01.vrma'],
+  vrma_01:   ['/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma'],
+  vrma01:    ['/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma'],
   vrma_02:   ['/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma'],
   vrma02:    ['/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma'],
-  vrma_03:   ['/models/animations/VRMA_MotionPack/vrma/VRMA_03.vrma'],
-  vrma03:    ['/models/animations/VRMA_MotionPack/vrma/VRMA_03.vrma'],
-  vrma_04:   ['/models/animations/VRMA_MotionPack/vrma/VRMA_04.vrma'],
-  vrma04:    ['/models/animations/VRMA_MotionPack/vrma/VRMA_04.vrma'],
-  vrma_05:   ['/models/animations/VRMA_MotionPack/vrma/VRMA_05.vrma'],
-  vrma05:    ['/models/animations/VRMA_MotionPack/vrma/VRMA_05.vrma'],
-  vrma_06:   ['/models/animations/VRMA_MotionPack/vrma/VRMA_06.vrma'],
-  vrma06:    ['/models/animations/VRMA_MotionPack/vrma/VRMA_06.vrma'],
-  vrma_07:   ['/models/animations/VRMA_MotionPack/vrma/VRMA_07.vrma'],
-  vrma07:    ['/models/animations/VRMA_MotionPack/vrma/VRMA_07.vrma'],
+  vrma_03:   ['/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma'],
+  vrma03:    ['/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma'],
+  vrma_04:   ['/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma'],
+  vrma04:    ['/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma'],
+  vrma_05:   ['/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma'],
+  vrma05:    ['/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma'],
+  vrma_06:   ['/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma'],
+  vrma06:    ['/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma'],
+  vrma_07:   ['/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma'],
+  vrma07:    ['/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma'],
 } as const;
 
 // ─── إيماءات تُشغَّل في حلقة حتى تُقاطَع ──────────────────────────────────
 const LOOP_GESTURES = new Set<string>([
   'idle1', 'idle2', 'idle3', 'idle4', 'relax',
   'sit', 'sitting', 'sitting-and-talking', 'sittingtalking', 'sitting-talking',
-  'typing', 'type',
-  'walk', 'walking',
-  'pacing', 'pacing-and-talking-on-a-phone',
-  'havingameeting', 'talking',
 ]);
 
 // ─── مدد افتراضية لكل إيماءة (ms) ────────────────────────────────────────
@@ -197,13 +203,59 @@ const GESTURE_DURATION_MS: Readonly<Record<string, number>> = {
 
 const DEFAULT_DURATION_MS = 2500;
 
+/** Minimum crossfade (s) — keep ≥ 0.25 for stable VRMA handoff. */
+const VRMA_CROSSFADE_SEC = 0.26;
+
+/** When false: never run looping baseline VRMA (prevents root drift / 600s authority lock). Procedural + gestures own idle. */
+const VRMA_BASELINE_PLAYBACK_ENABLED = false;
+
+/** Documented sample path — asset not in repo; player maps to `DEFAULT_BASE_LOOP_VRMA_URL`. */
+const VRMA_IDLE_REQUESTED_PATH =
+  '/models/animations/VRMA_MotionPack/vrma/VRMA_Idle.vrma';
+
+function resolveVrmaPlayUrl(detail: VRMAPlayEventDetail): string {
+  const raw = (detail.url ?? detail.path ?? '').trim();
+  if (
+    raw === VRMA_IDLE_REQUESTED_PATH ||
+    raw.endsWith('/VRMA_Idle.vrma')
+  ) {
+    return sanitizeVrmaAssetUrl(DEFAULT_BASE_LOOP_VRMA_URL);
+  }
+  if (raw) return sanitizeVrmaAssetUrl(raw);
+  const name = (detail.name ?? '').trim().toLowerCase();
+  if (name === 'idle') return sanitizeVrmaAssetUrl(DEFAULT_BASE_LOOP_VRMA_URL);
+  return '';
+}
+
+/** Looping baseline idle VRMA — mixer runs but does not block other motion systems. */
+function isBaselineIdleVrma(detail: VRMAPlayEventDetail, resolvedUrl: string, loop: boolean): boolean {
+  return loop && resolvedUrl === DEFAULT_BASE_LOOP_VRMA_URL;
+}
+
 // ─── نوع حدث التشغيل المباشر ─────────────────────────────────────────────
 export type VRMAPlayEventDetail = {
   /** مسار مباشر لملف VRMA */
-  url: string;
+  url?: string;
+  /** مرادف لـ `url` (مثال: مسارات من حدث مخصّص) */
+  path?: string;
+  /** عند `idle` بدون url/path يُستخدم المقطع الافتراضي الحلقي */
+  name?: string;
   durationMs?: number;
   loop?: boolean;
+  /** Engine stem (optional) — for logging / dedupe hints. */
+  vrmaStem?: string;
+  /** داخلي — عدّ محاولات إعادة التحميل بعد الفشل */
+  _retry?: number;
 };
+
+declare global {
+  interface Window {
+    /** Single entry for VRMA mixer playback (same as `avatar:vrma:play`). */
+    VRM_ANIMATION?: {
+      playVRMA: (url: string, opts?: { durationMs?: number; loop?: boolean }) => void;
+    };
+  }
+}
 
 export type VRMAPlayerProps = {
   vrm: VRM | null;
@@ -218,34 +270,36 @@ let _loader: GLTFLoader | null = null;
 function getLoader(): GLTFLoader {
   if (!_loader) {
     _loader = new GLTFLoader();
-    _loader.register((parser: GLTFParser) => new VRMAnimationLoaderPlugin(parser));
+    // Duplicate @types/three trees break GLTFLoader.register typing; runtime is correct.
+    (_loader as { register: (fn: (parser: unknown) => unknown) => void }).register(
+      (parser: unknown) => new VRMAnimationLoaderPlugin(parser as never),
+    );
   }
   return _loader;
 }
 
-/** URL → clip مخزَّن (null = الملف غير موجود أو به خطأ) */
-const clipCache = new Map<string, THREE.AnimationClip | null>();
+/** URL → clip — يُخزَّن فقط عند النجاح حتى تعمل إعادة المحاولة بعد فشل الشبكة/التحميل */
+const clipCache = new Map<string, THREE.AnimationClip>();
 
 /** محاولة تحميل مسار VRMA واحد — تُعيد null عند الفشل (بدون throw) */
 async function tryLoadClip(url: string, vrm: VRM): Promise<THREE.AnimationClip | null> {
-  if (clipCache.has(url)) return clipCache.get(url) ?? null;
+  const cached = clipCache.get(url);
+  if (cached) return cached;
   try {
     const gltf = await getLoader().loadAsync(url) as unknown as GLTFWithVRMAnimations;
     const anims = gltf.userData.vrmAnimations;
     if (!anims || anims.length === 0) {
-      clipCache.set(url, null);
       return null;
     }
-    let clip = createVRMAnimationClip(anims[0], vrm);
+    let clip = createVRMAnimationClip(anims[0], vrm) as THREE.AnimationClip;
     // أصلح أسماء عظام الأصابع ومحاور الإحداثيات (يحل مشكلة تشوّه الأصابع في VRMA)
-    clip = remapClipForVRM(clip, vrm);
+    clip = remapClipForVRM(clip, vrm) as THREE.AnimationClip;
     clipCache.set(url, clip);
     if (process.env.NODE_ENV === 'development') {
       console.log(`[VRMAPlayer] ✅ Loaded: ${url} (${clip.duration.toFixed(2)}s)`);
     }
     return clip;
   } catch {
-    clipCache.set(url, null);
     return null;
   }
 }
@@ -276,6 +330,15 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
   const actionEndMsRef     = useRef<number>(0);
   const isLoopingRef       = useRef<boolean>(false);
   const vrmaPoseSeqRef     = useRef(0);
+  /** Motion gate: edge-dispatch `avatar:vrma:active` for UnifiedGestureEngine */
+  const prevVrmaActiveRef  = useRef(false);
+  /** DOM timer ids (`setTimeout` returns `number` in browser typings). */
+  const vrmaRetryTimeoutsRef = useRef<number[]>([]);
+  const lastPlayingClipUuidRef = useRef<string | null>(null);
+  /** baseline = looping default idle only — does not claim motion authority (gestures may enqueue). */
+  const lastAuthorityTierRef = useRef<'baseline' | 'full'>('full');
+  /** Debounce forced baseline resume when mixer has no active clip (stops authority flicker gaps). */
+  const lastForceBaselineAtRef = useRef(0);
 
   // ── أنشئ/دمّر الـ mixer عند تغيُّر الـ VRM ──────────────────────────────
   useEffect(() => {
@@ -283,7 +346,17 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
       mixerRef.current?.stopAllAction();
       mixerRef.current        = null;
       currentActionRef.current = null;
+      lastPlayingClipUuidRef.current = null;
+      lastAuthorityTierRef.current = 'full';
+      setVrmaBaselineLayerActive(false);
+      releaseMotion('VRMA');
       vrmaActiveRef.current   = false;
+      if (prevVrmaActiveRef.current) {
+        prevVrmaActiveRef.current = false;
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('avatar:vrma:active', { detail: { active: false } }));
+        }
+      }
       return;
     }
     const mixer = new THREE.AnimationMixer(vrm.scene);
@@ -291,25 +364,104 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
     return () => {
       mixer.stopAllAction();
       vrmaActiveRef.current = false;
+      setVrmaBaselineLayerActive(false);
+      releaseMotion('VRMA');
     };
   }, [vrm, vrmaActiveRef]);
 
+  // Single public API — mirrors `avatar:vrma:play` (no duplicate procedural path).
+  useEffect(() => {
+    if (!vrm || typeof window === 'undefined') return;
+    window.VRM_ANIMATION = {
+      playVRMA: (url: string, opts?: { durationMs?: number; loop?: boolean }) => {
+        window.dispatchEvent(
+          new CustomEvent<VRMAPlayEventDetail>('avatar:vrma:play', {
+            detail: { url, durationMs: opts?.durationMs, loop: opts?.loop },
+          }),
+        );
+      },
+    };
+    return () => {
+      if (window.VRM_ANIMATION) delete window.VRM_ANIMATION;
+    };
+  }, [vrm]);
+
+  /** Optional one-shot `avatar:vrma:play` after load — `NEXT_PUBLIC_VRMA_PLAY_ON_LOAD` (trigger-only smoke test). */
+  useEffect(() => {
+    const url = readVrmaPlayOnLoadUrl();
+    if (!vrm || !url || typeof window === 'undefined') return;
+    const t = window.setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent<VRMAPlayEventDetail>('avatar:vrma:play', {
+          detail: {
+            url,
+            durationMs: 5000,
+            loop: false,
+          },
+        }),
+      );
+      if (process.env.NODE_ENV === 'development') {
+        avatarDebug('[VRMAPlayer] on-load smoke test:', url);
+      }
+    }, 500);
+    return () => clearTimeout(t);
+  }, [vrm]);
+
   // ── دالة التشغيل (تُحدَّث كل render بدون إنشاء مستمع جديد) ──────────────
   const playClipRef = useRef<
-    (clip: THREE.AnimationClip, durationMs: number, loop: boolean) => void
-  >(() => {});
+    (
+      clip: THREE.AnimationClip,
+      durationMs: number,
+      loop: boolean,
+      authorityTier?: 'baseline' | 'full',
+    ) => boolean
+  >(() => false);
 
   playClipRef.current = (
     clip: THREE.AnimationClip,
     durationMs: number,
     loop: boolean,
-  ) => {
+    authorityTier: 'baseline' | 'full' = 'full',
+  ): boolean => {
     const mixer = mixerRef.current;
-    if (!mixer) return;
+    if (!mixer) {
+      motionDebug('VRMA IGNORED:', 'no-mixer', clip.name);
+      return false;
+    }
 
-    // أوقف الإيماءة السابقة بتلاشٍ سلس
-    if (currentActionRef.current) {
-      currentActionRef.current.fadeOut(0.25);
+    if (!VRMA_BASELINE_PLAYBACK_ENABLED && authorityTier === 'baseline') {
+      motionDebug('VRMA IGNORED:', 'baseline-tier-disabled');
+      return false;
+    }
+
+    lastAuthorityTierRef.current = authorityTier;
+
+    const cur = currentActionRef.current;
+    if (cur && cur.isRunning() && lastPlayingClipUuidRef.current === clip.uuid) {
+      if (process.env.NODE_ENV === 'development') {
+        avatarDebug(`[VRMAPlayer] skip — same clip already playing (${clip.name || clip.uuid})`);
+      }
+      motionDebug('VRMA IGNORED:', 'same-clip-already-playing', clip.name);
+      return false;
+    }
+
+    if (authorityTier === 'baseline') {
+      // Hard VRMA lock: baseline holds the VRMA authority tier so REACTION/GESTURE cannot flicker in.
+      void tryAcquireMotion('VRMA', 600_000);
+    } else {
+      const lockMs = (loop ? 600_000 : durationMs) + VRMA_CROSSFADE_SEC * 1000 + 240;
+      if (!tryAcquireMotion('VRMA', lockMs)) {
+        if (process.env.NODE_ENV === 'development') {
+          avatarDebug('[VRMAPlayer] motion authority — blocked full VRMA play');
+        }
+        motionDebug('VRMA IGNORED:', 'tryAcquireMotion-VRMA-failed', clip.name);
+        return false;
+      }
+    }
+
+    // أوقف الإيماءة السابقة بتلاشٍ سلس (≥ 0.25s)
+    if (cur) {
+      cur.fadeOut(VRMA_CROSSFADE_SEC);
     }
 
     const action = mixer.clipAction(clip);
@@ -319,17 +471,20 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
       loop ? Infinity : 1,
     );
     action.clampWhenFinished = !loop;
-    action.fadeIn(0.25).play();
+    action.fadeIn(VRMA_CROSSFADE_SEC).play();
 
     currentActionRef.current = action;
+    lastPlayingClipUuidRef.current = clip.uuid;
     actionEndMsRef.current   = performance.now() + durationMs;
     isLoopingRef.current     = loop;
 
     if (process.env.NODE_ENV === 'development') {
-      console.log(
+      avatarDebug(
         `[VRMAPlayer] ▶️ "${clip.name}" | ${durationMs}ms | loop=${loop}`,
       );
     }
+    motionDebug('VRMA START:', clip.name, 'durationMs=', durationMs, 'loop=', loop, 'tier=', authorityTier);
+    return true;
   };
 
   // ── استماع لـ avatar:gesture ─────────────────────────────────────────────
@@ -338,6 +493,11 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
 
     const onGesture = async (e: Event) => {
       const detail = (e as CustomEvent<Record<string, unknown>>).detail ?? {};
+      // Engine already fired `avatar:vrma:play` — do not load VRMA again from this event.
+      if (detail.motion === 'vrma') {
+        motionDebug('VRMA IGNORED:', 'avatar:gesture-detail-motion-vrma');
+        return;
+      }
 
       // استخرج اسم الإيماءة بالترتيب: gesture → vrmaStem → type → name
       const rawGesture =
@@ -346,19 +506,34 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
         (typeof detail.type      === 'string' && detail.type.trim())      ||
         (typeof detail.name      === 'string' && detail.name.trim())      ||
         '';
-      if (!rawGesture) return;
+      if (!rawGesture) {
+        motionDebug('VRMA IGNORED:', 'avatar:gesture-empty-name');
+        return;
+      }
 
       const key = rawGesture.toLowerCase().replace(/\s+/g, '-');
 
+      if (shouldBlockGestureRepeat(key)) {
+        if (process.env.NODE_ENV === 'development') {
+          avatarDebug(`[VRMAPlayer] skip — same gesture VRMA recently: "${key}"`);
+        }
+        motionDebug('VRMA IGNORED:', 'gesture-repeat', key);
+        return;
+      }
+
       // الإيماءة الخاملة (idle) تُعالَج في VRMSkeletonManager — لا VRMA هنا
-      if (key === 'idle') return;
+      if (key === 'idle') {
+        motionDebug('VRMA IGNORED:', 'idle-procedural-path', key);
+        return;
+      }
 
       // إجرائي فقط: يتجاهل VRMA ويترك VRMSkeletonManager يطبّق ARM_OFFSETS
       const srcRaw = typeof detail.source === 'string' ? detail.source.trim().toLowerCase() : '';
       if (srcRaw === 'procedural') {
         if (process.env.NODE_ENV === 'development') {
-          console.log(`[VRMAPlayer] source=procedural — skipping VRMA for "${key}"`);
+          avatarDebug(`[VRMAPlayer] source=procedural — skipping VRMA for "${key}"`);
         }
+        motionDebug('VRMA IGNORED:', 'source-procedural', key);
         return;
       }
 
@@ -366,16 +541,18 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
       if (!urls || urls.length === 0) {
         // اسم الإيماءة غير موجود في الخريطة → استخدام الإجرائي
         if (process.env.NODE_ENV === 'development') {
-          console.log(`[VRMAPlayer] ℹ️ No VRMA for "${key}" — procedural fallback`);
+          avatarDebug(`[VRMAPlayer] ℹ️ No VRMA for "${key}" — procedural fallback`);
         }
+        motionDebug('VRMA IGNORED:', 'no-url-map', key);
         return;
       }
 
       const clip = await loadFirstAvailableClip(urls, vrm);
       if (!clip) {
         if (process.env.NODE_ENV === 'development') {
-          console.log(`[VRMAPlayer] ⚠️ VRMA not found for "${key}" — procedural fallback`);
+          avatarDebug(`[VRMAPlayer] ⚠️ VRMA not found for "${key}" — procedural fallback`);
         }
+        motionDebug('VRMA IGNORED:', 'loadFirstAvailableClip-null', key);
         return;
       }
 
@@ -391,7 +568,12 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
         || GESTURE_DURATION_MS[key]
         || (clip.duration > 0 ? clip.duration * 1050 : DEFAULT_DURATION_MS);
 
-      playClipRef.current(clip, durationMs, loop);
+      const played = playClipRef.current(clip, durationMs, loop, 'full');
+      if (played) {
+        recordGesturePlayed(key);
+      } else {
+        motionDebug('VRMA IGNORED:', 'playClip-returned-false', key, clip.name);
+      }
     };
 
     window.addEventListener('avatar:gesture', onGesture);
@@ -402,19 +584,130 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
   useEffect(() => {
     if (!vrm) return;
 
+    const VRMA_PLAY_RETRY_CAP = 24;
+
+    const scheduleRetry = (
+      detail: VRMAPlayEventDetail,
+      url: string,
+      attempt: number,
+    ) => {
+      if (attempt >= VRMA_PLAY_RETRY_CAP) return;
+      const tid = window.setTimeout(() => {
+        vrmaRetryTimeoutsRef.current = vrmaRetryTimeoutsRef.current.filter((x) => x !== tid);
+        window.dispatchEvent(
+          new CustomEvent<VRMAPlayEventDetail>('avatar:vrma:play', {
+            detail: {
+              ...detail,
+              url,
+              path: undefined,
+              name: undefined,
+              _retry: attempt + 1,
+            },
+          }),
+        );
+      }, 1000);
+      vrmaRetryTimeoutsRef.current.push(tid);
+    };
+
     const onPlay = async (e: Event) => {
       const detail = (e as CustomEvent<VRMAPlayEventDetail>).detail;
-      if (!detail?.url) return;
-      const clip = await tryLoadClip(detail.url, vrm);
-      if (!clip) return;
+      if (!detail) {
+        motionDebug('VRMA IGNORED:', 'avatar:vrma:play-no-detail');
+        return;
+      }
+      const url = resolveVrmaPlayUrl(detail);
+      if (!url) {
+        motionDebug('VRMA IGNORED:', 'resolveVrmaPlayUrl-null', detail);
+        return;
+      }
+      const loop = detail.loop ?? false;
+      if (!VRMA_BASELINE_PLAYBACK_ENABLED && isBaselineIdleVrma(detail, url, loop)) {
+        motionDebug('VRMA IGNORED:', 'baseline-loop-not-loaded');
+        return;
+      }
+      const attempt = detail._retry ?? 0;
+      const clip = await tryLoadClip(url, vrm);
+      if (!clip) {
+        if (process.env.NODE_ENV === 'development') {
+          avatarDebug(
+            `[VRMAPlayer] VRMA load failed — retry in 1s: ${url} (attempt ${attempt})`,
+          );
+        }
+        motionDebug('VRMA IGNORED:', 'tryLoadClip-null', url, 'attempt', attempt);
+        scheduleRetry(detail, url, attempt);
+        return;
+      }
       const durationMs =
         detail.durationMs ??
         (clip.duration > 0 ? clip.duration * 1050 : DEFAULT_DURATION_MS);
-      playClipRef.current(clip, durationMs, detail.loop ?? false);
+      const tier = isBaselineIdleVrma(detail, url, loop) ? 'baseline' : 'full';
+      const ok = playClipRef.current(clip, durationMs, loop, tier);
+      if (!ok) {
+        motionDebug('VRMA IGNORED:', 'playClip-false-after-load', clip.name, url);
+      }
+    };
+
+    const onBargeIn = (): void => {
+      forceReleaseMotion('avatar:vrma:barge-in');
+      const mixer = mixerRef.current;
+      const cur = currentActionRef.current;
+      if (!mixer || !cur) return;
+      const fade = Math.max(VRMA_CROSSFADE_SEC, 0.36);
+      cur.fadeOut(fade);
+      currentActionRef.current = null;
+      lastPlayingClipUuidRef.current = null;
+      isLoopingRef.current = false;
+      actionEndMsRef.current = performance.now();
+      const resumeMs = Math.round(fade * 1000) + 90;
+      const tid = window.setTimeout(() => {
+        vrmaRetryTimeoutsRef.current = vrmaRetryTimeoutsRef.current.filter((x) => x !== tid);
+        if (!VRMA_BASELINE_PLAYBACK_ENABLED) return;
+        window.dispatchEvent(
+          new CustomEvent<VRMAPlayEventDetail>('avatar:vrma:play', {
+            detail: {
+              name: 'idle',
+              path: VRMA_IDLE_REQUESTED_PATH,
+              loop: true,
+              durationMs: 600_000,
+            },
+          }),
+        );
+      }, resumeMs);
+      vrmaRetryTimeoutsRef.current.push(tid);
     };
 
     window.addEventListener('avatar:vrma:play', onPlay as EventListener);
-    return () => window.removeEventListener('avatar:vrma:play', onPlay as EventListener);
+    window.addEventListener('avatar:vrma:barge-in', onBargeIn);
+    return () => {
+      window.removeEventListener('avatar:vrma:play', onPlay as EventListener);
+      window.removeEventListener('avatar:vrma:barge-in', onBargeIn);
+      for (const t of vrmaRetryTimeoutsRef.current) window.clearTimeout(t);
+      vrmaRetryTimeoutsRef.current = [];
+    };
+  }, [vrm]);
+
+  /**
+   * Base motion: always dispatch looping idle VRMA after VRM is ready so `vrmaActiveRef` /
+   * `vrmaPoseRef` stay driven. If `NEXT_PUBLIC_VRMA_PLAY_ON_LOAD` is set, delay until after
+   * the one-shot smoke clip so it does not replace this loop mid-debug.
+   */
+  useEffect(() => {
+    if (!vrm || typeof window === 'undefined' || !VRMA_BASELINE_PLAYBACK_ENABLED) return;
+    const envUrl = readVrmaPlayOnLoadUrl();
+    const delayMs = envUrl ? 6000 : 350;
+    const tid = window.setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent<VRMAPlayEventDetail>('avatar:vrma:play', {
+          detail: {
+            name: 'idle',
+            path: VRMA_IDLE_REQUESTED_PATH,
+            loop: true,
+            durationMs: 600_000,
+          },
+        }),
+      );
+    }, delayMs);
+    return () => window.clearTimeout(tid);
   }, [vrm]);
 
   // ── حلقة الإطارات — قبل VRMSkeletonManager: عيّن mixer ثم لقطة وضعية فقط ──
@@ -422,6 +715,8 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
     const mixer = mixerRef.current;
     if (!mixer) {
       vrmaActiveRef.current = false;
+      setVrmaBaselineLayerActive(false);
+      releaseMotion('VRMA');
       if (vrmaPoseRef) vrmaPoseRef.current = null;
       return;
     }
@@ -436,12 +731,56 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
       (looping || nowMs < actionEndMsRef.current + 600);
 
     if (!isActive && hasAction) {
-      currentActionRef.current!.fadeOut(0.35);
+      currentActionRef.current!.fadeOut(Math.max(VRMA_CROSSFADE_SEC, 0.35));
       currentActionRef.current = null;
+      lastPlayingClipUuidRef.current = null;
       isLoopingRef.current     = false;
     }
 
     vrmaActiveRef.current = isActive;
+
+    const tier = lastAuthorityTierRef.current;
+    setVrmaBaselineLayerActive(Boolean(isActive && looping && tier === 'baseline'));
+
+    const noMixerClip = currentActionRef.current === null;
+
+    if (prevVrmaActiveRef.current !== isActive) {
+      const was = prevVrmaActiveRef.current;
+      prevVrmaActiveRef.current = isActive;
+      if (was && !isActive) {
+        motionDebug('VRMA END');
+      }
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('avatar:vrma:active', { detail: { active: isActive } }),
+        );
+      }
+    }
+
+    // Never release VRMA authority from this frame loop — prevents REACTION/VRMA fight (flicker).
+    // Authority clears only on mixer teardown, barge-in, or explicit release elsewhere.
+
+    if (
+      VRMA_BASELINE_PLAYBACK_ENABLED
+      && !isActive
+      && noMixerClip
+      && typeof window !== 'undefined'
+    ) {
+      const n = performance.now();
+      if (n - lastForceBaselineAtRef.current > 520) {
+        lastForceBaselineAtRef.current = n;
+        window.dispatchEvent(
+          new CustomEvent<VRMAPlayEventDetail>('avatar:vrma:play', {
+            detail: {
+              name: 'idle',
+              path: VRMA_IDLE_REQUESTED_PATH,
+              loop: true,
+              durationMs: 600_000,
+            },
+          }),
+        );
+      }
+    }
 
     if (!isActive) {
       if (vrmaPoseRef) vrmaPoseRef.current = null;

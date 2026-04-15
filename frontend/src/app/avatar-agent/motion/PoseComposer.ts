@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+import type { VRM } from '@pixiv/three-vrm';
+import { motionDebug } from '@/lib/avatar/motionDebug';
+import { logFinalPoseApplyProbe } from '@/app/avatar-agent/motion/motionPipelineDebug';
 
 /** Canonical keys for composed avatar bones (normalized humanoid). */
 export type BonePoseKey =
@@ -92,6 +95,17 @@ export function blendPoseLayers(params: {
 
 export type BoneRefMap = Record<string, THREE.Object3D | null>;
 
+/** PoseComposer short keys → VRM humanoid names for `getNormalizedBoneNode`. */
+export const ARM_BONE_MAP: Readonly<Record<string, string>> = {
+  lua: 'leftUpperArm',
+  rua: 'rightUpperArm',
+  lla: 'leftLowerArm',
+  rla: 'rightLowerArm',
+};
+
+let __applyFinalPoseBoneLogNextAt = 0;
+let __finalPoseKeysLogNextAt = 0;
+
 /**
  * Sole function that mutates VRM normalized bone quaternions from composed poses.
  * Applies exponential smoothing toward `finalPose` for frame-rate independence.
@@ -99,20 +113,87 @@ export type BoneRefMap = Record<string, THREE.Object3D | null>;
 export function applyFinalPoseToVrm(params: {
   finalPose: BonePoseMap;
   boneRefs: BoneRefMap;
+  /** When set, arm short keys resolve through `humanoid.getNormalizedBoneNode` if missing from `boneRefs`. */
+  humanoid?: import('@pixiv/three-vrm').VRM['humanoid'] | null;
   /** rad/s style smoothing; higher = snappier */
   smoothLambda?: number;
+  /** Max rotation toward target per frame (rad) — anti-teleport. */
+  maxRotationPerFrameRad?: number;
   delta: number;
 }): void {
-  const { finalPose, boneRefs, delta } = params;
+  const { finalPose, boneRefs, delta, humanoid } = params;
+  logFinalPoseApplyProbe(finalPose, delta);
+  if (
+    typeof process !== 'undefined' &&
+    process.env.NODE_ENV === 'development' &&
+    typeof performance !== 'undefined'
+  ) {
+    const n = performance.now();
+    if (n >= __finalPoseKeysLogNextAt) {
+      __finalPoseKeysLogNextAt = n + 900;
+      motionDebug('FINAL POSE KEYS:', [...finalPose.keys()], 'count=', finalPose.size);
+    }
+  }
   const lambda = params.smoothLambda ?? 16;
   const alpha = 1 - Math.exp(-lambda * Math.min(delta, 0.1));
-  const t = Math.min(1, Math.max(0, alpha));
+  const maxRotationPerFrameRad = params.maxRotationPerFrameRad ?? 0.1;
 
   for (const [key, qT] of finalPose) {
-    const obj = boneRefs[key];
+    const mappedKey = ARM_BONE_MAP[key] ?? key;
+    let obj: THREE.Object3D | null = boneRefs[key] ?? null;
+    if (!obj && humanoid) {
+      try {
+        obj = humanoid.getNormalizedBoneNode(mappedKey as never) ?? null;
+      } catch {
+        obj = null;
+      }
+    }
     if (!obj) continue;
+    if (
+      typeof process !== 'undefined' &&
+      process.env.NODE_ENV === 'development' &&
+      ARM_BONE_MAP[key] &&
+      typeof performance !== 'undefined'
+    ) {
+      const n = performance.now();
+      if (n >= __applyFinalPoseBoneLogNextAt) {
+        __applyFinalPoseBoneLogNextAt = n + 1200;
+        // eslint-disable-next-line no-console -- DEBUG: confirm arm mapping path
+        console.log('APPLYING TO BONE:', mappedKey, '(pose key:', key, ')');
+      }
+    }
     _Q2.copy(qT);
-    obj.quaternion.slerp(_Q2, t);
+    const qCur = obj.quaternion;
+    const dot = THREE.MathUtils.clamp(Math.abs(qCur.dot(_Q2)), 0, 1);
+    const omega = 2 * Math.acos(dot);
+    let t = Math.min(1, Math.max(0, alpha));
+    if (omega > 1e-5) {
+      t = Math.min(t, maxRotationPerFrameRad / omega);
+    }
+    qCur.slerp(_Q2, t);
+    qCur.normalize();
+  }
+}
+
+/**
+ * Hard lock avatar root in local space each frame: no translation/rotation accumulation on
+ * `vrm.scene` or normalized hips (V121 vertical correction stays on `liftNode`, not here).
+ */
+export function enforceAvatarRootStability(vrm: VRM): void {
+  const scene = vrm.scene;
+  scene.position.set(0, 0, 0);
+  scene.quaternion.identity();
+
+  const humanoid = vrm.humanoid;
+  if (!humanoid) return;
+  try {
+    const hip = humanoid.getNormalizedBoneNode('hips');
+    if (hip) {
+      hip.position.set(0, 0, 0);
+      hip.quaternion.normalize();
+    }
+  } catch {
+    /* */
   }
 }
 

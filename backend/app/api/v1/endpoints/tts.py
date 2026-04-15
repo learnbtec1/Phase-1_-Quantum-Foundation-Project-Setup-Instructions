@@ -63,6 +63,11 @@ async def generate_tts(
             text=body.text,
             voice_name=body.voice_name,
         )
+        if _prov != "azure":
+            logger.error("[TTS endpoint] non-Azure provider returned: %s", _prov)
+            raise HTTPException(status_code=502, detail="TTS integrity: expected Azure provider only.")
+        if not mp3_bytes:
+            raise HTTPException(status_code=502, detail="Azure TTS returned empty audio.")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except asyncio.TimeoutError:

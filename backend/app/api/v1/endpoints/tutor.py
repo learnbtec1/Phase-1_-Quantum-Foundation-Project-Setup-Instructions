@@ -17,6 +17,10 @@ from pydantic import BaseModel, Field
 
 from app.api.v1.dependencies.phase2_gates import gate_llm_http_user
 from app.core.config import settings as _settings
+from app.services.cognitive_roles import (
+    COGNITIVE_ROLE_TUTOR_SYSTEM,
+    COGNITIVE_TUTOR_INTENT_SIGNALS,
+)
 from app.models.db_models import User
 from app.services.assessment_grade_context import grade_warrants_proactive_nudge
 from app.services.btec_chroma_rag import (
@@ -741,6 +745,15 @@ async def _get_cogni_response(message: str, context: dict) -> str:
         system_content = str(ps).strip()[:8000]
     else:
         system_content = _DEFAULT_PERSONA_SYSTEM_AR
+
+    # Cognitive tutor role + intent/tone for motion — first, then existing persona and domain rules.
+    system_content = (
+        COGNITIVE_ROLE_TUTOR_SYSTEM.strip()
+        + "\n\n"
+        + COGNITIVE_TUTOR_INTENT_SIGNALS.strip()
+        + "\n\n"
+        + system_content
+    )
 
     # هدف تعليمي مستمر من وحدة التفكير الداخلي (Thinker) — لا تذكره حرفياً للطالب
     _cg = context.get("current_goal")

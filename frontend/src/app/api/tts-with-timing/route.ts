@@ -3,6 +3,7 @@
  * Returns { audio_base64, word_timings, sample_rate } for lip-sync.
  * Requires Authorization: Bearer (validated by Python API).
  *
+ * Proxies to backend Azure Speech only (no Kokoro/OpenAI TTS fallback).
  * Upstream errors: forward 401/403/429/503 where applicable; other 5xx → 502; detail truncated (bffProxy).
  */
 import { NextRequest, NextResponse } from 'next/server';
@@ -73,9 +74,14 @@ export async function POST(req: NextRequest) {
         },
         body: JSON.stringify({
           text,
+          provider: 'azure',
           voice: payload?.voice ?? defaultArabicVoice,
           speed: payload?.speed ?? 0.85,
           emotion: payload?.emotion ?? 'neutral',
+          emotion_intensity:
+            typeof payload?.emotion_intensity === 'number' && Number.isFinite(payload.emotion_intensity)
+              ? payload.emotion_intensity
+              : 0.72,
           ...(payload?.pitch ? { pitch: payload.pitch } : {}),
           ar_voice: payload?.ar_voice ?? 'male',
         }),
@@ -149,7 +155,30 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const data = await res.json().catch(() => null);
+    const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+    const provider = typeof data?.provider === 'string' ? data.provider.toLowerCase() : '';
+    const audio = typeof data?.audio_base64 === 'string' ? data.audio_base64 : '';
+    const vis = data?.viseme_events;
+    const visOk = Array.isArray(vis) && vis.length > 0;
+    if (provider !== 'azure') {
+      console.error('[tts-route] Upstream TTS provider is not azure:', provider);
+      return NextResponse.json(
+        { error: 'TTS integrity', detail: 'Expected provider=azure from backend', reqId },
+        { status: 502, headers: traceHeaders },
+      );
+    }
+    if (!audio?.length) {
+      return NextResponse.json(
+        { error: 'TTS integrity', detail: 'Empty audio from backend', reqId },
+        { status: 502, headers: traceHeaders },
+      );
+    }
+    if (!visOk) {
+      return NextResponse.json(
+        { error: 'TTS integrity', detail: 'Missing viseme_events for lip sync', reqId },
+        { status: 502, headers: traceHeaders },
+      );
+    }
     return NextResponse.json(data ?? {}, { headers: traceHeaders });
   } catch (err: unknown) {
     const isTimeout = err instanceof Error && err.name === 'AbortError';

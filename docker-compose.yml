@@ -57,8 +57,9 @@ services:
       SSL_CERT_DIR: "/etc/ssl/certs"
       TTS_ARABIC_VOICE: "ar-JO-TaimNeural"
       COGNI_ARABIC_TTS_VOICE_LOCKED: "ar-JO-TaimNeural"
-      # Allow edge-tts / gTTS when Azure fails (401 auth, rate limits, etc.)
-      TTS_DISABLE_NON_AZURE_FALLBACK: "false"
+      # Azure Speech only (no Edge/Kokoro/gTTS). Requires AZURE_SPEECH_KEY + AZURE_SPEECH_REGION in .env.
+      TTS_AZURE_ONLY: "true"
+      TTS_DISABLE_NON_AZURE_FALLBACK: "true"
       # Local dev: avatar page works without login (guest). Production: set false in root .env.
       COGNI_WS_ALLOW_ANONYMOUS: "true"
       # BTEC textbook / rubric / exemplar corpus (host path mounted read-only below)
@@ -107,7 +108,9 @@ services:
     volumes:
       - ${PROJECT_ROOT:-.}/frontend:/app
       - /app/node_modules
-    command: ["npm", "run", "dev", "--", "-H", "0.0.0.0", "-p", "3000"]
+      # Writable .next inside container — avoids Turbopack/Webpack lockfile EACCES on Windows bind mounts
+      - frontend_next_cache:/app/.next
+    command: ["npm", "run", "dev"]
     environment:
       WATCHPACK_POLLING: "true"
       NEXT_TELEMETRY_DISABLED: "1"
@@ -177,4 +180,6 @@ volumes:
   whisper_model_cache:
     driver: local
   chromadb_data:
+    driver: local
+  frontend_next_cache:
     driver: local

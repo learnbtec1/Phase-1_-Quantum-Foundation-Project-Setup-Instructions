@@ -30,7 +30,7 @@ export async function upsertEmbedding(
   }
   const pc = initVectorDB();
   const index = pc.index(indexName);
-  await index.upsert({ records: [{ id, values: vector, metadata }] });
+  await index.upsert([{ id, values: vector, metadata }]);
 }
 
 export async function queryEmbedding(

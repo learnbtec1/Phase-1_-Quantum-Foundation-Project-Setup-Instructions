@@ -8,11 +8,43 @@
  * Feature flags — all default OFF so experimental code is never active in prod.
  */
 
+import {
+  FLOOR_SOURCE,
+  WORLD_FLOOR_Y,
+  getWorldFloorY,
+  warnModelFloorAxisMisuse,
+} from '@/app/avatar-agent/floor/worldFloor';
+
+export { FLOOR_SOURCE, WORLD_FLOOR_Y, getWorldFloorY, warnModelFloorAxisMisuse };
+
 /** Office GLB under `public/models/office/` — must be a browser-safe URL, never a Windows path. */
 export const OFFICE_GLB_PUBLIC_PATH = '/models/office/office.glb' as const;
 
 /**
- * Default placement for `office_lite.glb` + VRM in `AvatarCanvas` (metres, Y-up).
+ * Base office room root (metres, Y-up) — pre–Blender-lock layout.
+ * World placement uses `getRoomGroupPosition()` = base + `ROOM_Y_OFFSET` on Y only.
+ */
+export const FINAL_ROOM_POSITION: [number, number, number] = Object.freeze([
+  -2.5776, -1.2839, -0.2279,
+]) as [number, number, number];
+
+/** Metres added to base room Y only (does not affect avatar / FloorLock). */
+export const ROOM_Y_OFFSET = 3.0;
+
+/** Actual `<group>` position for the office GLB: `[x, y + ROOM_Y_OFFSET, z]`. */
+export function getRoomGroupPosition(): [number, number, number] {
+  const [x, y, z] = FINAL_ROOM_POSITION;
+  return [x, y + ROOM_Y_OFFSET, z];
+}
+
+/** Background mesh stays outside `RoomContentEdit` (name as in GLB / office_scene.default.json). */
+export const OFFICE_BACKGROUND_MESH_NAME = 'Minimalistic_Modern_Office_Background_0' as const;
+
+/** Same as `WORLD_FLOOR_Y` / `getWorldFloorY()` — kept for older imports. */
+export const MANUAL_FLOOR_Y = WORLD_FLOOR_Y;
+
+/**
+ * Default placement for `office.glb` + VRM in `AvatarCanvas` (metres, Y-up).
  * Office is scaled (~0.52); avatar Y is lowered so the figure stands on the room floor
  * (not on the desk mesh), and +Z moves them into the room volume behind the desk
  * (camera sits on −Z looking toward +Z).
@@ -20,8 +52,8 @@ export const OFFICE_GLB_PUBLIC_PATH = '/models/office/office.glb' as const;
  * Override fine-tuning with `NEXT_PUBLIC_AVATAR_STAND_Y_OFFSET` (added to avatar Y).
  */
 export const AVATAR_OFFICE_SCENE_DEFAULTS = {
-  // office.glb: floor at Y≈0.30.
-  officePosition: [0, 0, 0.5] as [number, number, number],
+  /** Locked room root position — same as `FINAL_ROOM_POSITION`. */
+  officePosition: FINAL_ROOM_POSITION,
   officeScale: 1.0,
   // Avatar at desk (Z=-0.7). Faces +X (toward desk) via AVATAR_GROUP_ROTATION_Y=-π/2.
   // Y=0.30 = floor level (simulates seated-at-desk position from camera angle).
@@ -105,11 +137,32 @@ export const USE_CAMERA_GAZE =
 /**
  * Level 6 — single-authority intent pipeline: AgentDirector stops `avatar:gesture` / `avatar:emotion`;
  * `BehaviorBrainHost` owns motion side-effects. Enable with `NEXT_PUBLIC_LEVEL6_UNIFIED_BEHAVIOR=true`.
+ *
+ * When **true**: `BehaviorBrainHost` runs (avatar:gesture → VRMAPlayer map); many AgentDirector body paths
+ * no-op (`_fireGesture`, neutral-break VRMA, etc.). When **false**: AgentDirector + UnifiedGestureEngine
+ * can dispatch `avatar:vrma:play`. Omit or `false` if you need director-driven VRMA.
  */
 export const LEVEL6_UNIFIED_BEHAVIOR =
   typeof process !== 'undefined' &&
   (process.env.NEXT_PUBLIC_LEVEL6_UNIFIED_BEHAVIOR === 'true' ||
     process.env.NEXT_PUBLIC_LEVEL6_UNIFIED_BEHAVIOR === '1');
+
+/**
+ * Default looping VRMA after VRM load (`avatar:vrma:play` from `VRMAPlayer`).
+ * `VRMA_Idle.vrma` is not shipped — requests for that path resolve to this URL in the player.
+ */
+export const DEFAULT_BASE_LOOP_VRMA_URL =
+  '/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma';
+
+/**
+ * Optional: public URL to a `.vrma` file — dispatched once after VRM load as `avatar:vrma:play` (smoke test).
+ * Example: `/models/animations/VRMA_MotionPack/vrma/VRMA_02.vrma`
+ */
+export function readVrmaPlayOnLoadUrl(): string {
+  if (typeof process === 'undefined') return '';
+  const v = (process.env.NEXT_PUBLIC_VRMA_PLAY_ON_LOAD ?? '').trim();
+  return v;
+}
 
 /** Viseme prediction (lookahead). Default OFF — may cause mouth-pop artefacts. */
 export const USE_VISEME_PREDICT =
@@ -329,6 +382,21 @@ export function readAvatarStandYOffsetEnv(): number {
   return Number.isFinite(v) ? v : 0;
 }
 
+/**
+ * Legacy env tweak for room Y. **AvatarCanvas** no longer adds this after `FINAL_ROOM_POSITION`
+ * production lock — adjust `FINAL_ROOM_POSITION` in this file instead.
+ */
+export function readOfficeEnvYOffsetEnv(): number {
+  if (typeof process === 'undefined') return 0;
+  const v = parseFloat(process.env.NEXT_PUBLIC_OFFICE_ENV_Y_OFFSET ?? '0');
+  return Number.isFinite(v) ? v : 0;
+}
+
+/** Default office layout `[x,y,z]` — matches runtime room group (`getRoomGroupPosition`). */
+export function getDefaultOfficePosition(): [number, number, number] {
+  return getRoomGroupPosition();
+}
+
 /** World position for VRM root in office scene; includes `NEXT_PUBLIC_AVATAR_STAND_Y_OFFSET`. */
 export function getAvatarOfficeScenePosition(): [number, number, number] {
   const [x, y, z] = AVATAR_OFFICE_SCENE_DEFAULTS.avatarPosition;
@@ -370,6 +438,48 @@ export function readRugWalkSurfaceYExtraEnv(): number {
   return Number.isFinite(v) ? v : 0.015;
 }
 
+/**
+ * Added to `ROOM_BOUNDS.floorY` (static default and optional GLB-derived baseline).
+ * Try e.g. +0.05 / +0.1 if feet float slightly; negative if feet sink.
+ */
+export function readFloorBaselineOffsetEnv(): number {
+  if (typeof process === 'undefined') return 0;
+  const v = parseFloat(process.env.NEXT_PUBLIC_FLOOR_Y_OFFSET ?? '0');
+  return Number.isFinite(v) ? v : 0;
+}
+
+/**
+ * Legacy: GLB `Box3.min.y` floor sync is **disabled** — floor is always `getWorldFloorY()` (+ optional
+ * `readFloorBaselineOffsetEnv()` in `ROOM_BOUNDS`). If env is set to opt into old behaviour, we warn
+ * and still ignore the model.
+ */
+export function readFloorAutoFromGlbEnv(): boolean {
+  if (typeof process === 'undefined') return false;
+  const raw = (process.env.NEXT_PUBLIC_FLOOR_AUTO_FROM_GLB ?? '').trim().toLowerCase();
+  const legacyOn = raw === 'true' || raw === '1' || raw === 'on';
+  if (legacyOn) {
+    warnModelFloorAxisMisuse('NEXT_PUBLIC_FLOOR_AUTO_FROM_GLB is ignored; floor source is WORLD.');
+  }
+  return false;
+}
+
+/** Show a grid at `ROOM_BOUNDS.floorY` (dev alignment). `NEXT_PUBLIC_DEBUG_FLOOR_GRID=true` */
+export function readDebugFloorGridEnv(): boolean {
+  return (
+    typeof process !== 'undefined' && process.env.NEXT_PUBLIC_DEBUG_FLOOR_GRID === 'true'
+  );
+}
+
+/**
+ * Drift watchdog: re-runs foot calibration on an interval when feet drift from target (default OFF).
+ * Enable with `NEXT_PUBLIC_FLOOR_CALIB_WATCHDOG=true` — can fight animation / duplicate bounds and cause loops.
+ */
+export function readFloorCalibWatchdogEnv(): boolean {
+  return (
+    typeof process !== 'undefined' && process.env.NEXT_PUBLIC_FLOOR_CALIB_WATCHDOG === 'true'
+  );
+}
+
 // ── 3D scene environment (carpet vs office GLB) — AvatarCanvas `NEXT_PUBLIC_ACTIVE_ENV` ─
 
 export type ActiveEnvKey = 'DEFAULT' | 'OFFICE';
@@ -382,7 +492,7 @@ export const ENV_MODELS: Record<
   ActiveEnvKey,
   {
     path: string;
-    /** World Y of the rigid floor before rug/walk extra (OFFICE). DEFAULT mirrors initial ROOM_BOUNDS_DEFAULT.floorY for docs only — floor still comes from carpet AABB + env rug extra. */
+    /** World Y of the rigid floor (docs) — live `ROOM_BOUNDS.floorY` is `getWorldFloorY()` + env offset, not GLB. */
     physicsY: number;
     /** Metres above physics base for the walk surface (soles target). OFFICE uses this; DEFAULT uses `readRugWalkSurfaceYExtraEnv()` on top of carpet AABB max.y. */
     rugExtra: number;

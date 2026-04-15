@@ -21,6 +21,9 @@ _pe = (os.getenv("ENVIRONMENT") or os.getenv("ENV") or "").strip().lower()
 if _pe in ("production", "prod") and os.getenv("PYTEST_ALLOW_PRODUCTION_ENV") != "1":
     os.environ["ENVIRONMENT"] = "development"
 
+# Azure TTS: pytest defaults to not requiring a real Speech subscription (integration tests set env explicitly).
+os.environ.setdefault("TTS_AZURE_ONLY", "false")
+
 from app.api import deps
 from app.main import app
 from app.models.db_models import UserRole

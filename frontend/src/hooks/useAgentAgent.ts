@@ -37,13 +37,21 @@ import { useVAD }                          from '@/hooks/useVAD';
 import { useBrainStore }                   from '@/store/useBrainStore';
 import { agentDirector }                   from '@/ai/avatar/AgentDirector';
 import { unifiedGestureEngine, initGestureNormalizer } from '@/ai/cognitive/UnifiedGestureEngine';
+import { emitUserSpeechTickForAnticipation } from '@/lib/behavior/anticipationLayer';
 import { PRIORITY } from '@/constants/gestures';
 import { emotionalMemoryManager }          from '@/ai/avatar/EmotionalMemoryManager';
 import type { EmotionLabel, AgentFrame } from '@/types/ai';
 import { COGNI_PERSONA, COGNI_JSON_BRAIN_SYSTEM_APPEND } from '@/config/personality';
 import { buildDeviceContextPayload }       from '@/lib/deviceContext';
 import { authHeaders }                     from '@/lib/auth';
+import { resetSpeechIntentHints, setSpeechIntentHintsFromText } from '@/lib/avatar/speechIntentHints';
 import { resolveSpeakRate, stopTTSGlobally } from '@/ai/io/tts';
+import { microExprBargeInPulse } from '@/ai/avatar/microExpressionLayer';
+import { inferUserMirrorEmotion, inferUserSpeechRhythm } from '@/lib/avatar/userEmotionMirror';
+import { getProfile, recordInteractionTick, recordUserEmotionalSnapshot } from '@/lib/avatar/emotionalMemory';
+import { tickPersonalityFromInteraction } from '@/lib/avatar/personalityEvolution';
+import { mergeOpinionIntoEmotionalContext, recordOpinionTopicSnapshot } from '@/lib/avatar/opinionEngine';
+import { mergeCompanionshipIntoEmotionalContext } from '@/lib/avatar/companionship';
 import {
   getStableWebSpeechVoice,
   ensureWebSpeechVoicesChangeHook,
@@ -85,6 +93,7 @@ import {
   readAssessmentCoaching,
   type AssessmentCoachingPayload,
 } from '@/lib/cogniSessionContext';
+import { resumeSharedAudioContext } from '@/lib/audio/avatarAudioContext';
 
 /**
  * True while HTMLAudioElement from a WS `speech` frame is playing.
@@ -511,6 +520,8 @@ export function useAgentAgent({
    * Allows automatic VAD resume once TTS playback ends.
    */
   const wasListeningRef    = useRef(false);
+  /** Cleared on new utterance / unmount — avoids resuming VAD while a later TTS clip is already playing. */
+  const vadResumeTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Timestamp (ms) of the last empty_transcript warn — used to rate-limit console spam. */
   const lastEmptyErrorRef  = useRef(0);
   /** V31 — suppress duplicate client-side TTS fallback when backend repeats tts_unavailable for same text */
@@ -536,6 +547,9 @@ export function useAgentAgent({
   const visemeFetchAbortRef = useRef<AbortController | null>(null);
   /** Last inferred user mood for emotional memory (not avatar reply emotion). */
   const lastUserMoodRef = useRef<EmotionLabel>('neutral');
+  /** VAD segment timing — used with transcript length for speech rhythm mirroring */
+  const vadSpeechStartMsRef = useRef(0);
+  const lastUtteranceDurationMsRef = useRef(2400);
 
   // ── Teaching Strategy Engine ────────────────────────────────────────────────
   const teachingCtxRef = useRef<StrategyContext>({
@@ -616,13 +630,116 @@ export function useAgentAgent({
     }
   }, [clearCoSpeechTimers, clearPerformanceTimers]);
 
-  const onVadSpeechStart = useCallback((): void => {
-    if (isSpeakingRef.current) {
-      stopAllAudio();
+  /**
+   * User took the floor while the avatar was mid-TTS, mid-gesture queue, or processing a reply.
+   * Smooth TTS fade (via cogni:avatar:interrupt), VRMA crossfade to idle, cancel queued gestures,
+   * clear lip timeline, subtle head + micro-expression, then brain listening hints.
+   */
+  const runAvatarBargeIn = useCallback((): void => {
+    if (typeof window === 'undefined') return;
+    const brain = useBrainStore.getState();
+    const busy = isSpeakingRef.current || brain.talking || isProcessingRef.current;
+    if (!busy) return;
+
+    clearCoSpeechTimers();
+    clearPerformanceTimers();
+    visemeFetchAbortRef.current?.abort();
+    visemeFetchAbortRef.current = null;
+
+    unifiedGestureEngine.cancelAll();
+    unifiedGestureEngine.cancelScheduledBehavior();
+
+    try {
+      window.dispatchEvent(new CustomEvent('cogni:avatar:interrupt'));
+    } catch {
+      /* ignore */
     }
+
+    try {
+      window.dispatchEvent(new CustomEvent('avatar:visemes:clear'));
+    } catch {
+      /* ignore */
+    }
+    try {
+      window.dispatchEvent(new CustomEvent('avatar:vrma:barge-in'));
+    } catch {
+      /* ignore */
+    }
+    try {
+      window.dispatchEvent(new CustomEvent('avatar:blink', { detail: { style: 'normal' } }));
+    } catch {
+      /* ignore */
+    }
+    try {
+      window.dispatchEvent(
+        new CustomEvent('avatar:headpose', {
+          detail: { yaw: 0, pitch: 0.016, duration: 320 },
+        }),
+      );
+    } catch {
+      /* ignore */
+    }
+    try {
+      microExprBargeInPulse();
+    } catch {
+      /* ignore */
+    }
+
+    const a = currentAudioRef.current;
+    if (a) {
+      const v0 = typeof a.volume === 'number' && Number.isFinite(a.volume) ? a.volume : 1;
+      const fadeMs = 130;
+      const t0 = performance.now();
+      const step = (): void => {
+        if (currentAudioRef.current !== a) return;
+        const u = Math.min(1, (performance.now() - t0) / fadeMs);
+        try {
+          a.volume = Math.max(0, v0 * (1 - u));
+        } catch {
+          /* ignore */
+        }
+        if (u < 1) {
+          requestAnimationFrame(step);
+        } else {
+          try {
+            a.pause();
+            a.currentTime = 0;
+          } catch {
+            /* ignore */
+          }
+          const src = a.src;
+          if (src?.startsWith('blob:')) {
+            try {
+              URL.revokeObjectURL(src);
+            } catch {
+              /* ignore */
+            }
+          }
+          currentAudioRef.current = null;
+          serverTtsPlaybackActive = false;
+        }
+      };
+      requestAnimationFrame(step);
+    }
+
+    try {
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
+    } catch {
+      /* ignore */
+    }
+
+    useBrainStore.getState().setTalking(false);
+    useBrainStore.getState().setThinking(false);
+    resetSpeechIntentHints();
+  }, [clearCoSpeechTimers, clearPerformanceTimers]);
+
+  const onVadSpeechStart = useCallback((): void => {
+    vadSpeechStartMsRef.current = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    runAvatarBargeIn();
+    useBrainStore.getState().setUserSpeaking(true);
     if (typeof window === 'undefined') return;
     window.dispatchEvent(new CustomEvent('cogni:user:speaking'));
-  }, [stopAllAudio]);
+  }, [runAvatarBargeIn]);
 
   /**
    * Play server TTS from WS `speech` frames. Azure returns **MP3** (`audio_format: mp3`);
@@ -714,7 +831,11 @@ export function useAgentAgent({
         }
         useBrainStore.getState().setTalking(true);
         if (typeof window !== 'undefined') {
+          const hintLine = (coDialogue && coDialogue.length > 0 ? coDialogue : fallbackText).trim();
+          setSpeechIntentHintsFromText(hintLine);
           // ORDER IS CRITICAL (Phase 2 fix):
+          // 0. Pre-speech eye anticipation (before audio element / lip-sync)
+          window.dispatchEvent(new CustomEvent('cogni:pre_speech', { detail: { source: 'ws_tts' } }));
           // 1. Wire analyser ref FIRST (audio:element)
           window.dispatchEvent(new CustomEvent('avatar:audio:element', { detail: { audio } }));
           // 2. If server cues are already available (from WS frame), dispatch timeline
@@ -749,6 +870,7 @@ export function useAgentAgent({
         useBrainStore.getState().setTalking(false);
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('avatar:visemes:clear'));
+          resetSpeechIntentHints();
           window.dispatchEvent(new CustomEvent('avatar:speak:end'));
         }
         console.log('[useAgentAgent] Server TTS play:end');
@@ -761,6 +883,7 @@ export function useAgentAgent({
         useBrainStore.getState().setTalking(false);
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('avatar:visemes:clear'));
+          resetSpeechIntentHints();
           window.dispatchEvent(new CustomEvent('avatar:speak:end'));
         }
         if (!audibleStartFired) {
@@ -777,6 +900,7 @@ export function useAgentAgent({
         );
       };
 
+      await resumeSharedAudioContext();
       const playPromise = audio.play();
       if (playPromise !== undefined) {
         try {
@@ -834,8 +958,31 @@ export function useAgentAgent({
         useBrainStore.getState().pushTurn({ role: 'user', text: transcript });
         useBrainStore.getState().setUserSpeaking(true);
         setTimeout(() => useBrainStore.getState().setUserSpeaking(false), 800);
+        emitUserSpeechTickForAnticipation();
         const um = (frame.user_mood ?? frame.userMood) as string | undefined;
         lastUserMoodRef.current = um?.trim() ? toEmotionLabel(um.trim()) : 'neutral';
+
+        const wordCount = transcript.split(/\s+/).filter(Boolean).length;
+        const rhythm = inferUserSpeechRhythm({
+          utteranceDurationMs: lastUtteranceDurationMsRef.current,
+          charCount: transcript.length,
+          wordCount,
+        });
+        const mirrorEm = inferUserMirrorEmotion({
+          text: transcript,
+          userMood: lastUserMoodRef.current,
+          stressSignals: useBrainStore.getState().stressSignals,
+        });
+        useBrainStore.getState().setUserMirrorState({
+          userMirrorEmotion: mirrorEm,
+          userSpeechRhythm: rhythm,
+        });
+        recordUserEmotionalSnapshot(mirrorEm, { topicSnippet: transcript.slice(0, 80) });
+        tickPersonalityFromInteraction({
+          text: transcript,
+          engagement: getProfile().engagement,
+          mirrorEmotion: mirrorEm,
+        });
 
         // ── All intelligence layers: intuition + strategy + persuasion + temporal ──
         sessionTurnCountRef.current += 1;
@@ -968,7 +1115,10 @@ export function useAgentAgent({
                       pitch: avatarBehavior.gazeTarget === 'think' ? -0.12 : 0,
                       durationMs: 2000 },
           }));
-          void unifiedGestureEngine.play(avatarBehavior.gesture, { priority: PRIORITY.NORMAL });
+          void unifiedGestureEngine.play(avatarBehavior.gesture, {
+            priority: PRIORITY.NORMAL,
+            replyText: transcript,
+          });
           // Extra: if hidden weakness detected, trigger concerned look
           if (intuitionReading.hiddenWeakness && typeof window !== 'undefined') {
             setTimeout(() => {
@@ -997,6 +1147,7 @@ export function useAgentAgent({
               void unifiedGestureEngine.play(gestureHint, {
                 priority: PRIORITY.NORMAL,
                 durationMs: 2200,
+                replyText: transcript,
               });
             }, 80);
           }
@@ -1023,6 +1174,7 @@ export function useAgentAgent({
         setIsProcessing(false);
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('avatar:visemes:clear'));
+          resetSpeechIntentHints();
           window.dispatchEvent(new CustomEvent('avatar:speak:end'));
         }
         console.log('[useAgentAgent] stop_speech — playback halted', frame);
@@ -1041,7 +1193,10 @@ export function useAgentAgent({
           window.dispatchEvent(
             new CustomEvent('avatar:emotion', { detail: { emotion: 'thinking', strength: 0.6 } }),
           );
-          void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.HIGH });
+          void unifiedGestureEngine.play('Thinking', {
+            priority: PRIORITY.HIGH,
+            responseClass: 'thinking',
+          });
         }
         break;
       }
@@ -1147,6 +1302,7 @@ export function useAgentAgent({
           ? toEmotionLabel(rawUserMood.trim())
           : lastUserMoodRef.current;
         emotionalMemoryManager.recordMoment(userMoodLabel, topicSnippet);
+        recordInteractionTick();
         lastUserMoodRef.current = userMoodLabel;
 
         // 3. Store avatar turn in short-term memory
@@ -1346,7 +1502,12 @@ export function useAgentAgent({
   // ── WebSocket connection ───────────────────────────────────────────────────
 
   const connect = useCallback((): void => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    const existing = wsRef.current;
+    if (existing?.readyState === WebSocket.OPEN) return;
+    if (existing?.readyState === WebSocket.CONNECTING) {
+      console.warn('[useAgentAgent] WS already CONNECTING — skipping duplicate connect()');
+      return;
+    }
     if (typeof window === 'undefined') return;
 
     const url = wsUrl;
@@ -1522,7 +1683,26 @@ export function useAgentAgent({
     };
 
     ws.onerror = (event: Event) => {
-      console.error('[useAgentAgent] WS error:', event);
+      const rs = ws.readyState;
+      const stateStr =
+        rs === WebSocket.CONNECTING
+          ? 'CONNECTING'
+          : rs === WebSocket.OPEN
+            ? 'OPEN'
+            : rs === WebSocket.CLOSING
+              ? 'CLOSING'
+              : rs === WebSocket.CLOSED
+                ? 'CLOSED'
+                : String(rs);
+      console.error(
+        '[useAgentAgent] WS error:',
+        event.type,
+        'readyState=',
+        stateStr,
+        'url=',
+        url,
+        '(browser Event has no message; see onclose for code/reason)',
+      );
       setError('WebSocket connection error');
       if (ws.readyState === WebSocket.CONNECTING) {
         console.warn('[useAgentAgent] Error during CONNECTING — closing so onclose can run');
@@ -1553,6 +1733,8 @@ export function useAgentAgent({
     silenceGapMs:     700,
     onSpeechStart: onVadSpeechStart,
     onSpeechEnd: async (blob: Blob) => {
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      lastUtteranceDurationMsRef.current = Math.max(380, now - vadSpeechStartMsRef.current);
       console.log(
         '[useAgentAgent] VAD onSpeechEnd — blob',
         blob.size,
@@ -1560,11 +1742,13 @@ export function useAgentAgent({
         blob.type || '(no type)',
       );
       // Full-duplex interrupt: send audio even if the avatar was speaking — backend
-      // cancels the LLM/TTS turn and replies to the new utterance. Stop local playback
+      // cancels the LLM/TTS turn and replies to the new utterance. Smooth local barge-in
       // first to reduce speaker bleed (headphones recommended).
       if (isSpeakingRef.current) {
-        console.log('[useAgentAgent] Interrupt: user spoke during avatar speech — stopping playback, sending audio');
-        stopAllAudio();
+        console.log(
+          '[useAgentAgent] Interrupt: user spoke during avatar speech — barge-in (fade + VRMA), sending audio',
+        );
+        runAvatarBargeIn();
       }
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -1575,7 +1759,17 @@ export function useAgentAgent({
       try {
         console.log(`[Agent] Sending audio frame, size: ${blob.size} type=${blob.type || 'unknown'}`);
         const audioBase64 = await audioInputToBase64(blob);
-        const emotionalCtx = emotionalMemoryManager.getContextSummary();
+        const bsAudio = useBrainStore.getState();
+        const emotionalCtx = mergeCompanionshipIntoEmotionalContext(
+          mergeOpinionIntoEmotionalContext(
+            emotionalMemoryManager.getContextSummary(),
+            {
+              userText: '',
+              comprehensionConfidence: bsAudio.comprehensionConfidence,
+              isAudioTurn: true,
+            },
+          ),
+        );
         const fsAudio = getCogniFocusSubject();
         const rawCoach = readAssessmentCoaching();
         const coachingOut = rawCoach ? trimAssessmentCoachingForWs(rawCoach) : null;
@@ -1622,6 +1816,16 @@ export function useAgentAgent({
     }
   }, [isRecording]);
 
+  /** VAD / useVAD silence segment — keep brain `isUserSpeaking` aligned with intent + gaze. */
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onSilent = (): void => {
+      useBrainStore.getState().setUserSpeaking(false);
+    };
+    window.addEventListener('cogni:user:silent', onSilent);
+    return () => window.removeEventListener('cogni:user:silent', onSilent);
+  }, []);
+
   // ── Stable ref wrappers for vadStart / vadStop ─────────────────────────────
   // The avatar:speak event handlers (useEffect below) need to call the latest
   // vadStart/vadStop without them in the effect dependency array (adding them
@@ -1652,6 +1856,10 @@ export function useAgentAgent({
     isListeningRef.current = false;
     // Cancel any pending half-duplex auto-resume — the user explicitly stopped listening.
     wasListeningRef.current = false;
+    if (vadResumeTimerRef.current) {
+      clearTimeout(vadResumeTimerRef.current);
+      vadResumeTimerRef.current = null;
+    }
 
     vadStop();
     useBrainStore.getState().setPhysical({ isListening: false });
@@ -1686,12 +1894,49 @@ export function useAgentAgent({
     if (!isInternalProactive) {
       lastUserMoodRef.current = 'neutral';
     }
+    if (!isInternalProactive && trimmed.length > 0) {
+      const wc = trimmed.split(/\s+/).filter(Boolean).length;
+      const estDur = Math.max(450, trimmed.length * 68);
+      const st = useBrainStore.getState();
+      const mirrorTx = inferUserMirrorEmotion({
+        text: trimmed,
+        userMood: lastUserMoodRef.current,
+        stressSignals: st.stressSignals,
+      });
+      st.setUserMirrorState({
+        userMirrorEmotion: mirrorTx,
+        userSpeechRhythm: inferUserSpeechRhythm({
+          utteranceDurationMs: estDur,
+          charCount: trimmed.length,
+          wordCount: wc,
+        }),
+      });
+      recordUserEmotionalSnapshot(mirrorTx, { topicSnippet: trimmed.slice(0, 80) });
+      tickPersonalityFromInteraction({
+        text: trimmed,
+        engagement: getProfile().engagement,
+        mirrorEmotion: mirrorTx,
+      });
+    }
 
     // One-shot: attach the BTEC grade snapshot from the assessment page (if any).
     // The backend's process_text() injects it as a Debrief Context block so
     // the avatar can say "أرى إنك حصلت على Merit في موضوع X…" naturally.
     const gradeSnapshot = _consumeLastGrade();
-    const emotionalCtx = emotionalMemoryManager.getContextSummary();
+    const bsSend = useBrainStore.getState();
+    const emotionalCtx = mergeCompanionshipIntoEmotionalContext(
+      mergeOpinionIntoEmotionalContext(
+        emotionalMemoryManager.getContextSummary(),
+        {
+          userText: trimmed,
+          comprehensionConfidence: bsSend.comprehensionConfidence,
+          isAudioTurn: false,
+        },
+      ),
+    );
+    if (!isInternalProactive && trimmed.length > 0) {
+      recordOpinionTopicSnapshot(trimmed);
+    }
     const fsNow = getCogniFocusSubject();
     const rawCoach = readAssessmentCoaching();
     const coachingOut = rawCoach ? trimAssessmentCoachingForWs(rawCoach) : null;
@@ -1886,6 +2131,10 @@ export function useAgentAgent({
     if (typeof window === 'undefined') return;
     const onStart = (): void => {
       isSpeakingRef.current = true;
+      if (vadResumeTimerRef.current) {
+        clearTimeout(vadResumeTimerRef.current);
+        vadResumeTimerRef.current = null;
+      }
       // Mute VAD the instant TTS playback begins.
       if (isListeningRef.current) {
         wasListeningRef.current = true;
@@ -1898,19 +2147,27 @@ export function useAgentAgent({
       // Re-enable VAD after a 250 ms settling delay once TTS finishes.
       if (wasListeningRef.current) {
         wasListeningRef.current = false;
-        setTimeout(() => {
-          if (isListeningRef.current && mountedRef.current) {
-            _vadStartRef.current().catch((e: unknown) => {
-              console.warn('[useAgentAgent] Half-duplex: failed to resume VAD after TTS:', e);
-            });
-            console.log('[useAgentAgent] Half-duplex: VAD resumed — avatar finished speaking');
-          }
+        if (vadResumeTimerRef.current) {
+          clearTimeout(vadResumeTimerRef.current);
+          vadResumeTimerRef.current = null;
+        }
+        vadResumeTimerRef.current = setTimeout(() => {
+          vadResumeTimerRef.current = null;
+          if (!mountedRef.current || !isListeningRef.current || isSpeakingRef.current) return;
+          _vadStartRef.current().catch((e: unknown) => {
+            console.warn('[useAgentAgent] Half-duplex: failed to resume VAD after TTS:', e);
+          });
+          console.log('[useAgentAgent] Half-duplex: VAD resumed — avatar finished speaking');
         }, 250);
       }
     };
     window.addEventListener('avatar:speak:start', onStart);
     window.addEventListener('avatar:speak:end',   onEnd);
     return () => {
+      if (vadResumeTimerRef.current) {
+        clearTimeout(vadResumeTimerRef.current);
+        vadResumeTimerRef.current = null;
+      }
       window.removeEventListener('avatar:speak:start', onStart);
       window.removeEventListener('avatar:speak:end',   onEnd);
     };
@@ -2008,6 +2265,10 @@ export function useAgentAgent({
 
     return () => {
       mountedRef.current = false;
+      if (vadResumeTimerRef.current) {
+        clearTimeout(vadResumeTimerRef.current);
+        vadResumeTimerRef.current = null;
+      }
 
       // Clean up connections and playback
       agentDirector.stop();

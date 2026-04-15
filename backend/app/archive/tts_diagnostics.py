@@ -27,7 +27,7 @@ def classify_tts_failure(
     if not azure_key_set:
         return (
             "azure_key_missing",
-            "AZURE_SPEECH_KEY is empty or unset — set it in .env or rely on edge-tts (TTS_PRIMARY_PROVIDER=edge).",
+            "AZURE_SPEECH_KEY is empty or unset — set it in .env (Azure Speech is required).",
         )
     if not (azure_region or "").strip():
         return (
