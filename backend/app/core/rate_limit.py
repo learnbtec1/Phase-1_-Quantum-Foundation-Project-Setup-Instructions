@@ -216,4 +216,6 @@ class ApiRateLimitMiddleware(BaseHTTPMiddleware):
     """Reserved for global guards; per-user TTS/STT limits run in route dependencies (Phase 2)."""
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        if request.scope.get("type") != "http":
+            return await call_next(request)
         return await call_next(request)

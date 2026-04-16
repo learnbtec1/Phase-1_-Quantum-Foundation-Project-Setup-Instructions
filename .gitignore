@@ -2,6 +2,7 @@ node_modules
 .next
 .env
 .env.*
+credentials.json
 !.env.example
 backend/.env
 *.log
@@ -39,6 +40,8 @@ frontend/public/assets/*.exe
 *.winmd
 # Too large for GitHub (>100MB); host separately or use Git LFS
 frontend/public/assets/blue_carpet.glb
+# ~346MB — exceeds GitHub single-file limit; keep local or use LFS
+frontend/public/models/d.glb
 
 # Never commit a Unity project under public (archive under E:\BTEC\archef instead)
 frontend/public/models/195_Uta01/Assets/

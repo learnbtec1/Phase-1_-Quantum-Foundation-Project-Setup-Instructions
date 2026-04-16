@@ -47,7 +47,7 @@ function securityHeaders() {
     "worker-src 'self' blob:",
     "child-src 'self' blob:",
     // WebSocket agent, Azure Speech / OpenAI / API (broad https: keeps regional Azure endpoints working)
-    "connect-src 'self' ws: wss: https:" +
+    "connect-src 'self' blob: ws: wss: https:" +
       (isProd ? '' : ' http://localhost:* http://127.0.0.1:*') +
       (connectExtras ? ` ${connectExtras}` : ''),
   ];

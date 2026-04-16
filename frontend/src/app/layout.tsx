@@ -7,6 +7,7 @@ import { ProgressProvider } from '@/context/ProgressContext';
 import LayoutSwitcher from '@/components/LayoutSwitcher';
 import DevLogFilter from '@/app/dev-log-filter';
 import ServiceWorkerRegister from '@/components/ServiceWorkerRegister';
+import AuthBootstrap from '@/components/AuthBootstrap';
 
 const cairo = Cairo({
   subsets: ['arabic', 'latin'],
@@ -36,6 +37,7 @@ export default function RootLayout({
     <html lang="ar" dir="rtl" className={`${cairo.variable} h-full`}>
       <body className="font-cairo bg-midnight text-white min-h-screen antialiased">
         <ServiceWorkerRegister />
+        <AuthBootstrap />
         <DevLogFilter />
         <ProgressProvider>
           <LayoutSwitcher>{children}</LayoutSwitcher>

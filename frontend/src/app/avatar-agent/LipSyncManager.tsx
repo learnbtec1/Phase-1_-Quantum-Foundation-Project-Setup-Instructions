@@ -24,6 +24,13 @@ import {
   patchSpeechEmotionEnergy,
 } from '@/ai/voice/speechEmotionBridge';
 import { installUserGestureAudioUnlock } from '@/lib/audio/avatarAudioContext';
+import { nowMs as masterClockNowMs, sessionElapsedSec } from '@/lib/avatar/masterClock';
+import {
+  getActiveAudioElement,
+  getPlaybackTimeSec,
+  getVisemeCues,
+  resetDriftOffset,
+} from '@/lib/avatar/audioTimeline';
 
 const TAB_SAFE_MAX_DELTA = 0.1;
 
@@ -58,36 +65,6 @@ const AZURE_VISEME_TO_BLEND: ReadonlyArray<Partial<{ aa: number; ih: number; oh:
   { aa: 0.20, oh: 0.10 },
   {},
 ];
-
-type FreqBufRef = MutableRefObject<Uint8Array | null>;
-
-function readAnalyserMouth(analyser: AnalyserNode, freqBufRef: FreqBufRef): { aa: number; oh: number; ih: number } {
-  const n = analyser.frequencyBinCount;
-  let buf = freqBufRef.current;
-  if (!buf || buf.length !== n) {
-    buf = new Uint8Array(n);
-    freqBufRef.current = buf;
-  }
-  analyser.getByteFrequencyData(buf as Parameters<AnalyserNode['getByteFrequencyData']>[0]);
-
-  let lowEnergy = 0;
-  let midEnergy = 0;
-  const totalBins = Math.min(n, 40);
-  for (let i = 0; i < totalBins; i++) {
-    const v = buf[i] ?? 0;
-    const weight = i < 10 ? 1.8 : i < 20 ? 1.2 : 0.6;
-    if (i < 20) lowEnergy += v * weight;
-    else midEnergy += v;
-  }
-  const normLow = Math.min(1, lowEnergy / (20 * 255 * 1.2));
-  const normMid = Math.min(1, midEnergy / (20 * 255));
-
-  return {
-    aa: normLow * 0.72,
-    oh: normMid * 0.28,
-    ih: normLow * normMid * 0.18,
-  };
-}
 
 function exprGet(em: VRM['expressionManager'], name: string): number {
   if (!em) return 0;
@@ -151,7 +128,6 @@ export default function LipSyncManager({
   audioElementRef,
   analyserRef,
 }: LipSyncManagerProps): null {
-  const freqBufRef = useRef<Uint8Array | null>(null);
   const timeDomainBufRef = useRef<Float32Array | null>(null);
   const audioBoundRef = useRef<HTMLAudioElement | null>(null);
   const audioEndedHandlerRef = useRef<(() => void) | null>(null);
@@ -161,10 +137,10 @@ export default function LipSyncManager({
   const visemeUnitCheckedRef = useRef(false);
   const visemeIsMs = useRef(false);
 
-  const driftOffsetSecRef = useRef(0);
   const lastVisemeIdRef = useRef<number>(-2);
   const lastActiveCueTRef = useRef(0);
   const lastDebugLogAtRef = useRef(0);
+  const lastLipDriftConsoleAtRef = useRef(0);
   const speechEmphasisRef = useRef(0);
   const lipObsFrameRef = useRef(0);
 
@@ -201,7 +177,7 @@ export default function LipSyncManager({
         await waitForAudioReady(a);
         bindEnded(a);
       }
-      driftOffsetSecRef.current = 0;
+      resetDriftOffset();
       lastVisemeIdRef.current = -2;
       lastActiveCueTRef.current = 0;
     };
@@ -214,33 +190,20 @@ export default function LipSyncManager({
     if (initial) bindEnded(initial);
 
     const onSpeakEnd = (): void => {
-      driftOffsetSecRef.current = 0;
+      resetDriftOffset();
       lastVisemeIdRef.current = -2;
       visemeUnitCheckedRef.current = false;
-    };
-
-    const onHealLip = (e: Event): void => {
-      const d = (e as CustomEvent<{ deltaSec?: number }>).detail;
-      const delta = typeof d?.deltaSec === 'number' && Number.isFinite(d.deltaSec) ? d.deltaSec : 0;
-      if (!delta) return;
-      driftOffsetSecRef.current = THREE.MathUtils.clamp(
-        driftOffsetSecRef.current + delta,
-        -0.12,
-        0.12,
-      );
     };
 
     window.addEventListener('avatar:speak:start', onSpeakStart);
     window.addEventListener('avatar:speak:end', onSpeakEnd);
     window.addEventListener('avatar:speech:emphasis', onEmphasis as EventListener);
     window.addEventListener('avatar:micro:gesture', onEmphasis as EventListener);
-    window.addEventListener('cogni:heal:lip-offset', onHealLip as EventListener);
     return () => {
       window.removeEventListener('avatar:speak:start', onSpeakStart);
       window.removeEventListener('avatar:speak:end', onSpeakEnd);
       window.removeEventListener('avatar:speech:emphasis', onEmphasis as EventListener);
       window.removeEventListener('avatar:micro:gesture', onEmphasis as EventListener);
-      window.removeEventListener('cogni:heal:lip-offset', onHealLip as EventListener);
       const au = audioBoundRef.current;
       const h = audioEndedHandlerRef.current;
       if (au && h) au.removeEventListener('ended', h);
@@ -254,8 +217,10 @@ export default function LipSyncManager({
     if (!em) return;
 
     const talking = isTalkingRef.current;
-    const audioProbe = audioElementRef.current;
-    const qProbe = visemeCueQueueRef.current;
+    const tc = getVisemeCues();
+    const timelineAudio = getActiveAudioElement();
+    const audioProbe = timelineAudio ?? audioElementRef.current;
+    const qProbe = tc.length > 0 ? tc : visemeCueQueueRef.current;
     if (typeof window !== 'undefined') {
       (window as Window & {
         __cogniLipSyncProbe?: {
@@ -274,7 +239,7 @@ export default function LipSyncManager({
     const safeDelta = Math.min(Math.max(delta, 0), TAB_SAFE_MAX_DELTA);
     const closeSpd = Math.min(1, safeDelta * 10);
 
-    const nowMs = performance.now();
+    const nowMs = masterClockNowMs();
     const sm = smoothRef.current;
 
     const webCtx = analyserRef?.current?.context as AudioContext | undefined;
@@ -302,8 +267,8 @@ export default function LipSyncManager({
     }
     prevTalkingRef.current = true;
 
-    const audio = audioElementRef.current;
-    const queue = visemeCueQueueRef.current;
+    const audio = timelineAudio ?? audioElementRef.current;
+    const queue = tc.length > 0 ? tc : visemeCueQueueRef.current;
     const analyser = analyserRef?.current ?? null;
 
     if (analyser) {
@@ -342,7 +307,8 @@ export default function LipSyncManager({
       audio.currentTime >= 0 &&
       audio.readyState >= AUDIO_READY_MIN;
 
-    const VISEME_ANTICIPATION_SEC = 0.03;
+    /** Lip sync playhead = `audio.currentTime` only (no artificial anticipation offset). */
+    const VISEME_ANTICIPATION_SEC = 0;
 
     let tgtAa = 0;
     let tgtIh = 0;
@@ -352,18 +318,18 @@ export default function LipSyncManager({
 
     let tSec = 0;
     if (audioReady) {
-      tSec = Math.max(0, audio.currentTime - VISEME_ANTICIPATION_SEC + driftOffsetSecRef.current);
+      tSec = timelineAudio
+        ? Math.max(0, getPlaybackTimeSec() - VISEME_ANTICIPATION_SEC)
+        : Math.max(0, audio!.currentTime - VISEME_ANTICIPATION_SEC);
     }
 
+    /** Viseme timeline is authoritative: no analyser / fake mouth before audio is ready. */
     if (queue.length > 0 && !audioReady) {
-      const mOut = analyser ? readAnalyserMouth(analyser, freqBufRef) : null;
-      if (mOut) {
-        tgtAa = mOut.aa * 0.35;
-        tgtIh = mOut.ih * 0.2;
-        tgtOh = mOut.oh * 0.25;
-      } else {
-        tgtAa = 0.04;
-      }
+      tgtAa = 0;
+      tgtIh = 0;
+      tgtOh = 0;
+      tgtOu = 0;
+      tgtEe = 0;
     } else if (queue.length > 0 && audioReady) {
       let visemeId = -1;
       let nextVisemeId = -1;
@@ -386,17 +352,6 @@ export default function LipSyncManager({
 
       if (visemeId >= 0 && activeCueIndex >= 0) {
         if (visemeId !== lastVisemeIdRef.current) {
-          const cueT = cueTSec(queue[activeCueIndex]);
-          const playhead = audio!.currentTime - VISEME_ANTICIPATION_SEC + driftOffsetSecRef.current;
-          const err = playhead - cueT;
-          if (Math.abs(err) > 0.028) {
-            driftOffsetSecRef.current = THREE.MathUtils.lerp(
-              driftOffsetSecRef.current,
-              driftOffsetSecRef.current - err * 0.22,
-              0.42,
-            );
-            driftOffsetSecRef.current = THREE.MathUtils.clamp(driftOffsetSecRef.current, -0.18, 0.18);
-          }
           lastVisemeIdRef.current = visemeId;
         }
       }
@@ -457,22 +412,16 @@ export default function LipSyncManager({
               }
             }
           }
-        } else if (analyser) {
-          const mOut = readAnalyserMouth(analyser, freqBufRef);
-          tgtAa = mOut.aa * 0.3;
-          tgtIh = mOut.ih * 0.15;
         } else {
-          tgtAa = 0.05;
+          tgtAa = 0.02;
         }
       }
-    } else if (analyser) {
-      const mOut = readAnalyserMouth(analyser, freqBufRef);
-      tgtAa = mOut.aa;
-      tgtOh = mOut.oh;
-      tgtIh = mOut.ih;
     } else {
-      tgtAa = 0.06;
-      tgtIh = 0.02;
+      tgtAa = 0;
+      tgtIh = 0;
+      tgtOh = 0;
+      tgtOu = 0;
+      tgtEe = 0;
     }
 
     const blendChannel = (cur: number, tgt: number) => {
@@ -506,19 +455,52 @@ export default function LipSyncManager({
       speechEmphasis: speechEmphasisRef.current,
     });
     const blended = blendVisemeWithExpression(vis, expr);
+    const lipStyle = brain.intentBrain.speechStyle.expressiveness;
+    const lipInt = brain.cognitiveAvatarBrain.speechStyle.intensity;
+    const styleMul = THREE.MathUtils.clamp(
+      0.78 + 0.28 * lipStyle * (0.82 + 0.22 * lipInt),
+      0.72,
+      1.14,
+    );
+    const out = {
+      aa: blended.aa * styleMul,
+      ih: blended.ih * styleMul,
+      oh: blended.oh * styleMul,
+      ou: blended.ou * styleMul,
+      ee: blended.ee * styleMul,
+    };
 
     if (DEBUG_AVATAR && audio && audioReady && nowMs - lastDebugLogAtRef.current > 1500) {
       lastDebugLogAtRef.current = nowMs;
       const cueT = lastActiveCueTRef.current;
-      const driftVsCue =
-        queue.length > 0 && cueT >= 0 ? Number((tSec - cueT).toFixed(5)) : undefined;
+      const visemeTime = tSec;
+      const driftMs =
+        queue.length > 0 && cueT >= 0 ? Math.round((visemeTime - cueT) * 1000) : 0;
       avatarDebug('[LipSync]', {
         audioTime: Number(audio.currentTime.toFixed(4)),
-        syncPlayheadSec: Number(tSec.toFixed(4)),
-        driftOffsetSec: Number(driftOffsetSecRef.current.toFixed(5)),
-        activeCueTSec: Number(cueT.toFixed(4)),
-        timeSinceActiveCueSec: driftVsCue,
-        readyState: audio.readyState,
+        visemeTime: Number(visemeTime.toFixed(4)),
+        motionTime: Number(sessionElapsedSec().toFixed(4)),
+        driftMs,
+        intentState: useBrainStore.getState().interactionIntent,
+      });
+    }
+
+    if (
+      process.env.NEXT_PUBLIC_DEBUG_LIP_DRIFT === 'true'
+      && audio
+      && audioReady
+      && talking
+      && nowMs - lastLipDriftConsoleAtRef.current > 400
+    ) {
+      lastLipDriftConsoleAtRef.current = nowMs;
+      const cueT = lastActiveCueTRef.current;
+      const driftSec =
+        queue.length > 0 && cueT >= 0 ? Math.abs(audio.currentTime - cueT) : 0;
+      // eslint-disable-next-line no-console
+      console.log({
+        audio: Number(audio.currentTime.toFixed(4)),
+        visemeCueT: Number(cueT.toFixed(4)),
+        driftMs: Math.round(driftSec * 1000),
       });
     }
 
@@ -526,12 +508,14 @@ export default function LipSyncManager({
       lipObsFrameRef.current += 1;
       if (lipObsFrameRef.current % 14 === 0) {
         const cueT = lastActiveCueTRef.current;
-        const playhead = audio.currentTime - VISEME_ANTICIPATION_SEC + driftOffsetSecRef.current;
+        const playhead = timelineAudio
+          ? getPlaybackTimeSec() - VISEME_ANTICIPATION_SEC
+          : audio.currentTime - VISEME_ANTICIPATION_SEC;
         reportLipSyncDriftMs(Math.abs(playhead - cueT) * 1000);
       }
     }
 
-    setMouthKeys(em, blended.aa, blended.ih, blended.oh, blended.ou, blended.ee, 1);
+    setMouthKeys(em, out.aa, out.ih, out.oh, out.ou, out.ee, 1);
   }, -1);
 
   return null;

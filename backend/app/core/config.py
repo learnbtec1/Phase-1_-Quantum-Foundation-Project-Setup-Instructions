@@ -155,7 +155,7 @@ class Settings(BaseSettings):
     TTS_ARABIC_VOICE_FEMALE: str = Field("ar-JO-SanaNeural",   env="TTS_ARABIC_VOICE_FEMALE")
     COGNI_ARABIC_TTS_VOICE_LOCKED: str = Field("ar-JO-TaimNeural", env="COGNI_ARABIC_TTS_VOICE_LOCKED")
     # When True: WebSocket TTS uses Azure only (no Edge/Kokoro/gTTS fallbacks).
-    TTS_AZURE_ONLY: bool = Field(True, env="TTS_AZURE_ONLY")
+    TTS_AZURE_ONLY: bool = Field(False, env="TTS_AZURE_ONLY")
     # When True: legacy flag — no non-Azure TTS fallbacks (default True; Cogni is Azure-only).
     TTS_DISABLE_NON_AZURE_FALLBACK: bool = Field(True, env="TTS_DISABLE_NON_AZURE_FALLBACK")
     # Ignored when TTS_AZURE_ONLY=True (Edge is disabled).
@@ -242,6 +242,16 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "COGNI_WS_ALLOW_ANONYMOUS must be false in production; "
                     "use JWT subprotocol or an auth frame for /ws/agent."
+                )
+            dev_bypass = os.getenv("COGNI_DEV_BYPASS_AUTH", "false").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+            if dev_bypass:
+                raise ValueError(
+                    "COGNI_DEV_BYPASS_AUTH must be false in production "
+                    "(disables HTTP TTS + WS auth requirements)."
                 )
         return self
 

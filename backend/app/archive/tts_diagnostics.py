@@ -4,8 +4,7 @@
 from __future__ import annotations
 
 import logging
-import re
-from typing import Any, Optional, Tuple
+from typing import Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -13,35 +12,31 @@ logger = logging.getLogger(__name__)
 def classify_tts_failure(
     exc: BaseException,
     *,
-    azure_key_set: bool,
-    azure_region: str,
+    speech_credentials_ok: bool,
     edge_attempted: bool = False,
 ) -> Tuple[str, str]:
     """
     Returns (code, human_message) for logging and client hints.
+    ``speech_credentials_ok``: Legacy flag; kept for API compatibility (Edge TTS does not use GCP).
     """
+
     msg = str(exc).strip()
     low = msg.lower()
     typ = type(exc).__name__
 
-    if not azure_key_set:
+    if not speech_credentials_ok:
         return (
-            "azure_key_missing",
-            "AZURE_SPEECH_KEY is empty or unset — set it in .env (Azure Speech is required).",
-        )
-    if not (azure_region or "").strip():
-        return (
-            "azure_region_missing",
-            "AZURE_SPEECH_REGION is empty — set a valid region (e.g. eastus, westeurope).",
+            "tts_credentials_missing",
+            "TTS credentials missing (legacy check — Edge TTS does not use GCP credentials).",
         )
 
     try:
-        from app.services.tts_service import is_azure_tts_auth_failure
+        from app.services.tts_service import is_edge_tts_failure
 
-        if is_azure_tts_auth_failure(exc):
+        if is_edge_tts_failure(exc):
             return (
-                "azure_auth",
-                f"Azure Speech auth failed (invalid key or subscription): {msg[:200]}",
+                "edge_tts_error",
+                f"Edge TTS / network error: {msg[:200]}",
             )
     except Exception:
         pass
@@ -53,16 +48,11 @@ def classify_tts_failure(
         if "network" in low or "resolve" in low or "connection" in low:
             return ("network_error", f"Network error during TTS: {typ}: {msg[:200]}")
 
-    if "canceled" in low or "cancellation" in low:
-        m = re.search(r"details=([^|]+)", msg)
-        detail = (m.group(1).strip()[:300] if m else msg[:300])
-        return ("azure_canceled", f"Azure TTS canceled: {detail}")
-
     if "empty" in low and "audio" in low:
-        return ("azure_empty_audio", "Azure returned empty audio bytes.")
+        return ("google_empty_audio", "Google returned empty audio bytes.")
 
-    if "credentials missing" in low or "missing in environment" in low:
-        return ("azure_credentials", "Azure Speech credentials missing in environment.")
+    if "credentials" in low and "missing" in low:
+        return ("google_credentials", "Google Cloud credentials missing or invalid.")
 
     if not edge_attempted and "edge" not in low:
         pass
@@ -82,10 +72,12 @@ def log_tts_success(
     voice: str = "",
 ) -> None:
     src = (source or "tts").lower().strip()
-    if src == "azure":
-        head = "✅ Azure TTS succeeded"
-    elif src == "edge":
+    if src == "edge":
         head = "✅ Edge TTS succeeded"
+    elif src == "google":
+        head = "✅ Google TTS succeeded"
+    elif src == "azure":
+        head = "✅ Azure TTS succeeded"
     else:
         head = "✅ TTS succeeded"
     logger.info(

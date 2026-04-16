@@ -32,6 +32,10 @@ import {
   initCompanionship,
   resetCompanionship,
 } from '@/lib/avatar/companionship';
+import {
+  flushPersonalityMemory,
+  initPersonalityMemory,
+} from '@/ai/avatar/personalityMemory';
 
 const KEY_LTM = 'cogni:ltm';
 const KEY_CTX = 'cogni:ctx';
@@ -79,6 +83,7 @@ export function initBrainPersistence(): void {
 
   initPersistentEmotionalMemory();
   initPersonalityEvolution();
+  initPersonalityMemory();
   initOpinionEngine();
 
   // 1. Restore longTermMemory
@@ -190,6 +195,7 @@ export function flushBrainPersistence(): void {
   safeSave(KEY_CTX, ctx);
   flushPersistentEmotionalMemory();
   flushPersonalityEvolution();
+  flushPersonalityMemory();
   flushOpinionEngine();
   flushCompanionship();
 }

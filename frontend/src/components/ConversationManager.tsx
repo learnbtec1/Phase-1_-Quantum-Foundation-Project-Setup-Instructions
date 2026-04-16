@@ -17,7 +17,8 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { stopTTS } from '@/ai/io/tts';
+import { usePerceptionStore } from '@/store/usePerceptionStore';
+import { getSharedAudioContext, resumeSharedAudioContext } from '@/lib/audio/avatarAudioContext';
 import { BodyPortal } from '@/components/portal/BodyPortal';
 import { Z_LAYERS } from '@/lib/z-layers';
 
@@ -44,22 +45,20 @@ export default function ConversationManager({
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const hasInteractedRef = useRef(false);
+  /** True after `avatar:speak:start` until `avatar:speak:end` — detects cleanup-only end events. */
+  const avatarSpeakActiveRef = useRef(false);
 
   // ── Initialize AudioContext on first user gesture ──────────────────────
   const initializeAudio = async () => {
     if (!hasInteractedRef.current) {
       try {
-        // Create or resume AudioContext
-        let ctx = audioContextRef.current;
+        const ctx = getSharedAudioContext();
         if (!ctx) {
-          ctx = new AudioContext();
-          audioContextRef.current = ctx;
+          console.error('[ConversationManager] getSharedAudioContext() unavailable');
+          return;
         }
-
-        // Resume if suspended
-        if (ctx.state === 'suspended') {
-          await ctx.resume();
-        }
+        audioContextRef.current = ctx;
+        await resumeSharedAudioContext();
 
         hasInteractedRef.current = true;
         setSessionStarted(true);
@@ -80,12 +79,21 @@ export default function ConversationManager({
   // ── Listen for avatar speaking events ────────────────────────────────────
   useEffect(() => {
     const onAvatarSpeakStart = () => {
+      avatarSpeakActiveRef.current = true;
       setIsAvatarSpeaking(true);
       console.log('[ConversationManager] Avatar is now speaking');
     };
 
     const onAvatarSpeakEnd = () => {
+      if (!avatarSpeakActiveRef.current) {
+        console.warn(
+          '[ConversationManager] ⚠️ Ignored speak:end — no speak:start (no audible TTS / false positive blocked)',
+        );
+        return;
+      }
+      avatarSpeakActiveRef.current = false;
       setIsAvatarSpeaking(false);
+      usePerceptionStore.getState().noteAvatarSpeechEnd(Date.now());
       console.log('[ConversationManager] Avatar finished speaking');
     };
 
@@ -105,9 +113,9 @@ export default function ConversationManager({
     const onUserStart = () => {
       setIsUserSpeaking(true);
       if (isAvatarSpeaking) {
-        stopTTS();
+        // useAgentAgent runAvatarBargeIn already fades TTS + VRMA on VAD; this covers UI-only paths.
         window.dispatchEvent(new CustomEvent('cogni:avatar:interrupt'));
-        console.log('[ConversationManager] User speaking — avatar TTS interrupted');
+        console.log('[ConversationManager] User speaking — interrupt signal (TTS fade + avatar)');
       }
       onUserSpeaking?.();
     };

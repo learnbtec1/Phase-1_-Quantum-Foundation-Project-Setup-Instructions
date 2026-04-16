@@ -123,9 +123,11 @@ export function applyFinalPoseToVrm(params: {
 }): void {
   const { finalPose, boneRefs, delta, humanoid } = params;
   logFinalPoseApplyProbe(finalPose, delta);
-  if (
+  const motionPoseDebug =
     typeof process !== 'undefined' &&
-    process.env.NODE_ENV === 'development' &&
+    process.env.NEXT_PUBLIC_DEBUG_MOTION === 'true';
+  if (
+    motionPoseDebug &&
     typeof performance !== 'undefined'
   ) {
     const n = performance.now();
@@ -150,8 +152,7 @@ export function applyFinalPoseToVrm(params: {
     }
     if (!obj) continue;
     if (
-      typeof process !== 'undefined' &&
-      process.env.NODE_ENV === 'development' &&
+      motionPoseDebug &&
       ARM_BONE_MAP[key] &&
       typeof performance !== 'undefined'
     ) {

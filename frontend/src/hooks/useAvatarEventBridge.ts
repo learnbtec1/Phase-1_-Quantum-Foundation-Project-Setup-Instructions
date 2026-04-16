@@ -18,7 +18,6 @@ import {
 import { dispatchAvatar } from '@/utils/events/normalizeAvatarEvents';
 import type { VisemeCue } from '@/app/avatar-agent/LipSyncManager';
 import { resetSpeechIntentHints, setSpeechIntentHintsFromText } from '@/lib/avatar/speechIntentHints';
-
 // ─── Incoming message types (عقد JSON من الخادم أو اختبار) ───────────────────
 
 export type AgentSpeakMessage = {
@@ -158,13 +157,6 @@ function durationToMs(d: unknown, fallbackMs: number): number {
 
 type GestureQueueItem = { durationMs: number; detail: Record<string, unknown> };
 
-function base64ToBlob(base64: string, mime: string): Blob {
-  const bin = atob(base64.replace(/^data:[^;]+;base64,/, ''));
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new Blob([bytes], { type: mime || 'audio/mpeg' });
-}
-
 export function useAvatarEventBridge({
   enabled = true,
   connectWebSocket = false,
@@ -181,7 +173,6 @@ export function useAvatarEventBridge({
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const blobUrlRef = useRef<string | null>(null);
   const gestureQueueRef = useRef<GestureQueueItem[]>([]);
   const gesturePlayingRef = useRef(false);
   const gestureTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -234,76 +225,22 @@ export function useAvatarEventBridge({
     [clearGestureTimer, processGestureQueue],
   );
 
-  const stopBridgeAudio = useCallback(() => {
-    const audio = audioElementRef.current;
-    if (audio) {
-      audio.pause();
-      audio.removeAttribute('src');
-      audio.load();
-    }
-    if (blobUrlRef.current) {
-      URL.revokeObjectURL(blobUrlRef.current);
-      blobUrlRef.current = null;
-    }
-    visemeCueQueueRef.current = [];
-    isTalkingRef.current = false;
-    resetSpeechIntentHints();
-    window.dispatchEvent(new CustomEvent('avatar:speak:end'));
-  }, [audioElementRef, isTalkingRef, visemeCueQueueRef]);
+  void audioElementRef;
 
   const handleSpeak = useCallback(
     (msg: AgentSpeakMessage) => {
-      const mime = msg.audio_mime?.trim() || 'audio/mpeg';
       const cues = parseVisemeCues(msg.visemes);
-
-      if (!msg.audio?.trim()) {
-        visemeCueQueueRef.current = cues;
-        setSpeechIntentHintsFromText((msg.text ?? '').trim());
-        window.dispatchEvent(new CustomEvent('avatar:speak:start', { detail: {} }));
-        isTalkingRef.current = true;
-        return;
+      if (msg.audio?.trim() && process.env.NODE_ENV === 'development') {
+        console.warn(
+          '[AvatarEventBridge] Ignoring embedded message audio — use speakWithTTS → /api/tts-with-timing only',
+        );
       }
-
-      let audio = audioElementRef.current;
-      if (!audio) {
-        audio = new Audio();
-        audio.crossOrigin = 'anonymous';
-        (audioElementRef as MutableRefObject<HTMLAudioElement | null>).current = audio;
-      }
-
-      stopBridgeAudio();
       visemeCueQueueRef.current = cues;
-
-      const blob = base64ToBlob(msg.audio, mime);
-      const url = URL.createObjectURL(blob);
-      blobUrlRef.current = url;
-      audio.src = url;
-
-      const onEnded = () => {
-        audio?.removeEventListener('ended', onEnded);
-        stopBridgeAudio();
-      };
-      audio.addEventListener('ended', onEnded);
-
-      void audio.play().then(
-        () => {
-          // Dispatch audio:element FIRST so AvatarCanvas wires the analyser
-          // before speak:start sets isTalkingRef — matches useAgentAgent ordering
-          window.dispatchEvent(new CustomEvent('avatar:audio:element', { detail: { audio } }));
-          setSpeechIntentHintsFromText((msg.text ?? '').trim());
-          window.dispatchEvent(new CustomEvent('avatar:speak:start', { detail: {} }));
-          isTalkingRef.current = true;
-        },
-        (err) => {
-          console.warn('[AvatarEventBridge] audio play failed', err);
-          window.dispatchEvent(new CustomEvent('avatar:audio:element', { detail: { audio } }));
-          setSpeechIntentHintsFromText((msg.text ?? '').trim());
-          window.dispatchEvent(new CustomEvent('avatar:speak:start', { detail: {} }));
-          isTalkingRef.current = true;
-        },
-      );
+      setSpeechIntentHintsFromText((msg.text ?? '').trim());
+      window.dispatchEvent(new CustomEvent('avatar:speak:start', { detail: {} }));
+      isTalkingRef.current = true;
     },
-    [audioElementRef, isTalkingRef, stopBridgeAudio, visemeCueQueueRef],
+    [isTalkingRef, visemeCueQueueRef],
   );
 
   const handleGesture = useCallback(
@@ -393,10 +330,6 @@ export function useAvatarEventBridge({
       wsRef.current?.close();
       wsRef.current = null;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      if (blobUrlRef.current) {
-        URL.revokeObjectURL(blobUrlRef.current);
-        blobUrlRef.current = null;
-      }
     };
   }, [clearGestureTimer]);
 

@@ -3,7 +3,7 @@
  * ParquetFloor.tsx
  *
  * Renders a canvas-generated dark walnut hardwood floor plane directly over
- * the office.glb floor (RoomShell is disabled).
+ * the office GLB floor (RoomShell is disabled).
  * Matches the rich dark-walnut library style of the reference image.
  *
  * Placed at FLOOR_Y + 0.002 to avoid Z-fighting with the GLB floor.

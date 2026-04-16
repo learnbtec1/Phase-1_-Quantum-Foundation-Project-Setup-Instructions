@@ -27,6 +27,7 @@ import {
   tryAcquireMotion,
 } from '@/lib/avatar/motionAuthority';
 import { getIdleSilenceProbability, getSpontaneousIdleGapMul } from '@/ai/avatar/avatarPersonality';
+import { automaticGestureInjectorsDisabled } from '@/lib/avatar/automaticGestureInjectors';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -386,6 +387,7 @@ function scheduleNext(cfg: SpontaneousBehaviorConfig): void {
 
 /** Start the spontaneous behaviour engine. Idempotent. */
 export function startSpontaneousBehavior(cfg: SpontaneousBehaviorConfig): void {
+  if (automaticGestureInjectorsDisabled()) return;
   if (_running) return;
   _running = true;
   // First trigger sooner so avatar feels alive right away

@@ -68,7 +68,7 @@ def log_tts_usage(user_id: Optional[uuid.UUID], char_count: int) -> None:
                 UsageLog(
                     id=uuid.uuid4(),
                     user_id=user_id,
-                    service="azure_tts",
+                    service="edge_tts",
                     tokens_used=int(char_count),
                     cost=cost,
                     meta={"unit": "chars"},

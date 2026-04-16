@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 TTS endpoint: POST /api/v1/tts/generate
-Generate Jordanian Arabic speech (MP3) using Azure Neural TTS.
+Generate Arabic speech (MP3) using Microsoft Edge TTS (edge-tts).
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from app.api.deps import get_current_user
 from app.api.v1.dependencies.phase2_gates import gate_tts_user
 from app.models.db_models import User
-from app.services.tts_service import AzureTTSService, _SDK_AVAILABLE
+from app.services.tts_service import EdgeTTSService, _EDGE_TTS_AVAILABLE
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +28,11 @@ class TTSRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=5000, description="Arabic text to speak")
     voice_name: Optional[str] = Field(
         None,
-        description="Azure neural voice name override. Defaults to ar-JO-TaimNeural.",
+        description="Ignored — use EDGE_TTS_VOICE / TTS_ARABIC_VOICE env.",
     )
 
 
-def get_tts_service(request: Request) -> AzureTTSService:
+def get_tts_service(request: Request) -> EdgeTTSService:
     """Retrieve the TTS service instance stored in app.state."""
     if not hasattr(request.app.state, "tts_service") or request.app.state.tts_service is None:
         raise HTTPException(status_code=503, detail="TTS service not initialized in app state")
@@ -41,21 +41,19 @@ def get_tts_service(request: Request) -> AzureTTSService:
 
 @router.post(
     "/tts/generate",
-    summary="Generate Jordanian Arabic TTS audio",
+    summary="Generate Arabic TTS audio",
     response_description="MP3 audio stream",
 )
 async def generate_tts(
     body: TTSRequest,
     _auth: User = Depends(gate_tts_user),
-    service: AzureTTSService = Depends(get_tts_service),
+    service: EdgeTTSService = Depends(get_tts_service),
 ) -> StreamingResponse:
-    """
-    Synthesize *text* to Jordanian Arabic MP3 using Azure Neural TTS.
-    """
-    if not _SDK_AVAILABLE:
+    """Synthesize *text* to MP3 using Edge TTS."""
+    if not _EDGE_TTS_AVAILABLE:
         raise HTTPException(
             status_code=503,
-            detail="Azure Speech SDK not installed. Please install azure-cognitiveservices-speech."
+            detail="edge-tts is not installed.",
         )
 
     try:
@@ -63,11 +61,11 @@ async def generate_tts(
             text=body.text,
             voice_name=body.voice_name,
         )
-        if _prov != "azure":
-            logger.error("[TTS endpoint] non-Azure provider returned: %s", _prov)
-            raise HTTPException(status_code=502, detail="TTS integrity: expected Azure provider only.")
+        if _prov != "edge":
+            logger.error("[TTS endpoint] unexpected provider returned: %s", _prov)
+            raise HTTPException(status_code=502, detail="TTS integrity: expected Edge provider only.")
         if not mp3_bytes:
-            raise HTTPException(status_code=502, detail="Azure TTS returned empty audio.")
+            raise HTTPException(status_code=502, detail="Edge TTS returned empty audio.")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except asyncio.TimeoutError:
@@ -75,7 +73,7 @@ async def generate_tts(
     except RuntimeError as exc:
         err = str(exc)
         logger.error("[TTS endpoint] synthesis error: %s", err)
-        if "credentials" in err.lower() or "not installed" in err.lower():
+        if "not installed" in err.lower():
             status = 503
         else:
             status = 500
@@ -84,7 +82,7 @@ async def generate_tts(
         logger.exception("[TTS endpoint] unexpected error")
         raise HTTPException(status_code=500, detail="TTS synthesis failed unexpectedly")
 
-    used_voice = body.voice_name or service._default_voice or "unknown"
+    used_voice = service._default_voice or "unknown"
 
     return StreamingResponse(
         io.BytesIO(mp3_bytes),
@@ -104,22 +102,16 @@ async def generate_tts(
 )
 async def tts_info(
     _auth: User = Depends(get_current_user),
-    service: AzureTTSService = Depends(get_tts_service),
+    service: EdgeTTSService = Depends(get_tts_service),
 ) -> dict:
     from app.core.config import settings
 
     if not settings.DEBUG:
         raise HTTPException(status_code=403, detail="Info endpoint disabled in production")
 
-    key = service._key or ""
-
     return {
-        "sdk_available": _SDK_AVAILABLE,
+        "sdk_available": _EDGE_TTS_AVAILABLE,
         "default_voice": service._default_voice,
-        "region": service._region,
-        "prosody_rate": service._prosody_rate,
-        "timeout": service._timeout,
-        "key_prefix": (key[:8] + "...") if len(key) >= 8 else ("<not set>" if not key else key),
+        "provider": "edge-tts",
         "env_TTS_ARABIC_VOICE": settings.TTS_ARABIC_VOICE,
-        "env_AZURE_SPEECH_REGION": settings.AZURE_SPEECH_REGION,
     }

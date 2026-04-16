@@ -9,6 +9,7 @@ import { unifiedGestureEngine } from '@/ai/cognitive/UnifiedGestureEngine';
 import { PRIORITY }        from '@/constants/gestures';
 import PermissionBanner    from '@/components/PermissionBanner';
 import ConversationManager from '@/components/ConversationManager';
+import ChatInput, { type ChatInputHandle } from '@/components/ChatInput';
 import AuthModal           from '@/components/AuthModal';
 import DigitalHumanSettingsModal from '@/components/DigitalHumanSettingsModal';
 import ResponseFeedback    from '@/components/ResponseFeedback';
@@ -16,12 +17,14 @@ import ToolSandbox         from '@/components/ToolSandbox';
 import styles              from './AvatarCanvas.module.css';
 import { pickVrmUrl }      from '@/config/avatar';
 import { apiBase, clearAccessToken, getAccessToken, notifyAuthChanged } from '@/lib/auth';
+import { buildDefaultWsAgentUrl } from '@/lib/wsAgentUrl';
 import { BodyPortal } from '@/components/portal/BodyPortal';
 import { AvatarBodyPortal } from '@/components/portal/AvatarBodyPortal';
 import { Z_LAYERS } from '@/lib/z-layers';
-import { recordTypingActivity } from '@/lib/behavior/anticipationLayer';
+import { usePerceptionStore } from '@/store/usePerceptionStore';
+import { resumeSharedAudioContext } from '@/lib/audio/avatarAudioContext';
+import { setTtsPlaybackAudioElement } from '@/ai/io/tts';
 import { useCogniAvatarDebug } from '@/hooks/useCogniAvatarDebug';
-import { useTTSWithVisemes } from '@/hooks/useTTSWithVisemes';
 import type { VisemeCue } from '@/app/avatar-agent/LipSyncManager';
 type HistoryEntry = { role: 'user' | 'teacher'; text: string; emotion?: string };
 type MeUser = { name: string; email: string; role: string };
@@ -75,15 +78,10 @@ function emitAvatarCmd(type: string, detail: Record<string, unknown> = {}) {
 
 const ACTIVE_VRM = pickVrmUrl();
 
-/** يطابق AgentDirector: عند التفعيل يتخطى speakWithTTS ويُشغّل الصوت عبر `onAgentSpeak` (Azure في المتصفح). */
-const USE_AGENT_MESSAGE_AZURE_TTS =
-  process.env.NEXT_PUBLIC_USE_AGENT_MESSAGE_AZURE_TTS === 'true';
-
 /** Mic control always shown in UI (env no longer hides it — avoids missing 🎤 in dev). */
 const COGNI_MIC_UI_ENABLED = true;
 
-const _apiBase = (process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000').replace(/\/$/, '');
-const WS_AGENT_URL = _apiBase.replace(/^http/, 'ws') + '/ws/agent';
+const WS_AGENT_URL = buildDefaultWsAgentUrl();
 
 function normalizeDeepLinkTarget(raw: string): string {
   const s = raw.trim().toLowerCase();
@@ -213,34 +211,30 @@ export default function AvatarAgentClient({
   const [btecTrainDifficulty, setBtecTrainDifficulty] = useState<'pass' | 'merit' | 'distinction'>('merit');
   const [missionDismissed, setMissionDismissed] = useState(false);
 
-  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!getAccessToken()) setAuthOpen(true);
+  }, []);
+
+  const chatInputRef = useRef<ChatInputHandle>(null);
   const historyRef = useRef<HTMLDivElement>(null);
   const visemeCueQueueRef = useRef<VisemeCue[]>([]);
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
-  const { speak: speakAzureWithVisemes } = useTTSWithVisemes(visemeCueQueueRef, audioElementRef);
 
-  const onAgentSpeakAzure = useCallback(
-    (text: string) => {
-      void speakAzureWithVisemes(text);
-    },
-    [speakAzureWithVisemes],
-  );
-
+  /** Single shared `<audio>` for client TTS + lip-sync (`speakWithTTS` → `/api/tts-with-timing` / `audioTimeline`). */
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const onAzureClientTts = (e: Event) => {
-      const d = (e as CustomEvent<{ text?: string; voice?: string; language?: string }>).detail;
-      if (typeof d?.text === 'string' && d.text.trim()) {
-        void speakAzureWithVisemes(d.text, {
-          voice: typeof d.voice === 'string' ? d.voice : undefined,
-          language: typeof d.language === 'string' ? d.language : undefined,
-        });
-      }
+    const audio = new Audio();
+    audio.preload = 'auto';
+    audio.crossOrigin = 'anonymous';
+    audio.volume = 0.94;
+    audioElementRef.current = audio;
+    setTtsPlaybackAudioElement(audio);
+    return () => {
+      setTtsPlaybackAudioElement(null);
+      audioElementRef.current = null;
     };
-    window.addEventListener('cogni:azure-client-tts', onAzureClientTts as EventListener);
-    return () =>
-      window.removeEventListener('cogni:azure-client-tts', onAzureClientTts as EventListener);
-  }, [speakAzureWithVisemes]);
+  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -485,8 +479,15 @@ export default function AvatarAgentClient({
       console.log('[System] Starting secure session…');
     }
     try {
-      const silentAudio = new Audio("data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA");
-      await silentAudio.play();
+      const silentAudio = audioElementRef.current;
+      if (silentAudio) {
+        silentAudio.src =
+          'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+        await silentAudio.play();
+        silentAudio.pause();
+        silentAudio.currentTime = 0;
+        silentAudio.removeAttribute('src');
+      }
     } catch (e) {
       if (process.env.NODE_ENV === 'development') {
         console.warn('[Audio] Silent bypass failed:', e);
@@ -495,11 +496,7 @@ export default function AvatarAgentClient({
 
     (window as any).__AUDIO_UNLOCKED__ = true;
 
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-    if (AudioContextClass) {
-      const audioCtx = new AudioContextClass();
-      if (audioCtx.state === 'suspended') await audioCtx.resume();
-    }
+    await resumeSharedAudioContext();
 
     setHasStarted(true);
     if (process.env.NODE_ENV === 'development') {
@@ -507,19 +504,21 @@ export default function AvatarAgentClient({
     }
   };
 
-  const onSend = () => {
-    const text = userInput.trim();
-    if (!text) return;
-    agentDirector.processUserMessage(text);
-    void unifiedGestureEngine.play('listening', { priority: PRIORITY.LOW });
-    sendText(text);
-    window.setTimeout(() => {
-      void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.NORMAL });
-    }, 500);
-    setHistory(h => [...h.slice(-15), { role: 'user', text }]);
-    setUserInput('');
-    inputRef.current?.focus();
-  };
+  const submitMessage = useCallback(
+    (text: string) => {
+      const t = text.trim();
+      if (!t) return;
+      usePerceptionStore.getState().recordUserSubmit(t.length, Date.now());
+      agentDirector.processUserMessage(t);
+      void unifiedGestureEngine.play('listening', { priority: PRIORITY.LOW });
+      sendText(t);
+      window.setTimeout(() => {
+        void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.NORMAL });
+      }, 500);
+      setHistory((h) => [...h.slice(-15), { role: 'user', text: t }]);
+    },
+    [sendText],
+  );
 
   const currentEmo = EMOTION_DISPLAY[emotion] || EMOTION_DISPLAY.neutral;
 
@@ -769,9 +768,6 @@ export default function AvatarAgentClient({
                   vrmUrl={ACTIVE_VRM}
                   visemeCueQueueRef={visemeCueQueueRef}
                   audioElementRef={audioElementRef}
-                  onAgentSpeak={
-                    USE_AGENT_MESSAGE_AZURE_TTS ? onAgentSpeakAzure : undefined
-                  }
                 />
               </div>
             </div>
@@ -787,9 +783,6 @@ export default function AvatarAgentClient({
                     vrmUrl={ACTIVE_VRM}
                     visemeCueQueueRef={visemeCueQueueRef}
                     audioElementRef={audioElementRef}
-                    onAgentSpeak={
-                      USE_AGENT_MESSAGE_AZURE_TTS ? onAgentSpeakAzure : undefined
-                    }
                   />
                 </div>
               </div>
@@ -904,29 +897,15 @@ export default function AvatarAgentClient({
                 />
               )}
 
-              <div className="flex gap-4 items-center">
-                <div className="relative flex-1 group">
-                  <input
-                    ref={inputRef}
-                    value={userInput}
-                    onChange={(e) => {
-                      setUserInput(e.target.value);
-                      recordTypingActivity();
-                    }}
-                    onKeyDown={(e) => e.key === 'Enter' && onSend()}
-                    placeholder="تحدث أو اكتب سؤالك لكوجني هنا..."
-                    className="w-full bg-white/5 border border-white/10 rounded-2xl px-6 py-4 text-white focus:outline-none focus:border-violet-500 transition-all placeholder:text-gray-600 shadow-inner"
-                  />
-                </div>
-
-                <button 
-                  onClick={onSend}
-                  disabled={!userInput.trim() || isProcessing}
-                  className="bg-violet-600 hover:bg-violet-500 p-4 rounded-2xl text-white shadow-lg shadow-violet-600/20 disabled:opacity-20 active:scale-90 transition-all"
-                >
-                  🚀
-                </button>
-
+              <div
+                className="relative isolate flex flex-wrap gap-4 items-center justify-center pointer-events-auto"
+                style={{ zIndex: Z_LAYERS.HUD_CHROME }}
+              >
+                <ChatInput
+                  ref={chatInputRef}
+                  onSend={submitMessage}
+                  disabled={!isConnected || isProcessing}
+                />
                 {COGNI_MIC_UI_ENABLED && (
                   <button
                     type="button"
@@ -950,8 +929,15 @@ export default function AvatarAgentClient({
                   <span className="text-gray-500">● Docker: Eduverse_Backend</span>
                 </div>
                 <div className="flex gap-2">
-                  {['PESTLE', 'SWOT', 'BTEC P1'].map(tag => (
-                    <button key={tag} onClick={() => { setUserInput(`اشرح لي ${tag}`); }} className="text-[10px] text-gray-500 hover:text-white transition-colors">#{tag}</button>
+                  {['PESTLE', 'SWOT', 'BTEC P1'].map((tag) => (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => chatInputRef.current?.setValue(`اشرح لي ${tag}`)}
+                      className="text-[10px] text-gray-500 hover:text-white transition-colors"
+                    >
+                      #{tag}
+                    </button>
                   ))}
                 </div>
               </div>

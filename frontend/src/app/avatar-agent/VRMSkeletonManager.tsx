@@ -24,9 +24,21 @@ import { applyIntentMotor } from './motion/intentMotorLayer';
 import { applyMotionDriver } from './motion/motionDriver';
 import { applyMicroHumanBehavior } from './motion/microHumanLayer';
 import { applyIdleMicroPresence } from './motion/idleMicroPresence';
-import { applyBreathingLayer } from './motion/breathingLayer';
-import { getSpeechBreathingAmplitudeMul } from '@/ai/voice/emotionalCoupling';
-import { getSpeechEmotionSnapshot } from '@/ai/voice/speechEmotionBridge';
+import {
+  applyHumanizationLayer,
+  applyAttentionSeekingLayer,
+} from './motion/humanizationBoneApply';
+import {
+  tickHumanization,
+  shouldTriggerBlinkEdge,
+  blinkDurationMsForEmotion,
+  type HumanizationSnapshot,
+} from '@/lib/avatar/humanizationController';
+import { getCognitiveGestureAmplitudeScale } from '@/lib/avatar/consciousStateManager';
+import {
+  getPerceptionStrangerGestureMul,
+  getPerceptionAttentionSeekingStrength,
+} from '@/store/usePerceptionStore';
 import { readAnalyserRms01 } from '@/lib/audio/audioEnergyExtractor';
 import { applyCinematicMicroLayer } from './motion/cinematicMicroLayer';
 import { blendPoseInto, generateIntentPose } from './motion/intentPoseGenerator';
@@ -41,10 +53,12 @@ import {
   stepSmoothedSemanticHints,
 } from '@/lib/avatar/speechSemanticHints';
 import { avatarDebug, DEBUG_AVATAR } from '@/app/avatar-agent/debugAvatar';
-import { getIntentPresentation } from '@/ai/avatar/avatarIntent';
+import { getBlendedIntentPresentation } from '@/ai/avatar/brainState';
+import { modulatePresentationForPersonality } from '@/ai/avatar/personalityProfile';
 import { getMoodMotionScale } from '@/ai/avatar/responsePersonality';
 import { getBreathEmotionRateMul } from '@/ai/avatar/microExpressionLayer';
 import { useBrainStore } from '@/store/useBrainStore';
+import { nowMs as masterClockNowMs, sessionElapsedSec } from '@/lib/avatar/masterClock';
 import { recordActivity } from '@/lib/avatar/motionDiagnostics';
 import {
   attachMotionPipelineEventProbes,
@@ -54,40 +68,6 @@ import {
   readStabilizeMixFromWindow,
 } from '@/app/avatar-agent/motion/motionPipelineDebug';
 import { getBehaviorMotionState } from '@/lib/behavior/behaviorMotionBrain';
-
-/** Apply `avatar:micro:gesture` offsets to composed pose (VRMA path — procedural path already bakes nudge in idlePose). */
-const _MN_E = new THREE.Euler(0, 0, 0, 'YXZ');
-const _MN_QD = new THREE.Quaternion();
-const _MN_QO = new THREE.Quaternion();
-
-function applyMicroEventNudgeToFinalPose(
-  finalPose: BonePoseMap,
-  mn: {
-    ruaX: number;
-    ruaZ: number;
-    luaX: number;
-    luaZ: number;
-    neckX: number;
-    neckY: number;
-    headX: number;
-    blend: number;
-  },
-): void {
-  const w = THREE.MathUtils.clamp(mn.blend, 0, 1);
-  if (w < 1e-4) return;
-  const mul = (key: string, rx: number, ry: number, rz: number) => {
-    const q = finalPose.get(key);
-    if (!q) return;
-    _MN_E.set(rx * w, ry * w, rz * w, 'YXZ');
-    _MN_QD.setFromEuler(_MN_E);
-    _MN_QO.copy(q).multiply(_MN_QD);
-    finalPose.set(key, _MN_QO.clone());
-  };
-  mul('neck', mn.neckX, mn.neckY, 0);
-  mul('head', mn.headX, 0, 0);
-  mul('lua', mn.luaX, 0, mn.luaZ);
-  mul('rua', mn.ruaX, 0, mn.ruaZ);
-}
 
 /** VRMA arm-fallback micro life only (declared before `mergeVrmaPoseWithArmFallback`). */
 const noiseVrmaArmFallback = createNoise3D();
@@ -101,6 +81,11 @@ const VRMA_ISOLATION_TEST = false;
 
 /** TEMP (debug): skip vrm.update + disable lookAt auto + spring bones. Keep false so humanoid/expressions/spring bones update. */
 const VRM_HARD_ISOLATION = false;
+
+/** Extra console logging for arm-fallback / VRMA blend keys (off by default — reduces chaos). */
+const DEBUG_MOTION = process.env.NEXT_PUBLIC_DEBUG_MOTION === 'true';
+/** Re-enable periodic / failsafe `avatar:micro:gesture` nods during VRMA (default: off). */
+const VRMA_IDLE_MICRO_INJECT = process.env.NEXT_PUBLIC_VRMA_IDLE_MICRO_INJECT === 'true';
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  AVATURN SAFE CLAMP — حدود دوران آمنة لنماذج VRM 1.0 (مثل Avaturn).
@@ -263,7 +248,7 @@ const VRMA_ARM_FALLBACK_LUA_Z  = -0.3;
 const VRMA_ARM_FALLBACK_ELBOW_X = 0.2;
 /** Extra wobble on top of base fallback euler (radians). */
 const VRMA_ARM_FALLBACK_MICRO_SINE_AMP = 0.012;
-const VRMA_ARM_FALLBACK_MICRO_NOISE_AMP = 0.02;
+const VRMA_ARM_FALLBACK_MICRO_NOISE_AMP = 0.004;
 
 /** DEBUG: throttle arm-fallback logs (ms, performance.now). */
 let __vrmaArmDebugNextAt = 0;
@@ -290,11 +275,12 @@ function mergeVrmaPoseWithArmFallback(
   if (hasRua && hasLua && hasRla && hasLla) return vrmaBonePose;
 
   if (
+    DEBUG_MOTION &&
     typeof process !== 'undefined' &&
     process.env.NODE_ENV === 'development' &&
     typeof performance !== 'undefined'
   ) {
-    const now = performance.now();
+    const now = masterClockNowMs();
     if (now >= __vrmaArmDebugNextAt) {
       __vrmaArmDebugNextAt = now + 900;
       // eslint-disable-next-line no-console -- DEBUG: arm fallback path
@@ -1175,7 +1161,7 @@ export function VRMSkeletonManager({
   }>({ intensity: 0.7, mood: 'neutral', durationMs: 3000 });
 
   const lastEffGestureRef = useRef<GestureId>('idle');
-  const gestureCrossfadeStartMsRef = useRef(performance.now());
+  const gestureCrossfadeStartMsRef = useRef(masterClockNowMs());
 
   const idleVariantRef = useRef<IdleVariant>('neutral');
   const idleVariantNextSwitchRef = useRef(0);
@@ -1241,7 +1227,8 @@ export function VRMSkeletonManager({
   /** Next wall-clock ms to allow fallback `avatar:micro:gesture` (VRMA + low gesture weight). */
   const nextIdleMicroInjectAtMsRef = useRef(0);
   /** Self-heal: inject micro motion if behavior brain reports stillness > ~2s (throttled). */
-  const lastFreezeHealAtMsRef = useRef(0);
+  /** Failsafe: no embodiment pulse > ~2s — inject micro motion (throttled). */
+  const lastEmbodimentFailsafeAtMsRef = useRef(0);
 
   // ── avatar:headpose override (AgentDirector._handleUserSpeaking, etc.) ──────
   /** Persistent gentle head yaw/pitch override; decays back to 0 after durationMs */
@@ -1513,7 +1500,7 @@ export function VRMSkeletonManager({
         typeof durRaw === 'number' && Number.isFinite(durRaw) && durRaw > 0 ? durRaw : 1400;
 
       generativeBlendRef.current = blend;
-      generativeEndMsRef.current = performance.now() + durationMs;
+      generativeEndMsRef.current = masterClockNowMs() + durationMs;
 
       const gm = generativeBonesRef.current;
       gm.clear();
@@ -1695,7 +1682,7 @@ export function VRMSkeletonManager({
         );
       }
       gestureStateRef.current = next;
-      gestureStartRef.current = performance.now();
+      gestureStartRef.current = masterClockNowMs();
       gestureDurationRef.current = durationMs;
     };
 
@@ -1756,7 +1743,7 @@ export function VRMSkeletonManager({
       mn.neckY = preset?.neckY ?? 0;
       mn.headX = preset?.headX ?? 0;
       mn.blend  = 1;
-      mn.untilMs = performance.now() + dur;
+      mn.untilMs = masterClockNowMs() + dur;
     };
 
     // ── avatar:headpose: gentle persistent head turn from director (listening nod, etc.) ──
@@ -1769,7 +1756,7 @@ export function VRMSkeletonManager({
         : typeof d.durationMs === 'number' && d.durationMs > 0 ? d.durationMs
         : 1200;
       headposeBlendRef.current   = 1;
-      headposeUntilMsRef.current = performance.now() + dur;
+      headposeUntilMsRef.current = masterClockNowMs() + dur;
     };
 
     // ── avatar:nod — explicit nod command (from AgentDirector / tts.ts) ────────
@@ -1785,7 +1772,7 @@ export function VRMSkeletonManager({
       mn.headX = 0.06 * intensity / 0.15;
       mn.ruaX = 0; mn.ruaZ = 0; mn.luaX = 0; mn.luaZ = 0; mn.neckY = 0;
       mn.blend   = 1;
-      mn.untilMs = performance.now() + durMs;
+      mn.untilMs = masterClockNowMs() + durMs;
     };
 
     // ── avatar:listening — update body posture when listening to student ───────
@@ -1799,7 +1786,7 @@ export function VRMSkeletonManager({
         headposeYawRef.current   = 0.09;
         headposePitchRef.current = 0;
         headposeBlendRef.current   = 0.7;
-        headposeUntilMsRef.current = performance.now() + 4000;
+        headposeUntilMsRef.current = masterClockNowMs() + 4000;
       } else {
         // Stop listening posture — reset headpose
         headposeBlendRef.current   = 0;
@@ -1841,10 +1828,10 @@ export function VRMSkeletonManager({
     }
   }, [vrm]);
 
-  useFrame((state, delta) => {
+  useFrame((_, delta) => {
     const safeDelta = Math.min(Math.max(delta, 0), TAB_SAFE_MAX_DELTA);
     updateIntentFromBehaviorBrain(safeDelta);
-    const t = state.clock.elapsedTime;
+    const t = sessionElapsedSec();
     const m = bindRef.current;
 
     // ─── Guard: bones not yet cached (useEffect hasn't run yet, or VRM
@@ -1861,7 +1848,7 @@ export function VRMSkeletonManager({
     const listening = isListeningRef?.current ?? false;
     const thinking  = isThinkingRef?.current  ?? false;
     const motorMul = motorSpeedMulRef?.current ?? 1;
-    const nowMs = performance.now();
+    const nowMs = masterClockNowMs();
 
     const analyserNode = analyserRef?.current ?? null;
     let rms01: number | null = null;
@@ -1877,22 +1864,13 @@ export function VRMSkeletonManager({
       delta: safeDelta,
     });
     const speechDriveSnap = getSpeechDriveSnapshot(speaking);
-    const pauseMul = speechDriveSnap.inPause ? 0.9 : 1;
-    const voiceGestureMul = (0.8 + speechDriveSnap.energy * 0.4) * pauseMul;
-    let gestureAmp = speaking ? voiceGestureMul * motorMul : 1;
+    const brainSnap = useBrainStore.getState();
+    const motionBlend = brainSnap.behaviorMotionBlend;
+    const intentFallback = brainSnap.intentEnergy;
+    let gestureAmp = speaking ? (motionBlend?.amplitude ?? 1) * motorMul : 1;
 
-    voiceHeadPitchSmRef.current = THREE.MathUtils.lerp(
-      voiceHeadPitchSmRef.current,
-      speaking
-        ? speechDriveSnap.energy * 0.036 + speechDriveSnap.syllablePulse * 0.052
-        : 0,
-      Math.min(1, safeDelta * 9),
-    );
-    voiceHeadYawSmRef.current = THREE.MathUtils.lerp(
-      voiceHeadYawSmRef.current,
-      speaking ? speechDriveSnap.energy * noiseHead(t * 0.88, 0.41, 0) * 0.031 : 0,
-      Math.min(1, safeDelta * 9),
-    );
+    voiceHeadPitchSmRef.current = THREE.MathUtils.lerp(voiceHeadPitchSmRef.current, 0, Math.min(1, safeDelta * 9));
+    voiceHeadYawSmRef.current = THREE.MathUtils.lerp(voiceHeadYawSmRef.current, 0, Math.min(1, safeDelta * 9));
 
     // ── Micro-nudge decay ─────────────────────────────────────────────────────
     const mn = microNudgeRef.current;
@@ -1918,9 +1896,8 @@ export function VRMSkeletonManager({
       thinkGestureActiveRef.current = true;
       gestureStateRef.current = 'think';
       gestureStartRef.current = nowMs;
-      gestureAmplitudeMulRef.current = 0.75 + Math.random() * 0.50; // FIX 2
-      // Vary duration 2.5–4s so it doesn't feel robotic; will loop if thinking continues
-      gestureDurationRef.current = 2500 + Math.random() * 1500;
+      gestureAmplitudeMulRef.current = 0.75;
+      gestureDurationRef.current = 3000;
     } else if (!thinking && thinkGestureActiveRef.current) {
       thinkGestureActiveRef.current = false;
       if (gestureStateRef.current === 'think') {
@@ -1931,11 +1908,11 @@ export function VRMSkeletonManager({
     // ─── Nod system: while speaking (3–7s) and while listening (5–9s, lighter) ─
     if (speaking || listening) {
       if (nextNodAtMsRef.current === 0) {
-        nextNodAtMsRef.current = nowMs + (speaking ? 3000 : 5000) + Math.random() * 4000;
+        nextNodAtMsRef.current = nowMs + (speaking ? 4000 : 7000);
       }
       if (nowMs >= nextNodAtMsRef.current && nodPhaseRef.current <= 0) {
         nodPhaseRef.current = 0.001;
-        const nodInterval = speaking ? (3000 + Math.random() * 4000) : (5000 + Math.random() * 4000);
+        const nodInterval = speaking ? 4000 : 7000;
         nextNodAtMsRef.current = nowMs + nodInterval;
       }
     } else {
@@ -2037,22 +2014,32 @@ export function VRMSkeletonManager({
     const procHeadNoise = g === 'agree' || g === 'think' ? 0 : g === 'explain' ? 0.3 : 1;
     const procHeadGaze  = g === 'agree' ? 0.1 : (g === 'think' || g === 'explain') ? 0.28 : 1;
     const bsMot = useBrainStore.getState();
-    const presBaseSm = getIntentPresentation(bsMot.interactionIntent);
+    const presBaseSm = getBlendedIntentPresentation({
+      committedIntent: bsMot.interactionIntent,
+      visualFromIntent: bsMot.intentVisualFrom,
+      visualBlend01: bsMot.intentVisualBlend01,
+    });
+    const cbMot = bsMot.cognitiveAvatarBrain;
+    const presPersonality = modulatePresentationForPersonality(
+      presBaseSm,
+      cbMot.effectiveTraits,
+      cbMot.personality.motionSignature,
+    );
     const idMul =
       (0.9 + 0.18 * (bsMot.intentEnergy ?? 0.5)) *
       (bsMot.interactionIntent === 'emphasizing' ? 1.07 : 1);
     const pres = {
-      ...presBaseSm,
-      headNoiseMul: presBaseSm.headNoiseMul * idMul,
-      headGazeMul: presBaseSm.headGazeMul * idMul,
-      humanIdleNeckMul: presBaseSm.humanIdleNeckMul * idMul,
-      animationSaccadeMul: presBaseSm.animationSaccadeMul * idMul,
+      ...presPersonality,
+      headNoiseMul: presPersonality.headNoiseMul * idMul,
+      headGazeMul: presPersonality.headGazeMul * idMul,
+      humanIdleNeckMul: presPersonality.humanIdleNeckMul * idMul,
+      animationSaccadeMul: presPersonality.animationSaccadeMul * idMul,
     };
     const procHeadNoiseI = procHeadNoise * pres.headNoiseMul;
     const procHeadGazeI = procHeadGaze * pres.headGazeMul;
 
     if (g !== lastEffGestureRef.current) {
-      gestureCrossfadeStartMsRef.current = performance.now();
+      gestureCrossfadeStartMsRef.current = masterClockNowMs();
       if (process.env.NODE_ENV === 'development') {
         if (g !== 'idle') {
           avatarDebug('[VRMSkeletonManager] ▶ Gesture START:', g,
@@ -2113,7 +2100,7 @@ export function VRMSkeletonManager({
     /** Humanization: sway / saccade / spine breath / shoulder coupling — idle only (VRMA unchanged). */
     const idleHuman = motionSource === 'IDLE' && !FREEZE_IDLE_ANIMATIONS;
 
-    const voiceShoulderAdd = speaking ? speechDriveSnap.energy * 0.0085 : 0;
+    const voiceShoulderAdd = speaking ? (motionBlend?.intentWeight ?? intentFallback) * 0.0085 : 0;
     const breathShoulderLift = idleHuman ? breath * BIO_BREATHE_SHLDR + voiceShoulderAdd : 0;
     const breathArmDrift     = idleHuman ? breath * BIO_BREATHE_ARM : 0;
 
@@ -2128,7 +2115,7 @@ export function VRMSkeletonManager({
       const chestBind = m.get('chest');
       if (chestRef.current && chestBind) {
         const ax =
-          breatheChest * BREATHE_CHEST_AMP + (speaking ? speechDriveSnap.energy * 0.016 : 0);
+          breatheChest * BREATHE_CHEST_AMP + (speaking ? (motionBlend?.intentWeight ?? intentFallback) * 0.016 : 0);
         SK_Q.setFromAxisAngle(SK_AXIS_X, ax);
         SK_Q2.copy(chestBind).multiply(SK_Q);
         idlePose.set('chest', SK_Q2.clone());
@@ -2929,7 +2916,7 @@ export function VRMSkeletonManager({
       targetRhZ = THREE.MathUtils.clamp(targetRhZ, -0.58, 0.58);
 
       if (process.env.NODE_ENV === 'development' && DEBUG_AVATAR) {
-        const logNow = performance.now();
+        const logNow = masterClockNowMs();
         if (logNow - waveOscLogMsRef.current > 500) {
           waveOscLogMsRef.current = logNow;
           avatarDebug(`[WAVE_OSC] rhZ = ${targetRhZ.toFixed(3)}`);
@@ -3016,7 +3003,7 @@ export function VRMSkeletonManager({
 
     } else if (g === 'test_elbow') {
       if (process.env.NODE_ENV === 'development' && DEBUG_AVATAR && ruaRef.current && rlaRef.current) {
-        const logNow = performance.now();
+        const logNow = masterClockNowMs();
         if (logNow - testElbowLogMsRef.current > 220) {
           testElbowLogMsRef.current = logNow;
           const curRua = new THREE.Euler().setFromQuaternion(ruaRef.current.quaternion, 'YXZ');
@@ -3137,7 +3124,7 @@ export function VRMSkeletonManager({
     ) {
       // ─── Idle: arms lowered + دوران وضعيات خفيف كل 8–12 ث ────────────────
       // motionSource === IDLE يضمن عدم التزامن مع GESTURE أو VRMA.
-      const nowIdle = performance.now();
+      const nowIdle = masterClockNowMs();
       if (idleVariantNextSwitchRef.current === 0) {
         idleVariantNextSwitchRef.current =
           nowIdle + IDLE_VARIANT_INTERVAL_MIN + Math.random() * (IDLE_VARIANT_INTERVAL_MAX - IDLE_VARIANT_INTERVAL_MIN);
@@ -3225,7 +3212,7 @@ export function VRMSkeletonManager({
         slerpArmEuler(lhRef.current,  -wristJitterX * 0.5, 0, -talkWrist * 0.9 - wristJitterZ * 0.5, 0.75 * idleArmEaseMul, undefined, true);
 
         if (process.env.NODE_ENV === 'development' && DEBUG_AVATAR && ruaRef.current && luaRef.current) {
-          const logNow = performance.now();
+          const logNow = masterClockNowMs();
           if (logNow - lastIdleZLogMsRef.current > 900) {
             lastIdleZLogMsRef.current = logNow;
             const ruaTarget = (ic ? ic.ruaZ : IDLE_RUA_Z) + talkNudge + idleOffsetZ;
@@ -3378,6 +3365,9 @@ export function VRMSkeletonManager({
       vrmaLayerW = motionSource === 'VRMA' && vrmaBonePose.size > 0 ? 1 : 0;
     }
 
+    /** VRMA clip active: procedural humanization / micro / cinematic must not stack on bones. */
+    const isolateVrmaLayers = motionSource === 'VRMA';
+
     const vrmaForBlend = mergeVrmaPoseWithArmFallback(
       motionSource,
       vrmaLayerW,
@@ -3440,7 +3430,8 @@ export function VRMSkeletonManager({
       1,
     );
     if (
-      motionSource === 'VRMA'
+      !isolateVrmaLayers
+      && motionSource === 'VRMA'
       && vrmaLayerW > 0
       && intentPose.size > 0
       && intentBlendW > 1e-4
@@ -3449,46 +3440,80 @@ export function VRMSkeletonManager({
       blendPoseInto(finalPose, intentPose, intentBlendW);
     }
 
-    applyPresenceFromEmbodiment(finalPose, embFrame, {
-      motionSource,
-      elapsedSec: t,
-      delta: safeDelta,
-      gestureLayerW,
-      isTalking: speaking,
-    });
-
-    applyIntentMotor(finalPose, embFrame, safeDelta, {
-      motionSource,
-      gestureLayerW,
-      onMotionApplied: () => {
-        recordActivity();
-      },
-      eyeContact:
-        headRef.current
-          ? {
-              cameraPosition: camera.position,
-              headWorldPosition: headRef.current.getWorldPosition(_EYE_HEAD_WORLD),
-            }
-          : undefined,
-    });
-
-    applyMotionDriver(finalPose, embFrame, safeDelta, {
-      motionSource,
-      gestureLayerW,
-    });
-
-    if (motionSource === 'VRMA') {
-      applyBreathingLayer(finalPose, safeDelta, t, {
-        amplitudeMul: getSpeechBreathingAmplitudeMul(speaking, getSpeechEmotionSnapshot()),
+    if (!isolateVrmaLayers) {
+      applyPresenceFromEmbodiment(finalPose, embFrame, {
+        motionSource,
+        elapsedSec: t,
+        delta: safeDelta,
+        gestureLayerW,
+        isTalking: speaking,
       });
-      applyCinematicMicroLayer(finalPose, safeDelta, t, {
-        speaking,
-        energy: speechDriveSnap.energy,
-        syllablePulse: speechDriveSnap.syllablePulse,
+
+      applyIntentMotor(finalPose, embFrame, safeDelta, {
+        motionSource,
+        gestureLayerW,
+        onMotionApplied: () => {
+          recordActivity();
+        },
+        eyeContact:
+          headRef.current
+            ? {
+                cameraPosition: camera.position,
+                headWorldPosition: headRef.current.getWorldPosition(_EYE_HEAD_WORLD),
+              }
+            : undefined,
+      });
+
+      applyMotionDriver(finalPose, embFrame, safeDelta, {
+        motionSource,
+        gestureLayerW,
       });
     }
 
-    if (motionSource === 'VRMA') {
+    const behaviorPayload = brainSnap.behaviorContractPayload;
+    let humSnap: HumanizationSnapshot | null = null;
+    if (!isolateVrmaLayers) {
+      const humRaw = tickHumanization({
+        delta: safeDelta,
+        nowMs,
+        speaking,
+        thinking,
+        payload: behaviorPayload,
+      });
+      const cogAmp =
+        getCognitiveGestureAmplitudeScale() * getPerceptionStrangerGestureMul();
+      humSnap = {
+        ...humRaw,
+        breathAmpMul: humRaw.breathAmpMul * cogAmp,
+        noiseAmpRad: humRaw.noiseAmpRad * cogAmp,
+        motionSpeedMul: humRaw.motionSpeedMul * cogAmp,
+        saccadeYaw: humRaw.saccadeYaw * cogAmp,
+        saccadePitch: humRaw.saccadePitch * cogAmp,
+        fixationYaw: humRaw.fixationYaw * cogAmp,
+        fixationPitch: humRaw.fixationPitch * cogAmp,
+        stabilizeDriftYaw: humRaw.stabilizeDriftYaw * cogAmp,
+        stabilizeDriftPitch: humRaw.stabilizeDriftPitch * cogAmp,
+        anticipationNeckTilt: humRaw.anticipationNeckTilt * cogAmp,
+        freezeHealNeckTilt: humRaw.freezeHealNeckTilt * cogAmp,
+        freezeHealShoulder: humRaw.freezeHealShoulder * cogAmp,
+      };
+      applyHumanizationLayer(finalPose, safeDelta, humSnap);
+      applyAttentionSeekingLayer(finalPose, t, getPerceptionAttentionSeekingStrength());
+    }
+    if (humSnap && shouldTriggerBlinkEdge(humSnap) && typeof window !== 'undefined') {
+      const em = behaviorPayload?.emotion ?? 'neutral';
+      window.dispatchEvent(
+        new CustomEvent('avatar:blink', {
+          detail: { durationMs: blinkDurationMsForEmotion(em), style: 'normal' },
+        }),
+      );
+    }
+    if (!isolateVrmaLayers) {
+      applyCinematicMicroLayer(finalPose, safeDelta, t, {
+        speaking,
+        energy: Math.max(0.15, speechDriveSnap.energy),
+        syllablePulse: speechDriveSnap.syllablePulse,
+      });
       applyMicroHumanBehavior(finalPose, embFrame, safeDelta, t, speaking);
       applyIdleMicroPresence(finalPose, embFrame, safeDelta, {
         motionSource,
@@ -3496,12 +3521,13 @@ export function VRMSkeletonManager({
       });
     }
 
-    if (motionSource === 'VRMA' && !speaking && gestureLayerW < 0.09) {
+    if (VRMA_IDLE_MICRO_INJECT && motionSource === 'VRMA' && !speaking) {
       if (nextIdleMicroInjectAtMsRef.current === 0) {
-        nextIdleMicroInjectAtMsRef.current = nowMs + 4500 + Math.random() * 4000;
+        nextIdleMicroInjectAtMsRef.current = nowMs + 8000;
       }
       if (nowMs >= nextIdleMicroInjectAtMsRef.current && typeof window !== 'undefined') {
-        nextIdleMicroInjectAtMsRef.current = nowMs + 5200 + Math.random() * 3800;
+        const beat = Math.floor(nowMs / 1000);
+        nextIdleMicroInjectAtMsRef.current = nowMs + 8000 + (beat % 3) * 1000;
         window.dispatchEvent(
           new CustomEvent('avatar:micro:gesture', {
             detail: { kind: 'nod', durationMs: 240 },
@@ -3512,18 +3538,15 @@ export function VRMSkeletonManager({
       nextIdleMicroInjectAtMsRef.current = 0;
     }
 
-    if (motionSource === 'VRMA') {
-      applyMicroEventNudgeToFinalPose(finalPose, microNudgeRef.current);
-    }
-
     if (
+      DEBUG_MOTION &&
       motionSource === 'VRMA' &&
       vrmaLayerW > 0 &&
       typeof process !== 'undefined' &&
       process.env.NODE_ENV === 'development' &&
       typeof performance !== 'undefined'
     ) {
-      const _n = performance.now();
+      const _n = masterClockNowMs();
       if (_n >= __vrmaBlendInputLogNextAt) {
         __vrmaBlendInputLogNextAt = _n + 900;
         // eslint-disable-next-line no-console -- DEBUG: confirm vrma layer input vs long bone names
@@ -3562,28 +3585,28 @@ export function VRMSkeletonManager({
         hasHead: finalPose.has('head'),
         speechActive: speechDriveSnap.active,
         inPause: speechDriveSnap.inPause,
-        cinematicLayerWouldRun: motionSource === 'VRMA',
-        microHumanWouldRun: motionSource === 'VRMA',
+        cinematicLayerWouldRun: true,
+        microHumanWouldRun: true,
         visemeCount: lip?.visemeCount ?? 0,
         audioCurrentTime:
           lip?.audioCurrentTime != null ? Number(lip.audioCurrentTime.toFixed(5)) : null,
       });
     }
 
-    const bmHeal = getBehaviorMotionState();
+    const brainMs = useBrainStore.getState();
+    const embT = brainMs.lastEmbodimentMotionAtMs;
+    const embStale = embT > 0 && nowMs - embT > 2000;
     if (
+      VRMA_IDLE_MICRO_INJECT &&
       motionSource === 'VRMA' &&
-      !speaking &&
-      bmHeal.lastActionTime > 0 &&
-      nowMs - bmHeal.lastActionTime > 2000 &&
-      nowMs - lastFreezeHealAtMsRef.current > 5000
+      embStale &&
+      nowMs - lastEmbodimentFailsafeAtMsRef.current > 3000
     ) {
-      lastFreezeHealAtMsRef.current = nowMs;
+      lastEmbodimentFailsafeAtMsRef.current = nowMs;
+      brainMs.pulseEmbodimentMotion(nowMs);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(
-          new CustomEvent('avatar:micro:gesture', {
-            detail: { kind: 'question_tilt', durationMs: 260 },
-          }),
+          new CustomEvent('avatar:micro:gesture', { detail: { kind: 'nod', durationMs: 240 } }),
         );
       }
     }

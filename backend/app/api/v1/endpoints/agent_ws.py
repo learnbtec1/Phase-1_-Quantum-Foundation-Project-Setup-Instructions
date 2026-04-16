@@ -93,24 +93,24 @@ def _ws_ctx(session_id: str, req_id: Optional[str] = None) -> str:
 _active_llm_tasks: Dict[str, asyncio.Task[Any]] = {}
 # ═══ NEW END ═══
 
-# ── Azure TTS singleton (lazy init — avoids import-time crash if SDK absent) ─
-_azure_tts = None
+# ── Edge TTS singleton (lazy init) ─
+_edge_tts = None
 
-def _get_azure_tts():
-    """Return a shared AzureTTSService instance, or None if unavailable."""
-    global _azure_tts
-    if _azure_tts is None:
+def _get_edge_tts():
+    """Return a shared EdgeTTSService instance, or None if unavailable."""
+    global _edge_tts
+    if _edge_tts is None:
         try:
-            from app.services.tts_service import AzureTTSService
+            from app.services.tts_service import EdgeTTSService
             from app.core.config import settings
-            _azure_tts = AzureTTSService(default_voice=settings.TTS_ARABIC_VOICE)
+            _edge_tts = EdgeTTSService(default_voice=settings.TTS_ARABIC_VOICE)
             logger.info(
-                "[AgentWS] AzureTTSService ready | voice=%s | region=%s",
-                _azure_tts._default_voice, _azure_tts._region,
+                "[AgentWS] EdgeTTSService ready | voice=%s",
+                getattr(_edge_tts, "_default_voice", ""),
             )
         except Exception as exc:
-            logger.error("[AgentWS] AzureTTSService init failed: %s", exc)
-    return _azure_tts
+            logger.error("[AgentWS] EdgeTTSService init failed: %s", exc)
+    return _edge_tts
 
 router = APIRouter(prefix="/ws", tags=["Agent WebSocket"])
 
@@ -206,7 +206,14 @@ COGNI_WS_AUTH_HANDSHAKE_SEC = 20.0
 
 
 def _allow_anonymous_agent_ws() -> bool:
+    if os.getenv("COGNI_DEV_BYPASS_AUTH", "false").lower() in ("1", "true", "yes"):
+        return True
     return os.getenv("COGNI_WS_ALLOW_ANONYMOUS", "false").lower() in ("1", "true", "yes")
+
+
+def _normalize_ws_jwt_fragment(raw: str) -> str:
+    """Strip header/line breaks — JWT must not contain whitespace, but proxies may inject it."""
+    return "".join((raw or "").split())
 
 
 def _jwt_from_sec_websocket_protocol(header_val: Optional[str]) -> Optional[str]:
@@ -219,12 +226,13 @@ def _jwt_from_sec_websocket_protocol(header_val: Optional[str]) -> Optional[str]
         return None
     parts = [p.strip() for p in header_val.split(",") if p.strip()]
     if len(parts) >= 2 and parts[0].lower() == COGNI_WS_SUBPROTOCOL.lower():
-        return parts[1] or None
+        tok = _normalize_ws_jwt_fragment(parts[1])
+        return tok or None
     if len(parts) == 1:
         p0 = parts[0]
         prefix = COGNI_WS_SUBPROTOCOL.lower() + "."
         if p0.lower().startswith(prefix):
-            return p0[len(COGNI_WS_SUBPROTOCOL) + 1 :] or None
+            return _normalize_ws_jwt_fragment(p0[len(COGNI_WS_SUBPROTOCOL) + 1 :]) or None
     return None
 
 
@@ -303,6 +311,11 @@ async def agent_ws(websocket: WebSocket):
     Optional: COGNI_WS_ALLOW_ANONYMOUS=true → guest mode when no valid token.
     """
     ws_req_id = str(uuid.uuid4())
+    logger.info(
+        "[AgentWS] WS CONNECT ATTEMPT | req_id=%s | client=%s | path=/ws/agent",
+        ws_req_id,
+        getattr(websocket, "client", None),
+    )
     if websocket.query_params.get("token"):
         await websocket.close(code=1008, reason="token_in_query_not_supported")
         return
@@ -335,6 +348,11 @@ async def agent_ws(websocket: WebSocket):
             accept_subprotocol = COGNI_WS_SUBPROTOCOL
 
     await websocket.accept(subprotocol=accept_subprotocol)
+    logger.info(
+        "[AgentWS] WS CONNECT RECEIVED | req_id=%s | subprotocol=%s",
+        ws_req_id,
+        accept_subprotocol,
+    )
 
     allow_guest = _allow_anonymous_agent_ws()
     if user_row is None and not allow_guest:
@@ -1136,23 +1154,22 @@ async def agent_ws(websocket: WebSocket):
             except Exception as _cont_exc:
                 logger.debug("%s contagion_avatar_hint skipped: %s", _proc_ctx, _cont_exc)
 
-            # ── Azure Neural TTS (ar-JO-TaimNeural — male, Jordanian Arabic) ────────
+            # ── Edge TTS (MP3) ─────────────────────────────────────────────────────
             audio_b64 = ""
             viseme_cues = []
             word_cues = []
-            azure_tts = getattr(websocket.app.state, 'tts_service', None) or _get_azure_tts()
+            edge_tts = getattr(websocket.app.state, 'tts_service', None) or _get_edge_tts()
 
             playing_tts = True
             try:
-                if azure_tts and parsed['dialogue']:
+                if edge_tts and parsed['dialogue']:
                     from app.archive.tts_diagnostics import classify_tts_failure, log_tts_success
 
-                    _ak = bool((getattr(settings, "AZURE_SPEECH_KEY", None) or "").strip())
-                    _ar = str(getattr(settings, "AZURE_SPEECH_REGION", None) or "").strip()
+                    _gok = True  # Edge-TTS: no GCP JSON required
                     _dlen = len(parsed.get("dialogue") or "")
-                    _vname = str(settings.TTS_ARABIC_VOICE or azure_tts._default_voice or "")
+                    _vname = str(getattr(edge_tts, "_default_voice", "") or "")
                     try:
-                        mp3_bytes, viseme_cues, word_cues, tts_provider = await azure_tts.synthesize(
+                        mp3_bytes, viseme_cues, word_cues, tts_provider = await edge_tts.synthesize(
                             parsed['dialogue'],
                             voice_name=settings.TTS_ARABIC_VOICE,
                             emotion=parsed.get('emotion', 'neutral'),
@@ -1162,12 +1179,12 @@ async def agent_ws(websocket: WebSocket):
                             usage_user_id=user_uuid,
                         )
 
-                        if tts_provider != "azure":
+                        if tts_provider != "edge":
                             raise RuntimeError(
-                                f"TTS integrity violation: expected Azure, got {tts_provider!r}"
+                                f"TTS integrity violation: expected Edge, got {tts_provider!r}"
                             )
                         if not mp3_bytes:
-                            raise RuntimeError("Azure TTS returned empty audio")
+                            raise RuntimeError("Edge TTS returned empty audio")
 
                         audio_b64 = base64.b64encode(mp3_bytes).decode('ascii')
                         log_tts_success(
@@ -1180,10 +1197,10 @@ async def agent_ws(websocket: WebSocket):
                         )
                     except Exception as e:
                         _code, _human = classify_tts_failure(
-                            e, azure_key_set=_ak, azure_region=_ar, edge_attempted=False,
+                            e, speech_credentials_ok=_gok, edge_attempted=False,
                         )
                         logger.error(
-                            "[AgentWS] TTS synthesis failed (Azure-only) | "
+                            "[AgentWS] TTS synthesis failed (Edge) | "
                             "code=%s | detail=%s | exc_type=%s | exc=%s",
                             _code,
                             _human,

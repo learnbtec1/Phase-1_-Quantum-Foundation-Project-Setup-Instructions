@@ -420,13 +420,9 @@ export class UnifiedGestureEngine {
 
     durationMs = Math.round(
       durationMs *
-        (0.8 + Math.random() * 0.4) *
         getIntentDepthDurationMul(intentDepth) *
         getGestureDurationPersonalityMul(),
     );
-    if (Math.random() < 0.2) {
-      durationMs = Math.round(durationMs * (0.55 + Math.random() * 0.3));
-    }
     durationMs = Math.min(3000, Math.max(220, durationMs));
 
     // Motion controller — block new gestures except CRITICAL (`tryAcquireMotion` force + barge in `#execute`).
@@ -910,7 +906,7 @@ export class UnifiedGestureEngine {
 
     const nowR = Date.now();
     this.#lastGestureStemKey = stem.toLowerCase();
-    this.#repeatGateUntilMs = nowR + 3000 + Math.floor(Math.random() * 2001);
+    this.#repeatGateUntilMs = nowR + 3000;
 
     this.#rawDispatch({
       gesture: canonical,

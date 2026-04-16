@@ -4,6 +4,9 @@ services:
     container_name: eduverse_redis
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -21,12 +24,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eduverse}
     ports:
       - "5432:5432"
-    # tmpfs: avoids chmod/initdb failures when Docker stores volumes on NTFS (e.g. disk image on E:)
-    # or bind mounts from /mnt/... under WSL. Data is lost on `docker compose down` (container removed).
-    # For a persistent DB on Linux/ext4 or default Docker Desktop WSL2 disk, use:
-    #   docker compose -f docker-compose.yml -f docker-compose.db-persistent.yml up
-    tmpfs:
-      - /var/lib/postgresql/data:rw,size=2147483648
+    volumes:
+      - pg_data:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB -h 127.0.0.1"]
@@ -44,59 +43,67 @@ services:
       HOST: 0.0.0.0
       PORT: 8000
       ANONYMIZED_TELEMETRY: "False"
-      # Use same credentials as db service (override via root .env: POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB)
+
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-eduverse}:${POSTGRES_PASSWORD:-eduverse}@db:5432/${POSTGRES_DB:-eduverse}
       REDIS_URL: redis://redis:6379/0
-      # Required in .env — compose fails fast if unset (avoids shipping a known-weak default).
-      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in project root .env — see backend/.env.example}
+
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+
       PYTHONIOENCODING: "utf-8"
       PYTHONUTF8: "1"
       LANG: "C.UTF-8"
       LC_ALL: "C.UTF-8"
+
       SSL_CERT_FILE: "/etc/ssl/certs/ca-certificates.crt"
       SSL_CERT_DIR: "/etc/ssl/certs"
+
       TTS_ARABIC_VOICE: "ar-JO-TaimNeural"
       COGNI_ARABIC_TTS_VOICE_LOCKED: "ar-JO-TaimNeural"
-      # Azure Speech only (no Edge/Kokoro/gTTS). Requires AZURE_SPEECH_KEY + AZURE_SPEECH_REGION in .env.
-      TTS_AZURE_ONLY: "true"
+
+      TTS_AZURE_ONLY: "false"
       TTS_DISABLE_NON_AZURE_FALLBACK: "true"
-      # Local dev: avatar page works without login (guest). Production: set false in root .env.
+      TTS_PROVIDER: "edge"
+      EDGE_TTS_VOICE: "ar-JO-TaimNeural"
+
       COGNI_WS_ALLOW_ANONYMOUS: "true"
-      # BTEC textbook / rubric / exemplar corpus (host path mounted read-only below)
+      # Docker demo: TTS + optional WS without real login (pair with frontend COGNI_BFF_DEV_BYPASS_AUTH).
+      COGNI_DEV_BYPASS_AUTH: "true"
+
       LOCAL_RAG_ENABLED: "true"
       LOCAL_RAG_DIR: "/app/btec_corpus"
-      # تقييمات دائمة مع Postgres في Docker (انظر README)
+
       USE_DB: "true"
-      # عند تشغيل خدمة chromadb (profile: chroma) وجّه العميل عبر CHROMA_SERVER_* إن دعم الكود ذلك؛
-      # الافتراضي: Chroma محلي داخل الحاوية تحت /app/data/chroma_cogni
-      # CHROMA_HOST: chromadb
-      # CHROMA_PORT: "8000"
+
+    # Publish API + WebSocket to host (browser uses 127.0.0.1:8000, not Docker service name).
     ports:
-      - "8000:8000"
+      - "0.0.0.0:8000:8000"
+
     volumes:
-      # Chroma persistence at /app/data/chroma_cogni — keep across restarts (no full RAG rebuild)
-      - ./backend/data:/app/data
-      # BTEC corpus files (LOCAL_RAG_DIR=/app/btec_corpus)
+      - chroma_cogni_data:/app/data/chroma_cogni
       - ./backend/data/btec-bus:/app/btec_corpus:ro
       - whisper_model_cache:/root/.cache/huggingface
+
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+
     restart: unless-stopped
+
+    # slim image had no curl; CMD form avoids shell quoting issues. Whisper pre-warm can delay bind.
     healthcheck:
       test:
         [
           "CMD",
           "python",
           "-c",
-          "import urllib.request,sys; u='http://127.0.0.1:8000/api/health'; req=urllib.request.Request(u, method='GET'); urllib.request.urlopen(req, timeout=3); sys.exit(0)"
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)",
         ]
       interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
+      timeout: 10s
+      retries: 8
+      start_period: 120s
 
   frontend:
     build:
@@ -104,51 +111,57 @@ services:
       target: dev-base
     container_name: eduverse_frontend
     working_dir: /app
-    # Set PROJECT_ROOT in `.env` to this repo’s absolute host path (e.g. D:\work\ukd or /mnt/d/work/ukd) when WSL/cross-drive bind mounts miss edits.
+
     volumes:
       - ${PROJECT_ROOT:-.}/frontend:/app
       - /app/node_modules
-      # Writable .next inside container — avoids Turbopack/Webpack lockfile EACCES on Windows bind mounts
       - frontend_next_cache:/app/.next
+
     command: ["npm", "run", "dev"]
+
     environment:
       WATCHPACK_POLLING: "true"
       NEXT_TELEMETRY_DISABLED: "1"
-      NEXT_PUBLIC_API_URL: http://localhost:8000
-      NEXT_PUBLIC_AGENT_WS: ws://localhost:8000/ws/agent
-      # Matches backend COGNI_WS_ALLOW_ANONYMOUS — hides scary browser warning when not logged in
+
+      # Browser on host: use 127.0.0.1 (avoids localhost → IPv6 ::1 vs IPv4-only bind).
+      NEXT_PUBLIC_API_URL: http://127.0.0.1:8000
+      NEXT_PUBLIC_AGENT_WS: ws://127.0.0.1:8000/ws/agent
+
+      # Guest WS + TTS without browser JWT (must match backend COGNI_DEV_BYPASS_AUTH + COGNI_WS_ALLOW_ANONYMOUS).
+      NEXT_PUBLIC_COGNI_WS_ALLOW_ANONYMOUS: "true"
+      # Legacy alias — code accepts both:
       NEXT_PUBLIC_COGNI_WS_GUEST_OK: "true"
+
+      # Next.js BFF: allow POST /api/tts-with-timing with no Bearer; forwards to backend without Authorization.
+      COGNI_BFF_DEV_BYPASS_AUTH: "true"
+
       BACKEND_URL: http://backend:8000
       TTS_BACKEND_URL: http://backend:8000/api/v1/tts-with-timing
       TTS_PROXY_TIMEOUT_MS: "90000"
+
       CHAT_BACKEND_URL: http://backend:8000/api/v1/chat
-      # Enable gesture/lip-sync simulation when Azure TTS key is absent.
-      # Set to "false" (or remove) once AZURE_SPEECH_KEY is provided.
-      NEXT_PUBLIC_MIME_MODE: "true"
+
+      # false = real TTS (speakWithTTS → /api/tts-with-timing). true = gesture-only timing, NO audio (dev/testing).
+      NEXT_PUBLIC_MIME_MODE: "false"
       NEXT_PUBLIC_AVATAR_VRM_URL: "/models/195_Uta01/cogni.vrm"
-      # Scene: DEFAULT (carpet + desk) | OFFICE — must be set for Next dev server / client bundle
       NEXT_PUBLIC_ACTIVE_ENV: ${NEXT_PUBLIC_ACTIVE_ENV:-OFFICE}
+
     ports:
       - "3000:3000"
+
     depends_on:
       backend:
         condition: service_healthy
+
     restart: unless-stopped
+
     healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "require('http').request('http://127.0.0.1:3000/api/health',{method:'HEAD'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1)).end()"
-        ]
+      test: ["CMD", "node", "-e", "require('http').request('http://127.0.0.1:3000/api/health',{method:'HEAD'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1)).end()"]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 25s
+      start_period: 60s
 
-  # ChromaDB كخادم منفصل (اختياري). تشغيل: docker compose --profile chroma up -d chromadb
-  # ثم اضبط متغيرات الاتصال في backend إذا كان التطبيق يستخدم HttpClient بدل المسار المحلي.
   chromadb:
     profiles: ["chroma"]
     image: chromadb/chroma:latest
@@ -161,7 +174,6 @@ services:
       ANONYMIZED_TELEMETRY: "false"
     restart: unless-stopped
 
-  # One-shot BTEC → ChromaDB (same volumes as backend). Run: docker compose --profile ingest run --rm btec-ingest
   btec-ingest:
     profiles: ["ingest"]
     build: ./backend
@@ -171,15 +183,14 @@ services:
       PYTHONPATH: /app
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes:
-      # Same paths as backend: Chroma DB + read-only BTEC files
-      - ./backend/data:/app/data
+      - chroma_cogni_data:/app/data/chroma_cogni
       - ./backend/data/btec-bus:/app/btec_corpus:ro
     command: ["python", "scripts/btec_ingest.py", "--data-dir", "/app/btec_corpus", "--chroma-dir", "/app/data/chroma_cogni"]
 
 volumes:
-  whisper_model_cache:
-    driver: local
+  pg_data:
+  redis_data:
+  chroma_cogni_data:
   chromadb_data:
-    driver: local
+  whisper_model_cache:
   frontend_next_cache:
-    driver: local

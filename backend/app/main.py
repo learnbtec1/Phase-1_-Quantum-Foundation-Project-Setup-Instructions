@@ -88,12 +88,17 @@ from app.api.v1.endpoints.digital_human_api import router as digital_human_route
 from app.api.v1.endpoints.stripe_webhook import router as stripe_webhook_router
 from app.api.v1.endpoints.saml_auth import router as saml_auth_router
 from app.api.v1.endpoints.tutor import router as tutor_http_router
+from app.api.v1.endpoints.rag import router as rag_router
 from app.api.memory import router as memory_router
 
 from app.core.config import settings
 from app.core.middleware_request_id import RequestIdMiddleware
 from app.core.rate_limit import ApiRateLimitMiddleware
-from app.services.tts_service import AzureTTSService
+from app.services.tts_service import (
+    EdgeTTSService,
+    _EDGE_TTS_AVAILABLE,
+    synthesize_edge_tts_async,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,24 +111,19 @@ _TTS_PING_EVERY_SEC = 300   # 5 minutes
 
 
 async def _tts_ping_loop() -> None:
-    """Background task: perform a short Azure TTS synthesis every 5 minutes,
-    cache the result so /api/health can return live audio availability."""
+    """Background task: short Edge TTS synthesis every 5 minutes for /api/health."""
     await asyncio.sleep(8)   # slight startup delay — let the app warm up first
     while True:
         try:
-            from app.services.azure_tts import _synthesize_azure_sync
-            key    = settings.AZURE_SPEECH_KEY
-            region = settings.AZURE_SPEECH_REGION
-            voice  = settings.TTS_ARABIC_VOICE
-            if key and region:
+            if _EDGE_TTS_AVAILABLE:
                 t0 = _time.monotonic()
-                loop = asyncio.get_running_loop()
-                wav, _, _, _ = await loop.run_in_executor(
-                    None, _synthesize_azure_sync, "اختبار", key, region, voice
+                mp3 = await asyncio.wait_for(
+                    synthesize_edge_tts_async("اختبار"),
+                    timeout=45.0,
                 )
                 latency_ms = int((_time.monotonic() - t0) * 1000)
                 _tts_health.update({
-                    "ok":         bool(wav),
+                    "ok":         bool(mp3),
                     "latency_ms": latency_ms,
                     "ts":         int(_time.time() * 1000),
                 })
@@ -140,12 +140,11 @@ async def _tts_ping_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app_instance):
-    """Pre‑warm TTS and STT models on startup and initialize Azure TTS service."""
+    """Pre‑warm TTS and STT models on startup and initialize Edge TTS service."""
     import asyncio
     loop = asyncio.get_running_loop()
 
-    if bool(getattr(settings, "TTS_AZURE_ONLY", True)):
-        logger.info("TTS Provider: AZURE ONLY")
+    logger.info("TTS Provider: MICROSOFT EDGE TTS (edge-tts)")
 
     # 0) Re-patch logging handlers that uvicorn registered AFTER our module-top
     #    patch ran.  This prevents cp1252 UnicodeEncodeError in Windows consoles.
@@ -180,22 +179,19 @@ async def lifespan(app_instance):
     except Exception as e:
         logger.warning("Whisper pre‑warm failed: %s", e)
 
-    # 2) Azure Neural TTS (cloud) – store in app.state for dependency injection
+    # 2) Edge TTS — store in app.state for dependency injection
     try:
-        app_instance.state.tts_service = AzureTTSService(
-            speech_key=settings.AZURE_SPEECH_KEY,
-            speech_region=settings.AZURE_SPEECH_REGION,
-            default_voice=settings.TTS_ARABIC_VOICE,
+        app_instance.state.tts_service = EdgeTTSService(
+            default_voice=None,
             prosody_rate=0.95,
-            request_timeout=15.0,
+            request_timeout=45.0,
         )
         logger.info(
-            "Azure TTS service initialized | region=%s | default_voice=%s",
-            settings.AZURE_SPEECH_REGION,
-            settings.TTS_ARABIC_VOICE,
+            "Edge TTS service initialized | voice=%s",
+            getattr(app_instance.state.tts_service, "_default_voice", ""),
         )
     except Exception as e:
-        logger.error("Azure TTS service initialization failed: %s", e)
+        logger.error("Edge TTS service initialization failed: %s", e)
         app_instance.state.tts_service = None
 
     # 3) TTS health-ping background task — updates _tts_health every 5 min
@@ -248,7 +244,7 @@ async def lifespan(app_instance):
     # Cleanup
     _ping_task.cancel()
     if hasattr(app_instance.state, "tts_service") and app_instance.state.tts_service:
-        logger.info("Azure TTS service released (garbage collected).")
+        logger.info("Edge TTS service released (garbage collected).")
 
 
 app = FastAPI(
@@ -304,6 +300,7 @@ elif settings.is_production:
 # Include routers
 app.include_router(assessment_router)
 app.include_router(chat_router, prefix="/api/v1")
+app.include_router(rag_router, prefix="/api/v1")
 app.include_router(tutor_http_router, prefix="/api/v1/tutor")  # POST /api/v1/tutor/chat (legacy shape + gate_llm)
 app.include_router(stt_router, prefix="/api/v1")
 app.include_router(tts_router, prefix="/api/v1")
@@ -328,21 +325,16 @@ app.include_router(saml_auth_router, prefix="/api/v1")
 async def api_health():
     """Standard /api/health endpoint consumed by Next.js health route.
 
-    ``audio`` reflects a live TTS ping performed every 5 minutes by the
-    background task.  On first startup (before the first ping fires) it
-    falls back to a credential-presence check so health returns ``true``
-    immediately if Azure is configured.
+    ``audio`` reflects Edge TTS readiness: live ping from the background task
+    every ~5 minutes, or until then whether ``edge-tts`` is installed
+    (``_EDGE_TTS_AVAILABLE``). No Google Cloud credentials are involved.
 
     Production (ENVIRONMENT=production): minimal JSON ``{\"ok\": true}`` only.
     """
     if settings.is_production:
         return {"ok": True}
 
-    credentials_ok = (
-        os.getenv("TTS_PROVIDER", "").lower() == "azure"
-        and bool(os.getenv("AZURE_SPEECH_KEY") or settings.AZURE_SPEECH_KEY)
-        and bool(os.getenv("AZURE_SPEECH_REGION") or settings.AZURE_SPEECH_REGION)
-    )
+    credentials_ok = _EDGE_TTS_AVAILABLE
     # Use live ping result once available, otherwise fall back to credential check
     ping_result = _tts_health.get("ok")
     audio = ping_result if ping_result is not None else credentials_ok

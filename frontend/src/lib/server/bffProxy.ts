@@ -68,6 +68,33 @@ export function requireIncomingBearer(req: NextRequest): IncomingBearerResult {
   return { ok: true, authHeader: `Bearer ${token}` };
 }
 
+export type IncomingBearerOrBypassResult =
+  | { ok: true; authHeader: string | null }
+  | { ok: false; response: NextResponse };
+
+/**
+ * Bearer if present; otherwise allow empty when `COGNI_BFF_DEV_BYPASS_AUTH=true` (pair with
+ * backend `COGNI_DEV_BYPASS_AUTH` — TTS gate uses stub user). `authHeader: null` = omit header.
+ */
+export function resolveIncomingBearerOrDevBypass(
+  req: NextRequest,
+): IncomingBearerOrBypassResult {
+  const token = getBearerTokenFromRequest(req);
+  if (token) {
+    return { ok: true, authHeader: `Bearer ${token}` };
+  }
+  if (process.env.COGNI_BFF_DEV_BYPASS_AUTH === 'true') {
+    return { ok: true, authHeader: null };
+  }
+  return {
+    ok: false,
+    response: NextResponse.json(
+      { error: 'Missing Authorization Bearer token' },
+      { status: 401 },
+    ),
+  };
+}
+
 /**
  * Upstream 2xx JSON response; merges `mergeIntoBody` into parsed object on success.
  */

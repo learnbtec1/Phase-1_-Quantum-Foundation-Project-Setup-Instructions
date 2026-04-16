@@ -6,7 +6,7 @@
  *   [Microphone] → useVAD → WebSocket → [Backend]
  *       → JSON AgentFrame → BrainStore.processFrame()
  *       → AgentDirector (gestures, expressions, head, voice)
- *       → PCM / MP3 audio from server or client /api/tts-with-timing
+ *       → Client /api/tts-with-timing only (single TTS authority; no WS raw audio playback)
  *       → EmotionalMemoryManager (trajectory tracking)
  *
  * Key differences from useAvatarAgent:
@@ -30,6 +30,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from 'react';
@@ -43,9 +44,11 @@ import { emotionalMemoryManager }          from '@/ai/avatar/EmotionalMemoryMana
 import type { EmotionLabel, AgentFrame } from '@/types/ai';
 import { COGNI_PERSONA, COGNI_JSON_BRAIN_SYSTEM_APPEND } from '@/config/personality';
 import { buildDeviceContextPayload }       from '@/lib/deviceContext';
-import { authHeaders }                     from '@/lib/auth';
-import { resetSpeechIntentHints, setSpeechIntentHintsFromText } from '@/lib/avatar/speechIntentHints';
-import { resolveSpeakRate, stopTTSGlobally } from '@/ai/io/tts';
+import { resetSpeechIntentHints } from '@/lib/avatar/speechIntentHints';
+import { automaticGestureInjectorsDisabled } from '@/lib/avatar/automaticGestureInjectors';
+import { stopTTSGlobally } from '@/ai/io/tts';
+import { getAccessToken, hasStoredAccessToken } from '@/lib/auth';
+import { handleUserMessage } from '@/lib/ai/handleUserMessage';
 import { microExprBargeInPulse } from '@/ai/avatar/microExpressionLayer';
 import { inferUserMirrorEmotion, inferUserSpeechRhythm } from '@/lib/avatar/userEmotionMirror';
 import { getProfile, recordInteractionTick, recordUserEmotionalSnapshot } from '@/lib/avatar/emotionalMemory';
@@ -57,7 +60,6 @@ import {
   ensureWebSpeechVoicesChangeHook,
 } from '@/ai/io/webSpeechVoice';
 import {
-  durationMsFromVisemeCues,
   estimateDialogueDurationMs,
   planCoSpeechGestures,
 } from '@/ai/avatar/coSpeechPlanner';
@@ -93,13 +95,42 @@ import {
   readAssessmentCoaching,
   type AssessmentCoachingPayload,
 } from '@/lib/cogniSessionContext';
-import { resumeSharedAudioContext } from '@/lib/audio/avatarAudioContext';
+import { nowMs as masterClockNowMs } from '@/lib/avatar/masterClock';
+import { ipv4LoopbackWsUrl, buildDefaultWsAgentUrl } from '@/lib/wsAgentUrl';
+
+/** When true (and backend `COGNI_WS_ALLOW_ANONYMOUS=true`), open `/ws/agent` without JWT subprotocol if no valid token. */
+function wsGuestModeEnabled(): boolean {
+  return (
+    process.env.NEXT_PUBLIC_COGNI_WS_ALLOW_ANONYMOUS === 'true' ||
+    process.env.NEXT_PUBLIC_COGNI_WS_GUEST_OK === 'true'
+  );
+}
+
+/** Trim + strip whitespace — JWT in Sec-WebSocket-Protocol must be a single opaque token string. */
+function sanitizeTokenForWsHandshake(raw: string): string {
+  return raw.replace(/\s+/g, '').trim();
+}
+
+/** True if string looks like a standard JWT (three base64url segments; header usually starts with eyJ). */
+function tokenLooksLikeJwtForWsSubprotocol(t: string): boolean {
+  if (t.length < 20 || !t.startsWith('eyJ')) return false;
+  const parts = t.split('.');
+  return parts.length === 3 && parts.every((p) => p.length > 0);
+}
 
 /**
- * True while HTMLAudioElement from a WS `speech` frame is playing.
- * FIX: voice stability — must be set true when MP3/PCM from server actually plays.
+ * Opaque / dev placeholder tokens must NOT be sent in Sec-WebSocket-Protocol (can break handshake).
+ * Use plain `new WebSocket(url)` + first-frame `{ type: "auth", token }` instead.
  */
-let serverTtsPlaybackActive = false;
+function shouldAvoidJwtSubprotocolInHandshake(raw: string): boolean {
+  const t = sanitizeTokenForWsHandshake(raw);
+  if (!t) return true;
+  if (t === 'test-token-123') return true;
+  const dev = (process.env.NEXT_PUBLIC_DEV_AUTH_TOKEN ?? '').trim();
+  if (dev && t === dev) return true;
+  if (!tokenLooksLikeJwtForWsSubprotocol(t)) return true;
+  return false;
+}
 
 // ─── Public hook interface ────────────────────────────────────────────────────
 
@@ -107,10 +138,12 @@ let serverTtsPlaybackActive = false;
 export interface SendTextOptions {
   practice?: boolean;
   topicId?:  number;
+  /** Internal: avoid infinite loop when marketing RAG path retries normal chat. */
+  skipAssignmentRag?: boolean;
 }
 
 export interface AgentAgentOptions {
-  /** WebSocket endpoint URL. Default: من `NEXT_PUBLIC_API_URL` أو `ws://127.0.0.1:8000/ws/agent` */
+  /** WebSocket endpoint URL. Default: `buildDefaultWsAgentUrl()` — `NEXT_PUBLIC_WS_URL` → `NEXT_PUBLIC_AGENT_WS` → من `NEXT_PUBLIC_API_URL`. */
   wsUrl?:         string;
   /** Attempt automatic reconnect after disconnect. Default: true */
   autoReconnect?: boolean;
@@ -231,10 +264,6 @@ function toEmotionLabel(raw: string): EmotionLabel {
 }
 
 /**
- * Wrap raw 16-bit mono PCM bytes in a minimal WAV container for playback.
- * The Kokoro TTS backend returns int16 PCM with no RIFF header.
- */
-/**
  * Client-side fallback: scan dialogue text for inline `[gesture]` tokens
  * (e.g. "[wave] أهلاً"). Converts them to PerformanceCue objects that are
  * merged into the performance[] array before scheduling.
@@ -283,140 +312,6 @@ function _parseClientInlineGestures(text: string): PerformanceCue[] {
     });
   }
   return cues;
-}
-
-function pcmToWavBlob(pcm: Uint8Array, sampleRate: number): Blob {
-  const nCh = 1, bps = 16;
-  const byteRate = sampleRate * nCh * (bps / 8);
-  const buf  = new ArrayBuffer(44 + pcm.length);
-  const view = new DataView(buf);
-  const ws   = (o: number, s: string) => {
-    for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i));
-  };
-  ws(0, 'RIFF');  view.setUint32(4,  buf.byteLength - 8,    true);
-  ws(8, 'WAVE');  ws(12, 'fmt ');
-  view.setUint32(16, 16,          true); // fmt chunk size
-  view.setUint16(20,  1,          true); // PCM
-  view.setUint16(22, nCh,         true);
-  view.setUint32(24, sampleRate,  true);
-  view.setUint32(28, byteRate,    true);
-  view.setUint16(32, nCh * (bps / 8), true);
-  view.setUint16(34, bps,         true);
-  ws(36, 'data'); view.setUint32(40, pcm.length, true);
-  new Uint8Array(buf, 44).set(pcm);
-  return new Blob([buf], { type: 'audio/wav' });
-}
-
-/**
- * Normalise a raw time value to **seconds** for LipSyncManager.
- * - If the field is `offset_ms` or `time_ms` → divide by 1000.
- * - If the field is `t` (Azure/server convention already in seconds) → keep.
- * - Auto-detect: if value > 300 assume ms and convert.
- */
-function toVisemeSec(
-  e: Record<string, unknown>,
-  key: string,
-  isExplicitMs: boolean,
-): number {
-  const raw = Number(e[key] ?? 0);
-  if (!Number.isFinite(raw)) return 0;
-  if (isExplicitMs || raw > 300) return raw / 1000;
-  return raw;
-}
-
-/** Normalize viseme arrays from Next `/api/tts-with-timing` → FastAPI (viseme_events) or legacy shapes. */
-function normalizeVisemeEventsPayload(data: unknown): Array<{ t: number; id: number }> | null {
-  if (!data || typeof data !== 'object') return null;
-  const d = data as Record<string, unknown>;
-  const raw =
-    (Array.isArray(d.viseme_events) && d.viseme_events) ||
-    (Array.isArray(d.visemeEvents) && d.visemeEvents) ||
-    (Array.isArray(d.events) && d.events) ||
-    null;
-  if (!raw?.length) return null;
-  const cues: Array<{ t: number; id: number }> = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
-    const e = item as Record<string, unknown>;
-    // Priority: offset_ms (explicit ms) → time_ms (explicit ms) → t (seconds)
-    let tSec: number;
-    if ('offset_ms' in e) {
-      tSec = toVisemeSec(e, 'offset_ms', true);
-    } else if ('time_ms' in e) {
-      tSec = toVisemeSec(e, 'time_ms', true);
-    } else {
-      tSec = toVisemeSec(e, 't', false);
-    }
-    const id = Number(e.viseme_id ?? e.id ?? e.visemeId ?? 0);
-    cues.push({
-      t:  Math.max(0, tSec),
-      id: Math.min(21, Math.max(0, Number.isFinite(id) ? Math.round(id) : 0)),
-    });
-  }
-  if (!cues.length) return null;
-  // Sort ascending (API may return unsorted)
-  cues.sort((a, b) => a.t - b.t);
-  return cues;
-}
-
-/** Normalize viseme arrays from Agent WS `speech` frames. */
-function normalizeAgentWsVisemeCues(raw: unknown): Array<{ t: number; id: number }> | null {
-  if (!Array.isArray(raw) || raw.length === 0) return null;
-  const cues: Array<{ t: number; id: number }> = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
-    const o = item as Record<string, unknown>;
-    // WS convention varies: prefer offset_ms if present (explicit ms), else t (seconds)
-    let tSec: number;
-    if ('offset_ms' in o) {
-      tSec = toVisemeSec(o, 'offset_ms', true);
-    } else if ('time_ms' in o) {
-      tSec = toVisemeSec(o, 'time_ms', true);
-    } else {
-      tSec = toVisemeSec(o, 't', false);
-    }
-    const id = Number(o.id ?? o.viseme_id ?? o.visemeId ?? 0);
-    if (!Number.isFinite(tSec) || !Number.isFinite(id)) continue;
-    cues.push({
-      t:  Math.max(0, tSec),
-      id: Math.min(21, Math.max(0, Math.round(id))),
-    });
-  }
-  if (!cues.length) return null;
-  cues.sort((a, b) => a.t - b.t);
-  return cues;
-}
-
-/**
- * Fetch viseme cue timeline from the same TTS route used by speakWithTTS, without playing
- * that audio — so PCM-from-WebSocket lip-sync can use Azure-style viseme IDs + timeline.
- * Expects FastAPI `POST /api/v1/tts-with-timing` JSON via Next proxy: `{ viseme_events: [{ offset_ms, viseme_id }] }`.
- */
-async function fetchVisemeCuesFromTtsApi(
-  text: string,
-  signal?: AbortSignal,
-): Promise<Array<{ t: number; id: number }> | null> {
-  const trimmed = text.trim().slice(0, 5000);
-  if (!trimmed || typeof window === 'undefined') return null;
-  try {
-    const res = await fetch('/api/tts-with-timing', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({
-        text: trimmed,
-        emotion: 'neutral',
-        speed: resolveSpeakRate('neutral', COGNI_PERSONA.voiceParameters.rate),
-        ar_voice: 'male',
-      }),
-      signal,
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return normalizeVisemeEventsPayload(data);
-  } catch (e) {
-    if (e instanceof DOMException && e.name === 'AbortError') return null;
-    return null;
-  }
 }
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
@@ -482,11 +377,7 @@ function trimAssessmentCoachingForWs(p: AssessmentCoachingPayload): Record<strin
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
-/** يطابق AvatarAgentClient: `NEXT_PUBLIC_API_URL` → WebSocket `/ws/agent` */
-const DEFAULT_WS_AGENT_URL =
-  typeof process !== 'undefined' && process.env.NEXT_PUBLIC_API_URL?.trim()
-    ? `${process.env.NEXT_PUBLIC_API_URL.trim().replace(/\/$/, '').replace(/^https:\/\//i, 'wss://').replace(/^http:\/\//i, 'ws://')}/ws/agent`
-    : 'ws://127.0.0.1:8000/ws/agent';
+const DEFAULT_WS_AGENT_URL = buildDefaultWsAgentUrl();
 
 export function useAgentAgent({
   wsUrl         = DEFAULT_WS_AGENT_URL,
@@ -509,7 +400,6 @@ export function useAgentAgent({
   const wsRef              = useRef<WebSocket | null>(null);
   const reconnectTimer     = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef         = useRef(true);
-  const currentAudioRef    = useRef<HTMLAudioElement | null>(null);
   const isListeningRef     = useRef(false);
   const idleTimerRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Tracks avatar-speaking state via window events — kept as a ref to avoid re-renders. */
@@ -543,13 +433,14 @@ export function useAgentAgent({
   const coSpeechTimersRef = useRef<number[]>([]);
   /** Performance Tag System — word-synced cues from backend `performance` array */
   const performanceTimersRef = useRef<number[]>([]);
-  /** Abort in-flight viseme fetch from `/api/tts-with-timing` when a new speech frame arrives. */
-  const visemeFetchAbortRef = useRef<AbortController | null>(null);
   /** Last inferred user mood for emotional memory (not avatar reply emotion). */
   const lastUserMoodRef = useRef<EmotionLabel>('neutral');
   /** VAD segment timing — used with transcript length for speech rhythm mirroring */
   const vadSpeechStartMsRef = useRef(0);
   const lastUtteranceDurationMsRef = useRef(2400);
+  /** Segments captured while WS is CONNECTING/CLOSED — sent after OPEN (see flush effect). */
+  const pendingAudioBlobsRef = useRef<Blob[]>([]);
+  const MAX_PENDING_AUDIO_BLOBS = 5;
 
   // ── Teaching Strategy Engine ────────────────────────────────────────────────
   const teachingCtxRef = useRef<StrategyContext>({
@@ -566,6 +457,15 @@ export function useAgentAgent({
   const keepAliveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   /** Connection-open timeout — cleared in onopen; fires close() if server never opens. */
   const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Consecutive abnormal closes (1006) — stop reconnect after threshold. */
+  const ws1006StreakRef = useRef(0);
+  /** Set true after repeated 1006; cleared on auth-changed or successful open. */
+  const wsReconnectStoppedRef = useRef(false);
+  /** After 1006 with JWT subprotocol, retry once with plain handshake (auth frame only). */
+  const wsSkipSubprotocolOnceRef = useRef(false);
+  const lastConnectUsedJwtSubprotocolRef = useRef(false);
+  /** Reset to `true` on each successful `onopen` so one fallback remains available per connection cycle. */
+  const ws1006FallbackPendingRef = useRef(true);
 
   const clearCoSpeechTimers = useCallback((): void => {
     coSpeechTimersRef.current.forEach(clearTimeout);
@@ -579,6 +479,7 @@ export function useAgentAgent({
 
   const scheduleCoSpeechForDialogue = useCallback((dialogue: string, durationMs: number): void => {
     if (typeof window === 'undefined' || !mountedRef.current) return;
+    if (automaticGestureInjectorsDisabled()) return;
     const trimmed = dialogue.trim();
     if (!trimmed) return;
     clearCoSpeechTimers();
@@ -609,19 +510,11 @@ export function useAgentAgent({
     });
   }, [clearCoSpeechTimers]);
 
-  // ── Audio (unified: server MP3 + client /api/tts-with-timing; cancel browser speechSynthesis on interrupt) ──
+  // ── Audio: client `/api/tts-with-timing` via AgentDirector.speakWithTTS; cancel speechSynthesis on interrupt ──
 
   const stopAllAudio = useCallback((): void => {
     clearCoSpeechTimers();
     clearPerformanceTimers();
-    visemeFetchAbortRef.current?.abort();
-    visemeFetchAbortRef.current = null;
-    const a = currentAudioRef.current;
-    if (a) {
-      try { a.pause(); a.currentTime = 0; } catch { /* ignore */ }
-      currentAudioRef.current = null;
-    }
-    serverTtsPlaybackActive = false;
     stopTTSGlobally();
     if (typeof window !== 'undefined' && window.speechSynthesis) {
       try {
@@ -643,8 +536,6 @@ export function useAgentAgent({
 
     clearCoSpeechTimers();
     clearPerformanceTimers();
-    visemeFetchAbortRef.current?.abort();
-    visemeFetchAbortRef.current = null;
 
     unifiedGestureEngine.cancelAll();
     unifiedGestureEngine.cancelScheduledBehavior();
@@ -685,43 +576,6 @@ export function useAgentAgent({
       /* ignore */
     }
 
-    const a = currentAudioRef.current;
-    if (a) {
-      const v0 = typeof a.volume === 'number' && Number.isFinite(a.volume) ? a.volume : 1;
-      const fadeMs = 130;
-      const t0 = performance.now();
-      const step = (): void => {
-        if (currentAudioRef.current !== a) return;
-        const u = Math.min(1, (performance.now() - t0) / fadeMs);
-        try {
-          a.volume = Math.max(0, v0 * (1 - u));
-        } catch {
-          /* ignore */
-        }
-        if (u < 1) {
-          requestAnimationFrame(step);
-        } else {
-          try {
-            a.pause();
-            a.currentTime = 0;
-          } catch {
-            /* ignore */
-          }
-          const src = a.src;
-          if (src?.startsWith('blob:')) {
-            try {
-              URL.revokeObjectURL(src);
-            } catch {
-              /* ignore */
-            }
-          }
-          currentAudioRef.current = null;
-          serverTtsPlaybackActive = false;
-        }
-      };
-      requestAnimationFrame(step);
-    }
-
     try {
       if (window.speechSynthesis) window.speechSynthesis.cancel();
     } catch {
@@ -734,207 +588,12 @@ export function useAgentAgent({
   }, [clearCoSpeechTimers, clearPerformanceTimers]);
 
   const onVadSpeechStart = useCallback((): void => {
-    vadSpeechStartMsRef.current = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    vadSpeechStartMsRef.current = masterClockNowMs();
     runAvatarBargeIn();
     useBrainStore.getState().setUserSpeaking(true);
     if (typeof window === 'undefined') return;
     window.dispatchEvent(new CustomEvent('cogni:user:speaking'));
   }, [runAvatarBargeIn]);
-
-  /**
-   * Play server TTS from WS `speech` frames. Azure returns **MP3** (`audio_format: mp3`);
-   * wrapping MP3 bytes as PCM WAV corrupts playback and can sound like a “second voice”
-   * or trigger Web Speech fallback mid-session.
-   */
-  const playServerTTSAudio = useCallback(async (
-    base64: string,
-    sampleRate: number,
-    fallbackText: string,
-    opts?: {
-      format?: string;
-      visemeCues?: unknown;
-      coSpeechDialogue?: string;
-      /** When true, never schedule co-speech gestures (structured `performance` owns the turn). */
-      coSpeechDisabled?: boolean;
-      /**
-       * يُستدعى مرة واحدة عند بدء التشغيل الفعلي (onplay) — لمزامنة تعبير الوجه و performance مع الصوت.
-       */
-      onAudibleAnchor?: () => void;
-    },
-  ): Promise<void> => {
-    stopAllAudio();
-    try {
-      const raw = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-      const fmt = (opts?.format ?? 'pcm').toString().toLowerCase();
-      const looksLikeWav =
-        raw.length >= 12 &&
-        raw[0] === 0x52 &&
-        raw[1] === 0x49 &&
-        raw[2] === 0x46 &&
-        raw[3] === 0x46;
-
-      let blob: Blob;
-      if (fmt === 'mp3' || fmt === 'audio/mpeg' || fmt === 'mpeg') {
-        blob = new Blob([raw], { type: 'audio/mpeg' });
-      } else if (fmt === 'wav' || looksLikeWav) {
-        blob = new Blob([raw], { type: 'audio/wav' });
-      } else {
-        blob = pcmToWavBlob(raw, sampleRate);
-      }
-
-      const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      // crossOrigin MUST be set before src is used for MediaElementSource (wireAnalyser)
-      audio.crossOrigin = 'anonymous';
-      currentAudioRef.current = audio;
-
-      const serverCues = normalizeAgentWsVisemeCues(opts?.visemeCues);
-      const visCtrl = new AbortController();
-      visemeFetchAbortRef.current = visCtrl;
-      const visemeCuePromise = serverCues
-        ? Promise.resolve(serverCues)
-        : fetchVisemeCuesFromTtsApi(fallbackText, visCtrl.signal);
-
-      const coSpeechDisabled = !!opts?.coSpeechDisabled;
-      const coDialogue = opts?.coSpeechDialogue?.trim();
-      let coSpeechScheduled = false;
-      const tryScheduleCoSpeech = (): void => {
-        if (coSpeechDisabled || !coDialogue || coSpeechScheduled || !mountedRef.current) return;
-        // Prefer actual audio duration (most accurate); fall back to viseme timeline end, then estimate
-        const fromAudio  = audio.duration > 0 && Number.isFinite(audio.duration) ? audio.duration * 1000 : 0;
-        const fromVis    = durationMsFromVisemeCues(serverCues); // now correctly converts seconds → ms
-        const fromEst    = estimateDialogueDurationMs(fallbackText);
-        // Take the best available source; estimate is a last resort floor
-        const eff = fromAudio > 0 ? fromAudio : fromVis > 0 ? fromVis : Math.max(fromEst, 4000);
-        scheduleCoSpeechForDialogue(coDialogue, eff);
-        coSpeechScheduled = true;
-      };
-      audio.addEventListener('loadedmetadata', tryScheduleCoSpeech, { once: true });
-      // Fallback if loadedmetadata fires before we register (rare in Safari)
-      window.setTimeout(() => {
-        if (coDialogue && !coSpeechScheduled && mountedRef.current) tryScheduleCoSpeech();
-      }, 350);
-
-      let playbackStarted = false;
-      let audibleStartFired = false;
-
-      audio.onplay = () => {
-        playbackStarted = true;
-        serverTtsPlaybackActive = true;
-        if (!audibleStartFired) {
-          audibleStartFired = true;
-          try {
-            opts?.onAudibleAnchor?.();
-          } catch (cbErr) {
-            console.warn('[useAgentAgent] onAudibleAnchor error:', cbErr);
-          }
-        }
-        useBrainStore.getState().setTalking(true);
-        if (typeof window !== 'undefined') {
-          const hintLine = (coDialogue && coDialogue.length > 0 ? coDialogue : fallbackText).trim();
-          setSpeechIntentHintsFromText(hintLine);
-          // ORDER IS CRITICAL (Phase 2 fix):
-          // 0. Pre-speech eye anticipation (before audio element / lip-sync)
-          window.dispatchEvent(new CustomEvent('cogni:pre_speech', { detail: { source: 'ws_tts' } }));
-          // 1. Wire analyser ref FIRST (audio:element)
-          window.dispatchEvent(new CustomEvent('avatar:audio:element', { detail: { audio } }));
-          // 2. If server cues are already available (from WS frame), dispatch timeline
-          //    IMMEDIATELY — BEFORE speak:start so LipSyncManager has cues from frame 1.
-          //    This eliminates the 300ms+ blind window where the mouth was frozen.
-          if (serverCues?.length) {
-            window.dispatchEvent(
-              new CustomEvent('avatar:visemes:timeline', { detail: { cues: serverCues } }),
-            );
-            console.log('[useAgentAgent] Lip-sync timeline bound (immediate, from WS) —', serverCues.length, 'cues');
-          }
-          // 3. Now dispatch speak:start (isTalkingRef = true, LipSyncManager starts)
-          window.dispatchEvent(new CustomEvent('avatar:speak:start'));
-        }
-        console.log('[useAgentAgent] Server TTS play:start', { format: fmt || 'pcm-wrap', blobType: blob.type });
-        // 4. If no server cues, fall back to async fetch (original path — always runs for non-WS cues)
-        if (!serverCues?.length) {
-          void visemeCuePromise.then((cues) => {
-            if (!mountedRef.current || !cues?.length || typeof window === 'undefined') return;
-            window.dispatchEvent(
-              new CustomEvent('avatar:visemes:timeline', { detail: { cues } }),
-            );
-            console.log('[useAgentAgent] Lip-sync timeline bound (async fallback, from /api/tts-with-timing) —', cues.length, 'cues');
-          });
-        }
-      };
-      audio.onended = () => {
-        clearCoSpeechTimers();
-        URL.revokeObjectURL(url);
-        currentAudioRef.current = null;
-        serverTtsPlaybackActive = false;
-        useBrainStore.getState().setTalking(false);
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('avatar:visemes:clear'));
-          resetSpeechIntentHints();
-          window.dispatchEvent(new CustomEvent('avatar:speak:end'));
-        }
-        console.log('[useAgentAgent] Server TTS play:end');
-      };
-      audio.onerror = () => {
-        clearCoSpeechTimers();
-        URL.revokeObjectURL(url);
-        currentAudioRef.current = null;
-        serverTtsPlaybackActive = false;
-        useBrainStore.getState().setTalking(false);
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('avatar:visemes:clear'));
-          resetSpeechIntentHints();
-          window.dispatchEvent(new CustomEvent('avatar:speak:end'));
-        }
-        if (!audibleStartFired) {
-          audibleStartFired = true;
-          try {
-            opts?.onAudibleAnchor?.();
-          } catch {
-            /* ignore */
-          }
-        }
-        console.warn(
-          '[useAgentAgent] Server TTS decode/play error — no Web Speech fallback (unified pipeline)',
-          { playbackStarted },
-        );
-      };
-
-      await resumeSharedAudioContext();
-      const playPromise = audio.play();
-      if (playPromise !== undefined) {
-        try {
-          await playPromise;
-        } catch (playErr: unknown) {
-          const err = playErr as Error;
-          if (err.name === 'NotAllowedError') {
-            console.warn('[useAgentAgent] 🔇 Autoplay blocked — starting muted. User must unmute.');
-            audio.muted = true;
-            const mutePlayPromise = audio.play();
-            if (mutePlayPromise !== undefined) {
-              try {
-                await mutePlayPromise;
-                console.log('[useAgentAgent] 🔊 Muted playback started — UI should show Unmute button');
-              } catch (muteErr) {
-                console.warn('[useAgentAgent] Muted playback also failed:', muteErr);
-                throw muteErr;
-              }
-            }
-            if (typeof window !== 'undefined') {
-              window.dispatchEvent(new CustomEvent('cogni:autoplay-blocked', {
-                detail: { audio, text: fallbackText },
-              }));
-            }
-          } else {
-            throw err;
-          }
-        }
-      }
-    } catch (err) {
-      serverTtsPlaybackActive = false;
-      console.warn('[useAgentAgent] playServerTTSAudio failed (no Web Speech fallback):', err);
-    }
-  }, [stopAllAudio, lang, scheduleCoSpeechForDialogue, clearCoSpeechTimers]);
 
   // ── WebSocket frame handler ──────────────────────────────────────────────
 
@@ -1120,7 +779,11 @@ export function useAgentAgent({
             replyText: transcript,
           });
           // Extra: if hidden weakness detected, trigger concerned look
-          if (intuitionReading.hiddenWeakness && typeof window !== 'undefined') {
+          if (
+            intuitionReading.hiddenWeakness &&
+            typeof window !== 'undefined' &&
+            !automaticGestureInjectorsDisabled()
+          ) {
             setTimeout(() => {
               window.dispatchEvent(new CustomEvent('avatar:micro:gesture', { detail: { kind: 'nod', durationMs: 400 } }));
             }, 800);
@@ -1142,7 +805,7 @@ export function useAgentAgent({
 
           // 2. Strategy gesture: unifiedGestureEngine.play above
           // 3. Intent gesture hint
-          if (gestureHint) {
+          if (gestureHint && !automaticGestureInjectorsDisabled()) {
             setTimeout(() => {
               void unifiedGestureEngine.play(gestureHint, {
                 priority: PRIORITY.NORMAL,
@@ -1154,11 +817,13 @@ export function useAgentAgent({
 
           // 4. Acknowledging nod — delayed further to sequence correctly
           //    Uses avatar:nod (now wired in VRMSkeletonManager) for micro nod
-          setTimeout(() => {
-            window.dispatchEvent(new CustomEvent('avatar:nod', {
-              detail: { intensity: 0.12, duration: 0.5 },
-            }));
-          }, 200);
+          if (!automaticGestureInjectorsDisabled()) {
+            setTimeout(() => {
+              window.dispatchEvent(new CustomEvent('avatar:nod', {
+                detail: { intensity: 0.12, duration: 0.5 },
+              }));
+            }, 200);
+          }
 
           window.dispatchEvent(new CustomEvent('agent:user-activity'));
         }
@@ -1213,11 +878,8 @@ export function useAgentAgent({
         const action     = norm.actionRaw;
 
         const tsNow = Date.now();
-        const hasServerAudio = type === 'speech' && !!(frame as { audio_base64?: string }).audio_base64;
-        const isClientTtsFallback = !hasServerAudio;
         if (
-          isClientTtsFallback
-          && dialogue === lastTtsFallbackTextRef.current
+          dialogue === lastTtsFallbackTextRef.current
           && tsNow - lastTtsFallbackAtRef.current < 10_000
         ) {
           console.warn('[useAgentAgent] Skipping duplicate TTS fallback (same text within 10s — likely quota loop)');
@@ -1263,9 +925,7 @@ export function useAgentAgent({
 
         const emotionLabel = norm.emotionLabel;
 
-        // Canvas emotion: مع صوت الخادم نؤجّل حتى onplay (تزامن وجه/صوت). بدون صوت خادم نُرسِل فوراً.
-        const deferCanvasEmotionUntilPlay = hasServerAudio;
-        if (typeof window !== 'undefined' && !deferCanvasEmotionUntilPlay) {
+        if (typeof window !== 'undefined') {
           dispatchAvatar('avatar:emotion', { emotion: rawEmotion });
         }
         useBrainStore.getState().applyStreamingEmbodiment(emotionLabel);
@@ -1312,7 +972,7 @@ export function useAgentAgent({
           emotion: emotionLabel,
         });
 
-        // 3b. Performance word-sync — مع صوت الخادم: الجدولة داخل onAudibleAnchor. وإلا: فوراً.
+        // 3b. Performance word-sync — فوراً (تزامن مع تقدير مدة الحوار؛ الصوت من speakWithTTS).
         clearPerformanceTimers();
         const wcRawForPerf = (frame as { word_cues?: unknown }).word_cues;
         const wcForPerf = Array.isArray(wcRawForPerf)
@@ -1322,12 +982,12 @@ export function useAgentAgent({
             )
           : undefined;
 
-        // 3c. Co-speech: server audio schedules on loadedmetadata; local TTS uses estimate
+        // 3c. Co-speech يُقدَّر من نص الحوار (client TTS).
         clearCoSpeechTimers();
 
-        // 4. Audio output
-        //    - PCM audio from backend → play directly (preferred)
-        //    - tts_unavailable or no audio → fall back to AgentDirector TTS
+        // 4. Audio — مصدر واحد: AgentDirector.scheduleTTS → speakWithTTS (`/api/tts-with-timing`).
+        //    لا تُستدعِ speakWithTTS هنا (ازدواجية). audio_base64 من الـWS يُتجاهل؛ الليب يتبع HTMLAudioElement.currentTime.
+        //    NEXT_PUBLIC_USE_AGENT_MESSAGE_AZURE_TTS → مسار Canvas Azure SDK بدلاً من speakWithTTS.
         const contagion = frame.contagion as
           | { emotion?: string; intensity?: number; note?: string }
           | undefined;
@@ -1335,64 +995,33 @@ export function useAgentAgent({
           window.dispatchEvent(new CustomEvent('cogni:student_contagion', { detail: contagion }));
         }
 
-        if (type === 'speech' && frame.audio_base64) {
-          lastTtsFallbackTextRef.current = '';
-          const sampleRate = (frame.sample_rate ?? 24000) as number;
-          const audioFmt = (frame.audio_format ?? frame.audioFormat ?? 'pcm') as string;
-          const visRaw = frame.viseme_cues ?? frame.visemeCues;
-          void playServerTTSAudio(frame.audio_base64 as string, sampleRate, dialogue, {
-            format: audioFmt,
-            visemeCues: visRaw,
-            coSpeechDisabled: structuredPerformanceTurn,
-            coSpeechDialogue: structuredPerformanceTurn ? undefined : dialogue,
-            onAudibleAnchor: () => {
-              if (!mountedRef.current || typeof window === 'undefined') return;
-              dispatchAvatar('avatar:emotion', { emotion: rawEmotion });
-              if (!perfMerged.length) return;
-              clearPerformanceTimers();
-              const estDialogue = estimateDialogueDurationMs(dialogue);
-              performanceTimersRef.current = schedulePerformanceCues(
-                dialogue,
-                perfMerged,
-                wcForPerf,
-                estDialogue,
-                (cue) => {
-                  if (!mountedRef.current) return;
-                  window.dispatchEvent(new CustomEvent('avatar:performance', { detail: cue }));
-                },
-                { anchorMs: 0 },
-              );
-            },
-          });
-        } else {
-          if (type === 'tts_unavailable' && typeof window !== 'undefined') {
-            window.dispatchEvent(
-              new CustomEvent('cogni:tts-secondary-voice', {
-                detail: { message: 'Using secondary voice engine...', source: 'ws' },
-              }),
-            );
-          }
-          lastTtsFallbackTextRef.current = dialogue;
-          lastTtsFallbackAtRef.current = tsNow;
-          if (perfMerged.length && typeof window !== 'undefined') {
-            const estDialogue = estimateDialogueDurationMs(dialogue);
-            performanceTimersRef.current = schedulePerformanceCues(
-              dialogue,
-              perfMerged,
-              wcForPerf,
-              estDialogue,
-              (cue) => {
-                if (!mountedRef.current) return;
-                window.dispatchEvent(new CustomEvent('avatar:performance', { detail: cue }));
-              },
-              { anchorMs: 0 },
-            );
-          }
-          if (!perfMerged.length) {
-            scheduleCoSpeechForDialogue(dialogue, estimateDialogueDurationMs(dialogue));
-          }
-          agentDirector.scheduleTTS(dialogue, emotionLabel);
+        if (type === 'tts_unavailable' && typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('cogni:tts-secondary-voice', {
+              detail: { message: 'Using secondary voice engine...', source: 'ws' },
+            }),
+          );
         }
+        lastTtsFallbackTextRef.current = dialogue;
+        lastTtsFallbackAtRef.current = tsNow;
+        if (perfMerged.length && typeof window !== 'undefined') {
+          const estDialogue = estimateDialogueDurationMs(dialogue);
+          performanceTimersRef.current = schedulePerformanceCues(
+            dialogue,
+            perfMerged,
+            wcForPerf,
+            estDialogue,
+            (cue) => {
+              if (!mountedRef.current) return;
+              window.dispatchEvent(new CustomEvent('avatar:performance', { detail: cue }));
+            },
+            { anchorMs: 0 },
+          );
+        }
+        if (!perfMerged.length) {
+          scheduleCoSpeechForDialogue(dialogue, estimateDialogueDurationMs(dialogue));
+        }
+        agentDirector.scheduleTTS(dialogue, emotionLabel);
 
         console.log(
           `[useAgentAgent] Speech frame — emotion="${rawEmotion}" len=${dialogue.length}`,
@@ -1497,7 +1126,7 @@ export function useAgentAgent({
       default:
         console.log('[useAgentAgent] Unhandled frame type:', type);
     }
-  }, [lang, playServerTTSAudio, stopAllAudio, clearCoSpeechTimers, clearPerformanceTimers, scheduleCoSpeechForDialogue]);
+  }, [lang, stopAllAudio, clearCoSpeechTimers, clearPerformanceTimers, scheduleCoSpeechForDialogue]);
 
   // ── WebSocket connection ───────────────────────────────────────────────────
 
@@ -1510,21 +1139,104 @@ export function useAgentAgent({
     }
     if (typeof window === 'undefined') return;
 
-    const url = wsUrl;
-    let accessToken: string | null = null;
-    try {
-      accessToken = localStorage.getItem('cogni_access_token');
-    } catch {
-      /* ignore */
+    if (wsReconnectStoppedRef.current) {
+      console.warn('[WS] Reconnect disabled — fix auth or refresh after repeated failures');
+      return;
     }
 
+    const allowGuestWs = wsGuestModeEnabled();
+
+    /** Single read — avoids duplicate JWT parse + duplicate empty-token logs from getAccessToken(). */
+    const trimmed = getAccessToken();
+
+    if (!allowGuestWs) {
+      if (!trimmed) {
+        if (!hasStoredAccessToken()) {
+          console.error(
+            '[useAgentAgent] ❌ No JWT in localStorage (cogni_access_token / token) — aborting WebSocket. ' +
+              'Server treats this as guest → tts_unavailable. Sign in first.',
+          );
+          setError('WebSocket: sign in required (no JWT in localStorage)');
+        } else {
+          console.error(
+            '[useAgentAgent] ❌ JWT in localStorage failed validation (expired or malformed) — aborting WebSocket. Sign in again.',
+          );
+          setError('WebSocket: JWT invalid or expired — sign in again');
+        }
+        return;
+      }
+    }
+
+    /** Base64url-safe single token — whitespace breaks Sec-WebSocket-Protocol on some stacks. */
+    const tokenForWs = sanitizeTokenForWsHandshake(trimmed ?? '');
+
+    const forcePlainHandshake = wsSkipSubprotocolOnceRef.current;
+    if (forcePlainHandshake) {
+      wsSkipSubprotocolOnceRef.current = false;
+    }
+
+    const useJwtSubprotocol =
+      tokenForWs.length > 0 &&
+      !shouldAvoidJwtSubprotocolInHandshake(tokenForWs) &&
+      !forcePlainHandshake;
+
+    if (!allowGuestWs && !tokenForWs) {
+      console.error('[WS] ❌ No token after normalize');
+      return;
+    }
+
+    if (allowGuestWs && !useJwtSubprotocol) {
+      console.warn(
+        '[useAgentAgent] Guest WebSocket mode (no JWT). Set NEXT_PUBLIC_COGNI_WS_ALLOW_ANONYMOUS=false when using real auth.',
+      );
+    }
+
+    if (process.env.NODE_ENV === 'development' && tokenForWs && !useJwtSubprotocol && !forcePlainHandshake) {
+      // eslint-disable-next-line no-console
+      console.log(
+        '[WS] Using plain WebSocket + auth frame (opaque or non-JWT token — not sent in Sec-WebSocket-Protocol)',
+      );
+    }
+
+    if (process.env.NODE_ENV === 'development' && useJwtSubprotocol) {
+      // eslint-disable-next-line no-console
+      console.log('[AUTH] token preview:', tokenForWs.slice(0, 12));
+    }
+
+    const url = ipv4LoopbackWsUrl(wsUrl);
     console.log(`[useAgentAgent] Connecting → ${url}`);
-    // Phase 3: JWT must not appear in the URL. Optional subprotocol carries token (browser);
-    // server also accepts { type: "auth", token } as the first text frame after connect.
-    const ws =
-      accessToken && typeof WebSocket !== 'undefined'
-        ? new WebSocket(url, ['cogni-auth-v1', accessToken])
-        : new WebSocket(url);
+    // Backend `agent_ws`: JWT via Sec-WebSocket-Protocol (`cogni-auth-v1`, token) and/or first text frame
+    // `{ type: "auth", token }`. Query `?token=` is explicitly rejected (close 1008) — do not use URL params.
+    if (typeof WebSocket === 'undefined') return;
+
+    const protocolsExact: string[] = useJwtSubprotocol ? ['cogni-auth-v1', tokenForWs] : [];
+    // eslint-disable-next-line no-console
+    console.log(
+      '[WS] handshake subprotocols (exact count):',
+      useJwtSubprotocol
+        ? JSON.stringify(['cogni-auth-v1', `${tokenForWs.slice(0, 12)}…len=${tokenForWs.length}`])
+        : '[] (plain — auth via first frame if token present)',
+    );
+
+    let ws: WebSocket;
+    try {
+      if (useJwtSubprotocol) {
+        // eslint-disable-next-line no-console
+        console.log('[Network] 🔌 Opening WS with JWT Auth');
+        // eslint-disable-next-line no-console
+        console.log('[Network] (subprotocol: cogni-auth-v1 + JWT — not HTTP Authorization header)');
+        ws = new WebSocket(url, protocolsExact);
+      } else {
+        // eslint-disable-next-line no-console
+        console.log('[Network] 🔌 Opening WS without subprotocol (guest / opaque token / 1006 fallback)');
+        ws = new WebSocket(url);
+      }
+    } catch (e) {
+      console.error('[WS] new WebSocket threw (invalid URL or protocol list):', e);
+      return;
+    }
+
+    lastConnectUsedJwtSubprotocolRef.current = useJwtSubprotocol;
     wsRef.current = ws;
 
     // Connection-open watchdog: if the server never ACKs the WS upgrade within 8s,
@@ -1543,33 +1255,22 @@ export function useAgentAgent({
         connectTimeoutRef.current = null;
       }
       if (!mountedRef.current) return;
+      ws1006StreakRef.current = 0;
+      wsReconnectStoppedRef.current = false;
+      ws1006FallbackPendingRef.current = true;
       setIsConnected(true);
       setError(null);
-      console.log('[useAgentAgent] ✅ WS connected');
-      // Always send auth as the first text frame when we have a token (before persona_init).
-      // Some proxies strip the second Sec-WebSocket-Protocol value; the server only treats
-      // the first frame as handshake auth when JWT from the header was missing/invalid.
-      // Backend ignores duplicate auth after subprotocol auth (idempotent).
-      try {
-        if (accessToken) {
-          ws.send(
-            JSON.stringify({ type: 'auth', token: accessToken, v: 1.1 }),
-          );
+      // eslint-disable-next-line no-console
+      console.log('[WS] ✅ CONNECTED');
+      if (tokenForWs) {
+        try {
+          ws.send(JSON.stringify({ type: 'auth', token: tokenForWs, v: 1.1 }));
           console.log('[useAgentAgent] ✅ Auth frame sent (first text frame, v=1.1)');
-        } else if (
-          typeof process !== 'undefined' &&
-          process.env.NEXT_PUBLIC_COGNI_WS_GUEST_OK === 'true'
-        ) {
-          console.debug(
-            '[useAgentAgent] No JWT in localStorage — guest WS (NEXT_PUBLIC_COGNI_WS_GUEST_OK=true; API needs COGNI_WS_ALLOW_ANONYMOUS=true).',
-          );
-        } else {
-          console.warn(
-            '[useAgentAgent] No cogni_access_token — /ws/agent may close with auth_required. Log in, set COGNI_WS_ALLOW_ANONYMOUS=true on the API, or set NEXT_PUBLIC_COGNI_WS_GUEST_OK=true in the frontend env to silence this in dev.',
-          );
+        } catch (e) {
+          console.warn('[useAgentAgent] auth frame send failed:', e);
         }
-      } catch (e) {
-        console.warn('[useAgentAgent] auth frame send failed:', e);
+      } else {
+        console.log('[useAgentAgent] Skipping auth frame (guest / anonymous session)');
       }
       // Step 1 digital-human: announce Cogni persona so the backend can lock LLM identity per session
       try {
@@ -1665,15 +1366,58 @@ export function useAgentAgent({
       if (!mountedRef.current) return;
       setIsConnected(false);
 
-      const reason = (event.reason || '').trim() || '(none)';
-      console.warn(
-        `[useAgentAgent] WS closed — code=${event.code} reason="${reason}" clean=${event.wasClean}`,
-      );
+      const reason = (event.reason || '').trim() || '(no reason)';
+      console.warn('[WS] ❌ CLOSED', { code: event.code, reason, clean: event.wasClean });
+
+      if (event.code === 1006) {
+        ws1006StreakRef.current += 1;
+        if (ws1006StreakRef.current >= 3) {
+          wsReconnectStoppedRef.current = true;
+          console.warn(
+            '[WS] Repeated abnormal close (1006) — stopping reconnect (check JWT / backend / proxy)',
+          );
+        }
+      } else {
+        ws1006StreakRef.current = 0;
+      }
+
+      // One-shot: 1006 after JWT subprotocol often means proxy/stack rejection — try plain WS + auth frame.
+      if (
+        event.code === 1006 &&
+        lastConnectUsedJwtSubprotocolRef.current &&
+        ws1006FallbackPendingRef.current &&
+        !allowGuestWs &&
+        autoReconnect &&
+        mountedRef.current &&
+        !wsReconnectStoppedRef.current
+      ) {
+        ws1006FallbackPendingRef.current = false;
+        wsSkipSubprotocolOnceRef.current = true;
+        console.warn(
+          '[WS] 1006 after Sec-WebSocket-Protocol JWT — retrying once without subprotocol (auth via first frame)',
+        );
+        if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+        reconnectTimer.current = setTimeout(() => connect(), 150);
+        return;
+      }
 
       if (!autoReconnect || !mountedRef.current) return;
 
       if (event.wasClean && event.code === 1000) {
         console.log('[useAgentAgent] Clean closure (1000), not scheduling reconnect');
+        return;
+      }
+
+      if (wsReconnectStoppedRef.current) return;
+
+      let hasToken = false;
+      try {
+        hasToken = !!getAccessToken();
+      } catch {
+        hasToken = false;
+      }
+      if (!allowGuestWs && !hasToken) {
+        console.error('[WS] ❌ Missing JWT');
         return;
       }
 
@@ -1683,6 +1427,7 @@ export function useAgentAgent({
     };
 
     ws.onerror = (event: Event) => {
+      // Browser Event has no useful enumerable fields — logging it shows "{}" in the console.
       const rs = ws.readyState;
       const stateStr =
         rs === WebSocket.CONNECTING
@@ -1694,24 +1439,38 @@ export function useAgentAgent({
               : rs === WebSocket.CLOSED
                 ? 'CLOSED'
                 : String(rs);
+      // Single string — some devtools render a second `console.error` object as literal "{}".
       console.error(
+        `[WS] ❌ ERROR type=${event.type} readyState=${stateStr} url=${url}`,
+      );
+      setError('WebSocket connection error');
+      if (rs === WebSocket.CONNECTING) {
+        console.warn('[WS] error (CONNECTING)', event.type, '— see onclose for code');
+        console.warn(
+          '[useAgentAgent] WS error during CONNECTING — url=',
+          url,
+          '(onclose will report code/reason)',
+        );
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      if (rs === WebSocket.CLOSED || rs === WebSocket.CLOSING) {
+        return;
+      }
+      console.warn('[WS] error', event.type, stateStr);
+      console.warn(
         '[useAgentAgent] WS error:',
         event.type,
         'readyState=',
         stateStr,
         'url=',
         url,
-        '(browser Event has no message; see onclose for code/reason)',
+        '(see onclose for code/reason)',
       );
-      setError('WebSocket connection error');
-      if (ws.readyState === WebSocket.CONNECTING) {
-        console.warn('[useAgentAgent] Error during CONNECTING — closing so onclose can run');
-        try {
-          ws.close();
-        } catch {
-          /* ignore */
-        }
-      }
     };
   }, [wsUrl, autoReconnect, handleFrame]);
 
@@ -1722,6 +1481,74 @@ export function useAgentAgent({
       ws.send(JSON.stringify({ v: 1.1, ...payload }));
     } catch {
       /* ignore */
+    }
+  }, []);
+
+  /** Poll until WebSocket is OPEN or closed / timeout (user may speak before handshake finishes). */
+  const waitForWsReady = useCallback(async (maxMs: number): Promise<boolean> => {
+    const start = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    while (true) {
+      const w = wsRef.current;
+      if (w?.readyState === WebSocket.OPEN) return true;
+      if (w == null || w.readyState === WebSocket.CLOSED) return false;
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      if (now - start >= maxMs) {
+        return wsRef.current != null && wsRef.current.readyState === WebSocket.OPEN;
+      }
+      await new Promise<void>((r) => setTimeout(r, 50));
+    }
+  }, []);
+
+  /** Encode + send one mic segment to /ws/agent (shared by VAD and pending-audio flush). */
+  const sendAudioBlobNow = useCallback(async (blob: Blob): Promise<void> => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    setIsProcessing(true);
+    try {
+      console.log(
+        `[Agent] Sending audio frame, size: ${blob.size} type=${blob.type || 'unknown'}`,
+      );
+      const audioBase64 = await audioInputToBase64(blob);
+      const bsAudio = useBrainStore.getState();
+      const emotionalCtx = mergeCompanionshipIntoEmotionalContext(
+        mergeOpinionIntoEmotionalContext(
+          emotionalMemoryManager.getContextSummary(),
+          {
+            userText: '',
+            comprehensionConfidence: bsAudio.comprehensionConfidence,
+            isAudioTurn: true,
+          },
+        ),
+      );
+      const fsAudio = getCogniFocusSubject();
+      const rawCoach = readAssessmentCoaching();
+      const coachingOut = rawCoach ? trimAssessmentCoachingForWs(rawCoach) : null;
+      const payload = {
+        type: 'audio',
+        data: audioBase64,
+        v: 1.1,
+        ...(blob.type?.trim() ? { mime_type: blob.type.trim().slice(0, 128) } : {}),
+        /** Canonical key for LLM — same text as persona_init / tutor context */
+        system_prompt: COGNI_PERSONA.systemPrompt,
+        persona_system_prompt: COGNI_PERSONA.systemPrompt,
+        persona: { id: COGNI_PERSONA.id, platform: COGNI_PERSONA.platformName },
+        ...(emotionalCtx.trim() ? { emotional_context: emotionalCtx } : {}),
+        ...(fsAudio ? { focus_subject: fsAudio } : {}),
+        ...(coachingOut ? { assessment_coaching: coachingOut } : {}),
+      };
+      ws.send(JSON.stringify(payload));
+      console.log(
+        '[Agent] Audio WS sent — base64 length:',
+        audioBase64.length,
+        'chars | payload keys:',
+        Object.keys(payload).join(','),
+      );
+    } catch (e) {
+      setIsProcessing(false);
+      setError('Failed to encode microphone audio');
+      console.error('[useAgentAgent] Audio encoding error:', e);
     }
   }, []);
 
@@ -1750,56 +1577,39 @@ export function useAgentAgent({
         );
         runAvatarBargeIn();
       }
-      const ws = wsRef.current;
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        console.warn('[useAgentAgent] WS not ready — dropping audio blob');
+
+      await waitForWsReady(12_000);
+
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        await sendAudioBlobNow(blob);
         return;
       }
-      setIsProcessing(true);
-      try {
-        console.log(`[Agent] Sending audio frame, size: ${blob.size} type=${blob.type || 'unknown'}`);
-        const audioBase64 = await audioInputToBase64(blob);
-        const bsAudio = useBrainStore.getState();
-        const emotionalCtx = mergeCompanionshipIntoEmotionalContext(
-          mergeOpinionIntoEmotionalContext(
-            emotionalMemoryManager.getContextSummary(),
-            {
-              userText: '',
-              comprehensionConfidence: bsAudio.comprehensionConfidence,
-              isAudioTurn: true,
-            },
-          ),
-        );
-        const fsAudio = getCogniFocusSubject();
-        const rawCoach = readAssessmentCoaching();
-        const coachingOut = rawCoach ? trimAssessmentCoachingForWs(rawCoach) : null;
-        const payload = {
-          type: 'audio',
-          data: audioBase64,
-          v: 1.1,
-          ...(blob.type?.trim() ? { mime_type: blob.type.trim().slice(0, 128) } : {}),
-          /** Canonical key for LLM — same text as persona_init / tutor context */
-          system_prompt: COGNI_PERSONA.systemPrompt,
-          persona_system_prompt: COGNI_PERSONA.systemPrompt,
-          persona: { id: COGNI_PERSONA.id, platform: COGNI_PERSONA.platformName },
-          ...(emotionalCtx.trim() ? { emotional_context: emotionalCtx } : {}),
-          ...(fsAudio ? { focus_subject: fsAudio } : {}),
-          ...(coachingOut ? { assessment_coaching: coachingOut } : {}),
-        };
-        ws.send(JSON.stringify(payload));
-        console.log(
-          '[Agent] Audio WS sent — base64 length:',
-          audioBase64.length,
-          'chars | payload keys:',
-          Object.keys(payload).join(','),
-        );
-      } catch (e) {
-        setIsProcessing(false);
-        setError('Failed to encode microphone audio');
-        console.error('[useAgentAgent] Audio encoding error:', e);
+
+      if (pendingAudioBlobsRef.current.length >= MAX_PENDING_AUDIO_BLOBS) {
+        pendingAudioBlobsRef.current.shift();
       }
+      pendingAudioBlobsRef.current.push(blob);
+      console.warn(
+        '[useAgentAgent] WS not ready — queueing audio blob (',
+        pendingAudioBlobsRef.current.length,
+        'in queue); will send after connection',
+      );
     },
   });
+
+  useLayoutEffect(() => {
+    if (!isConnected) return;
+    const blobs = pendingAudioBlobsRef.current.splice(0);
+    if (blobs.length === 0) return;
+    console.log(
+      '[useAgentAgent] Flushing',
+      blobs.length,
+      'queued audio blob(s) after WebSocket ready',
+    );
+    for (const b of blobs) {
+      void sendAudioBlobNow(b);
+    }
+  }, [isConnected, sendAudioBlobNow]);
 
   isProcessingRef.current = isProcessing;
   isRecordingRef.current = isRecording;
@@ -1889,6 +1699,19 @@ export function useAgentAgent({
     }
 
     const trimmed = (text || '').trim();
+
+    if (!opts?.skipAssignmentRag && !opts?.practice && trimmed.length > 0) {
+      void (async () => {
+        const ragHandled = await handleUserMessage(trimmed);
+        if (ragHandled) {
+          setIsProcessing(false);
+          return;
+        }
+        sendText(trimmed, { ...opts, skipAssignmentRag: true });
+      })();
+      return;
+    }
+
     /** لا تُسجَّل في BrainStore كرسالة مستخدم — تبقى تعليماً داخلياً للـ LLM فقط */
     const isInternalProactive = INTERNAL_SYSTEM_EVENT_PREFIX.test(trimmed);
     if (!isInternalProactive) {
@@ -2233,6 +2056,10 @@ export function useAgentAgent({
 
   useEffect(() => {
     const onAuthChanged = (): void => {
+      ws1006StreakRef.current = 0;
+      wsReconnectStoppedRef.current = false;
+      ws1006FallbackPendingRef.current = true;
+      wsSkipSubprotocolOnceRef.current = false;
       if (reconnectTimer.current) {
         clearTimeout(reconnectTimer.current);
         reconnectTimer.current = null;
@@ -2260,8 +2087,10 @@ export function useAgentAgent({
     // Start AgentDirector (subscribes to BrainStore; idempotent)
     agentDirector.start();
 
-    // Open WebSocket
-    connect();
+    // WebSocket: guest mode (no JWT) or valid token — one getAccessToken() only when not guest-only.
+    if (wsGuestModeEnabled() || getAccessToken()) {
+      connect();
+    }
 
     return () => {
       mountedRef.current = false;

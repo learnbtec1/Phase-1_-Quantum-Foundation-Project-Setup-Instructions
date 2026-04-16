@@ -21,6 +21,8 @@
  */
 import React, { useMemo } from 'react';
 import * as THREE from 'three';
+import { readFloorBaselineOffsetEnv } from '@/config/avatar';
+import { getWorldFloorY } from '@/app/avatar-agent/floor/worldFloor';
 import { ROOM_PALETTE, getRoomMaterial, getNoiseNormalMap } from './BackdropTheme';
 
 // â”€â”€ Warm wood parquet (square tiles, canvas-generated â€” no external image) â”€
@@ -229,14 +231,20 @@ export type RoomBounds = {
 
 /** Immutable snapshot â€” never changes at runtime (reset / default target). */
 export const ROOM_BOUNDS_DEFAULT = {
-  floorY: -2.95, ceilY: 5.0,
+  /**
+   * World Y of the rigid floor — `getWorldFloorY()` plus optional `NEXT_PUBLIC_FLOOR_Y_OFFSET`
+   * (`readFloorBaselineOffsetEnv`). Never derived from GLB Box3.
+   */
+  floorY: getWorldFloorY(),
+  ceilY: 5.0,
   minX:   -3.0,  maxX:  3.0,
   minZ:   -5.0,  maxZ:  3.0,
 } as const;
 
-/** Mutable live bounds â€” AvatarCanvas mutates floorY when carpet AABB arrives. */
+/** Mutable live bounds — `floorY` is world floor + env offset (`AvatarCanvas` may re-sync after load). */
 export const ROOM_BOUNDS: RoomBounds = {
-  floorY: -2.95, ceilY: 5.0,
+  floorY: ROOM_BOUNDS_DEFAULT.floorY + readFloorBaselineOffsetEnv(),
+  ceilY: 5.0,
   minX:   -3.0,  maxX:  3.0,
   minZ:   -5.0,  maxZ:  3.0,
 };

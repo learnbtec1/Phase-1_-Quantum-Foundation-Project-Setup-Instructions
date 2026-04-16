@@ -38,15 +38,28 @@ export default function AuthModal({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      const data = (await res.json().catch(() => ({}))) as { access_token?: string; detail?: string };
+      const data = (await res.json().catch(() => ({}))) as {
+        access_token?: string;
+        token?: string;
+        detail?: string;
+      };
       if (!res.ok) {
         setError(typeof data.detail === 'string' ? data.detail : 'Request failed');
         return;
       }
-      if (data.access_token) {
-        setAccessToken(data.access_token);
+      const tok =
+        (typeof data.access_token === 'string' ? data.access_token.trim() : '') ||
+        (typeof data.token === 'string' ? data.token.trim() : '');
+      if (tok) {
+        // Canonical key for WS/TTS/BFF — must match getAccessToken() / useAgentAgent pre-check.
+        setAccessToken(tok);
+        localStorage.setItem('cogni_access_token', tok);
+        // eslint-disable-next-line no-console
+        console.log('[AUTH] ✅ Token stored', tok.slice(0, 10));
         notifyAuthChanged();
         onClose();
+      } else {
+        setError('تم الاتصال لكن الخادم لم يُرجع رمز دخول (access_token).');
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Network error');

@@ -27,7 +27,29 @@ import type {
   LongTermMemory,
 } from '@/types/ai';
 import type { InteractionIntent } from '@/ai/avatar/avatarIntent';
+import {
+  buildPersonalityHint,
+  computeIntentEnergy,
+  computeSpeechStyle,
+  smoothInteractionIntentWithMemory,
+  type IntentBrainSnapshot,
+} from '@/ai/avatar/centralIntentBrain';
+import {
+  resolveIntent,
+  buildAvatarBrainState,
+  evaluateFreezeAndValidate,
+  type AvatarBrainState,
+} from '@/ai/avatar/brainState';
+import {
+  getPersonalityProfile,
+  getPersonalityTransitionMul,
+  mergeTraitsWithMemory,
+} from '@/ai/avatar/personalityProfile';
+import { getPersonalityMemoryState } from '@/ai/avatar/personalityMemory';
+import { getSpeechIntentHints } from '@/lib/avatar/speechIntentHints';
 import type { UserMirrorEmotion, UserSpeechRhythm } from '@/lib/avatar/userEmotionMirror';
+import type { BrainStatePayload } from '@/lib/avatar/brainStatePayload';
+import type { MotionBlendResult } from '@/lib/avatar/motionBlendContract';
 
 // ─── Conversation turn ────────────────────────────────────────────────────────
 
@@ -60,6 +82,29 @@ export interface BrainState {
 
   /** AgentDirector-driven mode for head/gaze/blink (VRMA body unchanged). */
   interactionIntent: InteractionIntent;
+  /** Prior committed intent (temporal memory t−1). */
+  interactionIntentPrev: InteractionIntent;
+  /** Raw classifier before hysteresis — for debug / diagnostics. */
+  intentRaw: InteractionIntent;
+  intentLastChangedAtMs: number;
+  /** Anticipation pulse before speech (decays in AnimationController). */
+  intentAnticipation: number;
+  /** 0–1 drive for motion/gesture/lip expressiveness. */
+  intentEnergy: number;
+  /** intent + emotion + energy + personality + speechStyle (derivative of full brain). */
+  intentBrain: IntentBrainSnapshot;
+
+  /** Canonical cognitive snapshot (`brainState.ts`) — intent, emotion VA, energy, attention, etc. */
+  cognitiveAvatarBrain: AvatarBrainState;
+  /** Client TTS: true between cogni:pre_speech and playback (thinking intent). */
+  preSpeechCognitiveWindow: boolean;
+  /** Presentation lerp start intent (200–600 ms blend to committed intent). */
+  intentVisualFrom: InteractionIntent;
+  intentVisualBlend01: number;
+  intentTransitionDurationSec: number;
+  intentEpochStartMs: number;
+  lastAvatarSpeechEndAtMs: number;
+  lastEmbodimentMotionAtMs: number;
 
   // ── Awareness / Teacher consciousness layer ──────────────────────────────
   currentTeachingGoal:      string | null;
@@ -103,6 +148,12 @@ export interface BrainState {
   emotionalMemory:    EmotionalMemoryEntry[];
   longTermMemory:     LongTermMemory;
 
+  /** Phase 3 strict behavior contract (last applied payload). */
+  behaviorContractPayload: BrainStatePayload | null;
+  behaviorMotionBlend: MotionBlendResult | null;
+  setBehaviorContractPayload: (p: BrainStatePayload | null) => void;
+  setBehaviorMotionBlend: (m: MotionBlendResult | null) => void;
+
   // ── Actions ────────────────────────────────────────────────────────────────
   setTalking:       (v: boolean) => void;
   setThinking:      (v: boolean) => void;
@@ -111,6 +162,18 @@ export interface BrainState {
   setCurrentAction: (action: BehaviorOutput | null) => void;
   setPhysical: (v: Partial<{ isListening: boolean }>) => void;
   setInteractionIntent: (intent: InteractionIntent) => void;
+  /**
+   * Recompute interaction intent from current physics + LLM state with temporal smoothing.
+   * Returns whether the committed intent changed (for one-shot presentation cues).
+   */
+  tickIntentBrain: (nowMs: number) => { changed: boolean; intent: InteractionIntent };
+  /** Call when `cogni:pre_speech` fires — body moves before audio. */
+  pulseIntentAnticipation: () => void;
+  decayIntentAnticipation: (dtSec: number) => void;
+  setPreSpeechCognitiveWindow: (v: boolean) => void;
+  /** Per-frame cognitive continuity: intent presentation blend + anticipation decay + freeze guard. */
+  brainCognitiveFrame: (dtSec: number, nowMs: number) => void;
+  pulseEmbodimentMotion: (nowMs?: number) => void;
   /** Update teacher's current goal from Thinker goal_update */
   setTeachingGoal:  (goal: string | null) => void;
   setAwarenessCues: (cues: AgentFrame['awareness_cues'] | null, monologue?: string | null) => void;
@@ -247,6 +310,36 @@ function padIntensity(pad: PADVector): number {
 const MAX_HISTORY      = 20;
 const MAX_EMOTION_MEM  = 50;
 
+function initialIntentBrain(): IntentBrainSnapshot {
+  return {
+    intentPrev: 'idle',
+    intentRaw: 'idle',
+    energy: 0.5,
+    anticipation: 0,
+    emotion: { label: 'neutral', pad: { ...DEFAULT_PAD } },
+    personality: buildPersonalityHint(),
+    speechStyle: { expressiveness: 0.65, paceMul: 1 },
+  };
+}
+
+function initialCognitiveAvatarBrain(): AvatarBrainState {
+  return buildAvatarBrainState({
+    intent: 'idle',
+    pad: { ...DEFAULT_PAD },
+    energy: 0.5,
+    attention: 0.45,
+    userSpeechRhythm: 'neutral',
+    speechEmphasisHint: 0.35,
+    temporalMemory: {
+      lastIntent: 'idle',
+      intentDuration: 0,
+      lastSpeechTime: 0,
+    },
+    profile: getPersonalityProfile(),
+    personalityMemory: getPersonalityMemoryState(),
+  });
+}
+
 function blendPad(a: PADVector, b: PADVector, wB: number): PADVector {
   const wA = 1 - wB;
   return {
@@ -260,10 +353,13 @@ function blendPad(a: PADVector, b: PADVector, wB: number): PADVector {
 
 const INITIAL: Omit<BrainState,
   | 'setTalking' | 'setThinking' | 'setUserSpeaking' | 'setCurrentAction'
-  | 'setPhysical' | 'setInteractionIntent' | 'setUserPad' | 'setUserMirrorState' | 'setTeachingGoal' | 'setAwarenessCues'
+  | 'setPhysical' | 'setInteractionIntent' | 'tickIntentBrain' | 'pulseIntentAnticipation' | 'decayIntentAnticipation'
+  | 'setPreSpeechCognitiveWindow' | 'brainCognitiveFrame' | 'pulseEmbodimentMotion'
+  | 'setUserPad' | 'setUserMirrorState' | 'setTeachingGoal' | 'setAwarenessCues'
   | 'setIntuitionReading' | 'setTemporalContext' | 'setPersuasionMode' | 'setSessionReflection'
   | 'pushTurn' | 'processFrame' | 'interrupt' | 'reset' | 'applyStreamingEmbodiment'
   | 'recordEmotionalMoment' | 'addImportantMoment' | 'learnInterest'
+  | 'setBehaviorContractPayload' | 'setBehaviorMotionBlend'
 > = {
   emotionLabel:             'neutral',
   pad:                      { ...DEFAULT_PAD },
@@ -275,6 +371,20 @@ const INITIAL: Omit<BrainState,
   isUserSpeaking:           false,
   physical:                 { isListening: false },
   interactionIntent:        'idle',
+  interactionIntentPrev:    'idle',
+  intentRaw:                'idle',
+  intentLastChangedAtMs:    0,
+  intentAnticipation:       0,
+  intentEnergy:             0.5,
+  intentBrain:              initialIntentBrain(),
+  cognitiveAvatarBrain:     initialCognitiveAvatarBrain(),
+  preSpeechCognitiveWindow: false,
+  intentVisualFrom:         'idle',
+  intentVisualBlend01:      1,
+  intentTransitionDurationSec: 0.38,
+  intentEpochStartMs:       0,
+  lastAvatarSpeechEndAtMs:  0,
+  lastEmbodimentMotionAtMs: 0,
   currentTeachingGoal:      null,
   latestInternalMonologue:  null,
   latestAwarenessCues:      null,
@@ -297,6 +407,8 @@ const INITIAL: Omit<BrainState,
   conversationHistory:      [],
   emotionalMemory:          [],
   longTermMemory:           { userInterests: [], importantMoments: [] },
+  behaviorContractPayload:  null,
+  behaviorMotionBlend:      null,
 };
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -305,7 +417,13 @@ export const useBrainStore = create<BrainState>()(
   subscribeWithSelector((set, get) => ({
     ...INITIAL,
 
-    setTalking:      (v) => set({ talking: v }),
+    setBehaviorContractPayload: (p) => set({ behaviorContractPayload: p }),
+    setBehaviorMotionBlend: (m) => set({ behaviorMotionBlend: m }),
+
+    setTalking:      (v) => set((s) => ({
+      talking: v,
+      ...(s.talking && !v ? { lastAvatarSpeechEndAtMs: Date.now() } : {}),
+    })),
     setThinking:     (v) => set({ thinking: v }),
     setUserSpeaking: (v) => set({ isUserSpeaking: v }),
     setCurrentAction:(a) => set({ currentAction: a }),
@@ -334,6 +452,141 @@ export const useBrainStore = create<BrainState>()(
     })),
 
     setInteractionIntent: (intent) => set({ interactionIntent: intent }),
+
+    tickIntentBrain: (nowMs: number) => {
+      const s = get();
+      const hints = getSpeechIntentHints();
+      const raw = resolveIntent({
+        talking: s.talking,
+        thinking: s.thinking,
+        isUserSpeaking: s.isUserSpeaking,
+        isListening: s.physical.isListening,
+        emotionLabel: s.emotionLabel,
+        lastFrame: s.lastFrame,
+        pad: s.pad,
+        speechEmphasisHint: hints.emphasis,
+        preSpeechCognitiveWindow: s.preSpeechCognitiveWindow,
+        intentAnticipation: s.intentAnticipation,
+      });
+      const next = smoothInteractionIntentWithMemory({
+        committed: s.interactionIntent,
+        raw,
+        nowMs,
+        lastCommitAtMs: s.intentLastChangedAtMs,
+      });
+      const energy = Math.max(
+        0.15,
+        computeIntentEnergy({
+          pad: s.pad,
+          talking: s.talking,
+          intentAnticipation: s.intentAnticipation,
+          emotionLabel: s.emotionLabel,
+        }),
+      );
+      const speechStyle = computeSpeechStyle({
+        energy,
+        rhythm: s.userSpeechRhythm,
+        speechEmphasisHint: hints.emphasis,
+      });
+      const changed = next !== s.interactionIntent;
+      const prevCommitted = s.interactionIntent;
+      const attention = Math.min(
+        1,
+        Math.max(
+          0.2,
+          0.32
+            + (s.physical.isListening ? 0.42 : 0)
+            + (s.isUserSpeaking ? 0.18 : 0)
+            + (s.talking ? 0.22 : 0)
+            + Math.abs(s.pad.arousal) * 0.12,
+        ),
+      );
+      const profile = getPersonalityProfile();
+      const personalityMemory = getPersonalityMemoryState();
+      const traitMul = mergeTraitsWithMemory(profile.traits, personalityMemory);
+      const cognitiveAvatarBrain = buildAvatarBrainState({
+        intent: next,
+        pad: s.pad,
+        energy,
+        attention,
+        userSpeechRhythm: s.userSpeechRhythm,
+        speechEmphasisHint: hints.emphasis,
+        temporalMemory: {
+          lastIntent: prevCommitted,
+          intentDuration: Math.max(0, (nowMs - s.intentEpochStartMs) / 1000),
+          lastSpeechTime: s.lastAvatarSpeechEndAtMs,
+        },
+        profile,
+        personalityMemory,
+      });
+      set({
+        interactionIntent: next,
+        interactionIntentPrev: prevCommitted,
+        intentRaw: raw,
+        intentLastChangedAtMs: changed ? nowMs : s.intentLastChangedAtMs,
+        intentEnergy: energy,
+        intentVisualFrom: changed ? prevCommitted : s.intentVisualFrom,
+        intentVisualBlend01: changed ? 0 : s.intentVisualBlend01,
+        intentTransitionDurationSec: changed
+          ? (0.2 + Math.random() * 0.4) * getPersonalityTransitionMul(traitMul)
+          : s.intentTransitionDurationSec,
+        intentEpochStartMs: changed ? nowMs : s.intentEpochStartMs,
+        intentBrain: {
+          intentPrev: prevCommitted,
+          intentRaw: raw,
+          energy,
+          anticipation: s.intentAnticipation,
+          emotion: { label: s.emotionLabel, pad: { ...s.pad } },
+          personality: buildPersonalityHint(),
+          speechStyle,
+        },
+        cognitiveAvatarBrain,
+      });
+      return { changed, intent: next };
+    },
+
+    pulseIntentAnticipation: () => set({ intentAnticipation: 1 }),
+
+    decayIntentAnticipation: (dtSec: number) =>
+      set((st) => ({
+        intentAnticipation:
+          st.intentAnticipation > 0.002
+            ? st.intentAnticipation * Math.exp(-dtSec * 2.4)
+            : 0,
+      })),
+
+    setPreSpeechCognitiveWindow: (v) => set({ preSpeechCognitiveWindow: v }),
+
+    brainCognitiveFrame: (dtSec, nowMs) => {
+      set((st) => {
+        const ant =
+          st.intentAnticipation > 0.002
+            ? st.intentAnticipation * Math.exp(-dtSec * 2.4)
+            : 0;
+        let blend = st.intentVisualBlend01;
+        if (blend < 1) {
+          blend = Math.min(1, blend + dtSec / Math.max(0.12, st.intentTransitionDurationSec));
+        }
+        let nergy = Math.max(0.15, st.intentEnergy);
+        const { frozen, energyAdjust } = evaluateFreezeAndValidate({
+          nowMs,
+          lastMotionAtMs: st.lastEmbodimentMotionAtMs,
+          energy: nergy,
+        });
+        if (frozen && energyAdjust > 0) {
+          nergy = Math.min(1, nergy + energyAdjust);
+        }
+        nergy = Math.max(0.15, nergy);
+        return {
+          intentAnticipation: ant,
+          intentVisualBlend01: blend,
+          intentEnergy: nergy,
+        };
+      });
+    },
+
+    pulseEmbodimentMotion: (nowMs) =>
+      set({ lastEmbodimentMotionAtMs: nowMs ?? (typeof performance !== 'undefined' ? performance.now() : Date.now()) }),
 
     setUserPad: (pad) => set({ userPad: pad }),
 
@@ -438,8 +691,22 @@ export const useBrainStore = create<BrainState>()(
         currentAction: null,
         latestAwarenessCues: null,
         interactionIntent: 'idle',
+        interactionIntentPrev: 'idle',
+        intentRaw: 'idle',
+        intentLastChangedAtMs: Date.now(),
+        intentAnticipation: 0,
+        intentEnergy: 0.5,
+        intentBrain: initialIntentBrain(),
+        cognitiveAvatarBrain: initialCognitiveAvatarBrain(),
+        preSpeechCognitiveWindow: false,
+        intentVisualFrom: 'idle',
+        intentVisualBlend01: 1,
+        intentTransitionDurationSec: 0.38,
+        intentEpochStartMs: Date.now(),
         userMirrorEmotion: 'calm',
         userSpeechRhythm: 'neutral',
+        behaviorContractPayload: null,
+        behaviorMotionBlend: null,
       });
     },
 
@@ -451,6 +718,20 @@ export const useBrainStore = create<BrainState>()(
         userPad:                null,
         physical:               { isListening: false },
         interactionIntent:      'idle',
+        interactionIntentPrev:  'idle',
+        intentRaw:               'idle',
+        intentLastChangedAtMs:   0,
+        intentAnticipation:      0,
+        intentEnergy:            0.5,
+        intentBrain:             initialIntentBrain(),
+        cognitiveAvatarBrain:    initialCognitiveAvatarBrain(),
+        preSpeechCognitiveWindow: false,
+        intentVisualFrom:        'idle',
+        intentVisualBlend01:     1,
+        intentTransitionDurationSec: 0.38,
+        intentEpochStartMs:      0,
+        lastAvatarSpeechEndAtMs: 0,
+        lastEmbodimentMotionAtMs: 0,
         conversationHistory:    [],
         emotionalMemory:        [],
         longTermMemory:         { userInterests: [], importantMoments: [] },
@@ -460,6 +741,8 @@ export const useBrainStore = create<BrainState>()(
         latestAwarenessCues:    null,
         userMirrorEmotion:      'calm',
         userSpeechRhythm:       'neutral',
+        behaviorContractPayload: null,
+        behaviorMotionBlend:    null,
       });
     },
   })),

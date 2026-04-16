@@ -12,7 +12,7 @@ import React, {
   type RefObject,
 } from 'react';
 import * as THREE from 'three';
-import { Canvas, useThree, useLoader } from '@react-three/fiber';
+import { Canvas, useFrame, useThree, useLoader } from '@react-three/fiber';
 import type { ThreeEvent } from '@react-three/fiber';
 import {
   PerspectiveCamera,
@@ -29,6 +29,11 @@ import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { VRMLoaderPlugin, VRM } from '@pixiv/three-vrm';
 import { useBrainStore } from '@/store/useBrainStore';
 import { initBrainPersistence, flushBrainPersistence } from '@/lib/brainPersistence';
+import { recordPersonalitySessionVisit } from '@/ai/avatar/personalityMemory';
+import { initMasterClockSession } from '@/lib/avatar/masterClock';
+import { applyBrainStatePayload, transitionFsmToListening } from '@/lib/avatar/behaviorExecutionContract';
+import type { BrainStatePayload } from '@/lib/avatar/brainStatePayload';
+import { clearAudioTimeline, patchTimelineCues, setPlaybackAudio } from '@/lib/avatar/audioTimeline';
 import { initAvatarVoiceListener } from '@/ai/io/tts';
 import { startSpontaneousBehavior, stopSpontaneousBehavior } from '@/lib/behavior/SpontaneousBehavior';
 import { CameraUpLock } from './CameraUpLock';
@@ -36,12 +41,20 @@ import ComfortLightingRig from '@/components/ComfortLightingRig';
 import LipSyncManager, { type VisemeCue } from './LipSyncManager';
 import { AnimationController } from './AnimationController';
 import { VRMSkeletonManager } from './VRMSkeletonManager';
+import { VRMAPlayer } from './VRMAPlayer';
 import type { BonePoseMap } from './motion/PoseComposer';
 import { GenerativeGestureManager } from './GenerativeGestureManager';
 import { BehaviorBrainHost } from './behavior';
+import { MotionTraceOverlay } from './MotionTraceOverlay';
 import { useAvatarEventBridge } from '@/hooks/useAvatarEventBridge';
 import { initGestureNormalizer } from '@/lib/gestureNormalizer';
+import {
+  INTERNAL_THOUGHT_END_EVENT,
+  INTERNAL_THOUGHT_MOTOR_EVENT,
+} from '@/lib/behavior/internalThoughtLayer';
 import { dispatchAvatar } from '@/utils/events/normalizeAvatarEvents';
+import { avatarDebug, DEBUG_AVATAR } from '@/app/avatar-agent/debugAvatar';
+import { getSharedAudioContext } from '@/lib/audio/avatarAudioContext';
 import {
   AVATAR_OFFICE_SCENE_DEFAULTS,
   getAvatarOfficeScenePosition,
@@ -49,7 +62,24 @@ import {
   pickVrmUrl,
   AVATAR_GROUP_ROTATION_Y,
   PHYSICS_CONFIG,
+  readFloorBaselineOffsetEnv,
+  readDebugFloorGridEnv,
+  FINAL_ROOM_POSITION,
+  getRoomGroupPosition,
+  getWorldFloorY,
+  OFFICE_BACKGROUND_MESH_NAME,
 } from '@/config/avatar';
+import defaultOfficeScene from '@/config/office_scene.default.json';
+import {
+  ENV_ROOT_NAME,
+  type OfficeSceneFileV1,
+  type OfficeSceneObjectSnapshot,
+  applyOfficeSceneJson,
+  buildOfficeSceneJson,
+  cullFarEnvironmentMeshes,
+  resetGltfEnvironmentAndReapplyDefaults,
+  snapshotFromObject,
+} from '@/app/avatar-agent/scene/officeEnvironmentLayout';
 import {
   setDeskScene,
   clearDeskScene,
@@ -58,8 +88,75 @@ import {
   resolveIfEnabled,
 } from './physics/WorldColliders';
 import { createAvatarPerformanceHandler } from '@/app/avatar-agent/avatarPerformanceBridge';
-// VRMAPlayer معطَّل — يتطلب @pixiv/three-vrm-animation ويُسبّب build error مع Turbopack
-// لإعادة تفعيله: npm install @pixiv/three-vrm-animation ثم أزِل هذا التعليق
+import {
+  applyFootFloorCalib,
+  createLiftNode,
+  runWorldFloorAntiDriftFrame,
+} from '@/app/avatar-agent/floorLockV121';
+import { ROOM_BOUNDS } from '@/app/avatar-agent/scene/RoomShell';
+import { isObservabilityEnabled } from '@/lib/observability/config';
+import { ObservabilityOverlay } from '@/lib/observability/ObservabilityOverlay';
+import { ObservabilityR3F } from '@/lib/observability/ObservabilityR3F';
+
+const ROOM_POSITION_EPS = 1e-4;
+
+/** Metres — hide office meshes whose world position is farther than this (after room placement). */
+const ENV_FAR_CULL_WORLD_RADIUS = 150;
+
+/** V120 — lower-body bind snapshot for resetLowerBodyToIdle (f22f888b). */
+const LOWER_BONES_FLOOR = [
+  'leftUpperLeg',
+  'leftLowerLeg',
+  'leftFoot',
+  'rightUpperLeg',
+  'rightLowerLeg',
+  'rightFoot',
+] as const;
+
+/**
+ * World-floor lock — `applyFootFloorCalib` on mount (parent) + per-frame anti-drift (feet never below Y=0).
+ * Vertical correction is ONLY `liftNode.position.y`; do not clamp AvatarRoot Y to `ROOM_BOUNDS.floorY`.
+ */
+function FloorLockRuntime({
+  vrm,
+  liftNode,
+  groupRef,
+}: {
+  vrm: VRM;
+  liftNode: THREE.Group;
+  groupRef: React.RefObject<THREE.Group | null>;
+}) {
+  const liftDebugFrameRef = useRef(0);
+  useFrame(() => {
+    const g = groupRef.current;
+    if (g) {
+      runWorldFloorAntiDriftFrame(vrm, liftNode, g);
+    }
+    if (process.env.NODE_ENV === 'development' && DEBUG_AVATAR) {
+      liftDebugFrameRef.current += 1;
+      if (liftDebugFrameRef.current % 90 === 0) {
+        console.log('LIFT_NODE Y:', liftNode.position.y, 'worldFloor', getWorldFloorY());
+      }
+    }
+  });
+  return null;
+}
+
+/** Dev-only: horizontal grid at resolved `ROOM_BOUNDS.floorY` (enable `NEXT_PUBLIC_DEBUG_FLOOR_GRID`). */
+function FloorBaselineDebugGrid() {
+  const ref = useRef<THREE.GridHelper | null>(null);
+  useFrame(() => {
+    const g = ref.current;
+    if (g) g.position.y = ROOM_BOUNDS.floorY;
+  });
+  return (
+    <gridHelper
+      ref={ref}
+      args={[16, 32, 0x55ffcc, 0x3a4a3a]}
+      position={[0, ROOM_BOUNDS.floorY, 0]}
+    />
+  );
+}
 
 type AvatarCanvasProps = {
   vrmUrl?: string;
@@ -67,8 +164,7 @@ type AvatarCanvasProps = {
   showOfficeEnvironment?: boolean;
   /** مسار GLB للمكتب (افتراضي من `OFFICE_GLB_PUBLIC_PATH`) */
   officeGlbUrl?: string;
-  /** إزاحة/حجم المكتب — اضبطهما إذا حجب الأفاتار (افتراضي: `AVATAR_OFFICE_SCENE_DEFAULTS`) */
-  officePosition?: [number, number, number];
+  /** Uniform scale for office room `<group>` (default from `AVATAR_OFFICE_SCENE_DEFAULTS.officeScale`). */
   officeScale?: number;
   /** جذر الأفاتار (VRM) — مع المكتب: أرضية الغرفة وليس سطح المكتب (انظر `getAvatarOfficeScenePosition`) */
   avatarPosition?: [number, number, number];
@@ -109,83 +205,9 @@ function ErrorFallback() {
   );
 }
 
-// ── Office scene editor (save/load layout JSON) — lives only in this file ─────
+// ── Office scene editor (save/load layout JSON) ─────
 
 type TransformMode = 'translate' | 'rotate' | 'scale';
-
-type OfficeSceneObjectSnapshot = {
-  uuid: string;
-  name: string;
-  position: [number, number, number];
-  rotation: [number, number, number];
-  scale: [number, number, number];
-};
-
-type OfficeSceneFileV1 = {
-  version: 1;
-  glbUrl: string;
-  officePosition: [number, number, number];
-  officeScale: number;
-  objects: OfficeSceneObjectSnapshot[];
-};
-
-function snapshotFromObject(obj: THREE.Object3D): OfficeSceneObjectSnapshot {
-  const e = new THREE.Euler().setFromQuaternion(obj.quaternion, 'YXZ');
-  return {
-    uuid: obj.uuid,
-    name: obj.name || '(unnamed)',
-    position: [obj.position.x, obj.position.y, obj.position.z],
-    rotation: [e.x, e.y, e.z],
-    scale: [obj.scale.x, obj.scale.y, obj.scale.z],
-  };
-}
-
-function collectOfficeMeshes(root: THREE.Object3D): THREE.Mesh[] {
-  const out: THREE.Mesh[] = [];
-  root.traverse((o) => {
-    if ((o as THREE.Mesh).isMesh) out.push(o as THREE.Mesh);
-  });
-  return out;
-}
-
-function buildOfficeSceneJson(
-  gltf: GLTF,
-  glbUrl: string,
-  officePosition: [number, number, number],
-  officeScale: number,
-): OfficeSceneFileV1 {
-  const objects = collectOfficeMeshes(gltf.scene).map(snapshotFromObject);
-  return {
-    version: 1,
-    glbUrl,
-    officePosition: [...officePosition],
-    officeScale,
-    objects,
-  };
-}
-
-function applyOfficeSceneJson(gltf: GLTF, data: OfficeSceneFileV1): void {
-  const byUuid = new Map(data.objects.map((o) => [o.uuid, o]));
-  const byName = new Map<string, OfficeSceneObjectSnapshot[]>();
-  for (const o of data.objects) {
-    const arr = byName.get(o.name) ?? [];
-    arr.push(o);
-    byName.set(o.name, arr);
-  }
-  collectOfficeMeshes(gltf.scene).forEach((mesh) => {
-    let snap = byUuid.get(mesh.uuid);
-    if (!snap) {
-      const arr = byName.get(mesh.name || '(unnamed)');
-      snap = arr?.shift();
-    }
-    if (!snap) return;
-    mesh.position.set(...snap.position);
-    mesh.rotation.set(snap.rotation[0], snap.rotation[1], snap.rotation[2], 'YXZ');
-    mesh.scale.set(...snap.scale);
-    mesh.updateMatrixWorld(true);
-  });
-  markDeskSceneTransformDirty();
-}
 
 function pickFirstMesh(hit: THREE.Object3D | null): THREE.Mesh | null {
   let o: THREE.Object3D | null = hit;
@@ -196,10 +218,21 @@ function pickFirstMesh(hit: THREE.Object3D | null): THREE.Mesh | null {
   return null;
 }
 
+function isBackgroundMeshOrDescendant(obj: THREE.Object3D, backgroundName: string): boolean {
+  let o: THREE.Object3D | null = obj;
+  while (o) {
+    if (o.name === backgroundName) return true;
+    o = o.parent;
+  }
+  return false;
+}
+
 type OfficeSceneWithEditorProps = {
   url: string;
   position: [number, number, number];
   scale: number;
+  /** XZ probe for future floor raycast; GLB AABB uses the whole placed group. */
+  floorProbeXZ: [number, number];
   editorEnabled: boolean;
   transformMode: TransformMode;
   gizmoVisible: boolean;
@@ -212,6 +245,7 @@ function OfficeSceneWithEditor({
   url,
   position,
   scale,
+  floorProbeXZ: _floorProbeXZ,
   editorEnabled,
   transformMode,
   gizmoVisible,
@@ -219,6 +253,11 @@ function OfficeSceneWithEditor({
   onSelect,
   officeGltfRef,
 }: OfficeSceneWithEditorProps) {
+  void _floorProbeXZ;
+  const officeRootRef = useRef<THREE.Group>(null);
+  const roomEditGroupRef = useRef<THREE.Group | null>(null);
+  const [roomEditVersion, setRoomEditVersion] = useState(0);
+  const roomPositionLoggedRef = useRef(false);
   const gltf = useLoader(GLTFLoader, url, (loader) => {
     const dracoLoader = new DRACOLoader();
     dracoLoader.setDecoderPath('/draco/');
@@ -249,18 +288,81 @@ function OfficeSceneWithEditor({
   }, [gltf, officeGltfRef]);
 
   useLayoutEffect(() => {
+    if (!gltf?.scene) return;
+    const scene = gltf.scene;
+    const hadEditGroup = !!scene.userData.roomContentEditGroup;
+    resetGltfEnvironmentAndReapplyDefaults(gltf, defaultOfficeScene as OfficeSceneFileV1);
+    const g = scene.userData.roomContentEditGroup as THREE.Group | undefined;
+    if (g) {
+      roomEditGroupRef.current = g;
+      if (!hadEditGroup) setRoomEditVersion((v) => v + 1);
+    }
+  }, [gltf]);
+
+  /** `ROOM_BOUNDS.floorY` tracks world floor + env offset only — never GLB Box3. */
+  const syncRoomFloorToWorld = useCallback(() => {
+    const next = getWorldFloorY() + readFloorBaselineOffsetEnv();
+    if (Math.abs(next - ROOM_BOUNDS.floorY) < 1e-3) return;
+    ROOM_BOUNDS.floorY = next;
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('room:bounds:applied', { detail: { floorY: next, source: 'world-floor' } }),
+      );
+    }
+    if (process.env.NODE_ENV === 'development' && DEBUG_AVATAR) {
+      console.log('[floor] ROOM_BOUNDS.floorY synced to world', { floorY: next });
+    }
+  }, []);
+
+  /** Apply room lift to `gltf.scene` root so walls + furniture (entire GLB graph) share one transform. */
+  useLayoutEffect(() => {
+    if (!gltf?.scene) return;
+    gltf.scene.position.set(position[0], position[1], position[2]);
+    gltf.scene.updateMatrixWorld(true);
+    const cull = cullFarEnvironmentMeshes(gltf.scene, ENV_FAR_CULL_WORLD_RADIUS);
+    if (process.env.NODE_ENV === 'development' && DEBUG_AVATAR && cull.hiddenCount > 0) {
+      console.warn('[AvatarCanvas] far office meshes hidden (world cull)', cull);
+    }
     markDeskSceneTransformDirty();
     computeChairAnchor();
   }, [gltf, position, scale]);
 
+  useLayoutEffect(() => {
+    syncRoomFloorToWorld();
+  }, [gltf, position, scale, syncRoomFloorToWorld]);
+
+  useLayoutEffect(() => {
+    if (!gltf?.scene) return;
+    const s = gltf.scene;
+    if (!roomPositionLoggedRef.current) {
+      roomPositionLoggedRef.current = true;
+      console.log(
+        'OFFICE GLB root (gltf.scene) position — base FINAL_ROOM_POSITION + ROOM_Y_OFFSET on Y',
+        FINAL_ROOM_POSITION,
+        '→',
+        position,
+      );
+      console.log('gltf.scene.position (Three.js)', s.position.x, s.position.y, s.position.z);
+    }
+    if (
+      process.env.NODE_ENV === 'development' &&
+      (Math.abs(s.position.x - position[0]) > ROOM_POSITION_EPS ||
+        Math.abs(s.position.y - position[1]) > ROOM_POSITION_EPS ||
+        Math.abs(s.position.z - position[2]) > ROOM_POSITION_EPS)
+    ) {
+      console.warn('[AvatarCanvas] gltf.scene position differs from expected — check for overrides.', {
+        expected: [...position],
+        actual: [s.position.x, s.position.y, s.position.z],
+      });
+    }
+  }, [gltf, position]);
+
   const selectedObject = useMemo((): THREE.Object3D | null => {
     if (!selectedUuid) return null;
-    let found: THREE.Object3D | null = null;
-    gltf.scene.traverse((o) => {
-      if ((o as THREE.Object3D).uuid === selectedUuid) found = o as THREE.Object3D;
-    });
-    return found;
-  }, [gltf, selectedUuid]);
+    const rg = roomEditGroupRef.current;
+    if (rg && rg.uuid === selectedUuid) return rg;
+    return null;
+  }, [selectedUuid, roomEditVersion]);
 
   useEffect(() => {
     if (!editorEnabled) {
@@ -277,7 +379,16 @@ function OfficeSceneWithEditor({
         onSelect(null, null);
         return;
       }
-      onSelect(mesh.uuid, snapshotFromObject(mesh));
+      if (isBackgroundMeshOrDescendant(mesh, OFFICE_BACKGROUND_MESH_NAME)) {
+        onSelect(null, null);
+        return;
+      }
+      const rg = roomEditGroupRef.current;
+      if (!rg) {
+        onSelect(null, null);
+        return;
+      }
+      onSelect(rg.uuid, snapshotFromObject(rg));
     },
     [editorEnabled, onSelect],
   );
@@ -289,22 +400,20 @@ function OfficeSceneWithEditor({
 
   const onTcChange = useCallback(() => {
     markDeskSceneTransformDirty();
+    computeChairAnchor();
     if (selectedObject) onSelect(selectedObject.uuid, snapshotFromObject(selectedObject));
   }, [selectedObject, onSelect]);
 
   return (
     <group onPointerMissed={handlePointerMissed}>
-      <primitive
-        object={gltf.scene}
-        position={position}
-        scale={scale}
-        onClick={handleClick}
-      />
+      <group ref={officeRootRef} scale={scale}>
+        <primitive object={gltf.scene} onClick={handleClick} />
+      </group>
       {editorEnabled && gizmoVisible && selectedObject && (
         <TransformControls
           object={selectedObject}
           mode={transformMode}
-          space="local"
+          space="world"
           onObjectChange={onTcChange}
         />
       )}
@@ -401,7 +510,6 @@ export default function AvatarCanvas({
   vrmUrl = pickVrmUrl(),
   showOfficeEnvironment = true,
   officeGlbUrl = OFFICE_GLB_PUBLIC_PATH,
-  officePosition = [...AVATAR_OFFICE_SCENE_DEFAULTS.officePosition],
   officeScale = AVATAR_OFFICE_SCENE_DEFAULTS.officeScale,
   avatarPosition = getAvatarOfficeScenePosition(),
   avatarScale = AVATAR_OFFICE_SCENE_DEFAULTS.avatarScale,
@@ -447,9 +555,12 @@ export default function AvatarCanvas({
    * Written here, consumed by VRMSkeletonManager.
    */
   const motorSpeedMulRef = useRef<number>(1);
+  /** Composes with PAD→motor: slight idle rhythm bump during silent internal thought. */
+  const internalThoughtBreathRef = useRef<{ untilMs: number; mul: number }>({ untilMs: 0, mul: 1 });
   const isListeningRef = useRef<boolean>(false);
   const isThinkingRef = useRef<boolean>(false);
-  
+  const observabilityEnabled = isObservabilityEnabled();
+
   const visemeCueQueueInternalRef = useRef<VisemeCue[]>([]);
   const audioElementInternalRef = useRef<HTMLAudioElement | null>(null);
   const analyserInternalRef = useRef<AnalyserNode | null>(null);
@@ -458,8 +569,6 @@ export default function AvatarCanvas({
   const audioElementRef = audioElementProp ?? audioElementInternalRef;
   const analyserRef = analyserProp ?? analyserInternalRef;
 
-  // ── Web Audio context (created lazily, shared for lifetime of component) ──
-  const audioCtxRef = useRef<AudioContext | null>(null);
   // Track which audio element is currently wired into the analyser so we avoid re-wiring
   const analyserSourceAudioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -475,6 +584,40 @@ export default function AvatarCanvas({
   /** لقطة عظام VRMA (عند تفعيل VRMAPlayer) — يستهلكها PoseComposer */
   const vrmaPoseRef = useRef<{ seq: number; bones: BonePoseMap } | null>(null);
 
+  /** V121 — LIFT_NODE between container and vrm.scene; foot calibration adjusts liftNode.y only. */
+  const [liftNode, setLiftNode] = useState<THREE.Group | null>(null);
+  /** V122 — accumulated foot offset vs floor baseline (f22f888b). */
+  /** Stable ref for floor-lock callbacks (same as vrm state). */
+  const vrmRef = useRef<VRM | null>(null);
+
+  // ── V120 lower-body bind restore (docs/AVATAR_FEET_AND_SUBFLOOR_FIX_V122.md) ──
+  const bindLowerBodyRotationsRef = useRef<Map<string, THREE.Quaternion>>(new Map());
+  const captureLowerBodyBindPose = useCallback(() => {
+    const vr = vrmRef.current;
+    if (!vr?.humanoid) return;
+    for (const name of LOWER_BONES_FLOOR) {
+      const b = (vr.humanoid as { getRawBoneNode?: (n: string) => THREE.Object3D | undefined }).getRawBoneNode?.(
+        name,
+      );
+      if (b) bindLowerBodyRotationsRef.current.set(name, b.quaternion.clone());
+    }
+  }, []);
+  const resetLowerBodyToIdle = useCallback(() => {
+    const vr = vrmRef.current;
+    if (!vr?.humanoid) return;
+    for (const name of LOWER_BONES_FLOOR) {
+      const b = (vr.humanoid as { getRawBoneNode?: (n: string) => THREE.Object3D | undefined }).getRawBoneNode?.(
+        name,
+      );
+      const q = bindLowerBodyRotationsRef.current.get(name);
+      if (b && q) {
+        b.quaternion.copy(q);
+        b.updateMatrixWorld(true);
+      }
+    }
+    vr.scene?.updateMatrixWorld(true);
+  }, []);
+
   /** GLB المكتب المحمّل داخل Canvas — للحفظ/التحميل JSON */
   const officeGltfRef = useRef<GLTF | null>(null);
   const sceneFileInputRef = useRef<HTMLInputElement>(null);
@@ -483,6 +626,9 @@ export default function AvatarCanvas({
   const [sceneGizmoVisible, setSceneGizmoVisible] = useState(true);
   const [sceneSelectedUuid, setSceneSelectedUuid] = useState<string | null>(null);
   const [sceneLive, setSceneLive] = useState<OfficeSceneObjectSnapshot | null>(null);
+
+  /** Stable `[x, y+ROOM_Y_OFFSET, z]` — base from `FINAL_ROOM_POSITION` in `@/config/avatar`. */
+  const roomGroupPosition = useMemo(() => getRoomGroupPosition(), []);
 
   const onOfficeSceneSelect = useCallback((uuid: string | null, snap: OfficeSceneObjectSnapshot | null) => {
     setSceneSelectedUuid(uuid);
@@ -529,7 +675,7 @@ export default function AvatarCanvas({
     const data = buildOfficeSceneJson(
       gltf,
       officeGlbUrl,
-      [officePosition[0], officePosition[1], officePosition[2]],
+      [...roomGroupPosition],
       officeScale,
     );
     const dataStr = JSON.stringify(data, null, 2);
@@ -540,7 +686,7 @@ export default function AvatarCanvas({
     a.download = 'office_scene.json';
     a.click();
     URL.revokeObjectURL(url);
-  }, [officeGlbUrl, officePosition, officeScale]);
+  }, [officeGlbUrl, officeScale, roomGroupPosition]);
 
   const handlePickSceneFile = useCallback(() => {
     sceneFileInputRef.current?.click();
@@ -562,6 +708,9 @@ export default function AvatarCanvas({
           const gltf = officeGltfRef.current;
           if (!gltf) return;
           applyOfficeSceneJson(gltf, parsed);
+          gltf.scene.updateMatrixWorld(true);
+          cullFarEnvironmentMeshes(gltf.scene, ENV_FAR_CULL_WORLD_RADIUS);
+          computeChairAnchor();
           setSceneSelectedUuid(null);
           setSceneLive(null);
         } catch (err) {
@@ -578,6 +727,8 @@ export default function AvatarCanvas({
   useEffect(() => {
     initGestureNormalizer();
     initBrainPersistence();
+    initMasterClockSession();
+    recordPersonalitySessionVisit();
     initAvatarVoiceListener();
     if (spontaneousBehaviorEnabled) {
       startSpontaneousBehavior({
@@ -594,27 +745,88 @@ export default function AvatarCanvas({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    const onContract = (e: Event): void => {
+      const d = (e as CustomEvent<BrainStatePayload>).detail;
+      if (d) applyBrainStatePayload(d);
+    };
+    const onSpeakEnd = (): void => {
+      if (useBrainStore.getState().behaviorContractPayload) transitionFsmToListening();
+    };
+    window.addEventListener('cogni:apply-behavior-contract', onContract as EventListener);
+    window.addEventListener('avatar:speak:end', onSpeakEnd);
+    return () => {
+      window.removeEventListener('cogni:apply-behavior-contract', onContract as EventListener);
+      window.removeEventListener('avatar:speak:end', onSpeakEnd);
+    };
+  }, []);
+
   // PAD → motorSpeedMulRef bridge (no re-render; direct ref writes)
   useEffect(() => {
+    const applyPadToMotor = (arousal: number) => {
+      const clamped = Math.max(-1, Math.min(1, arousal));
+      const padMul = clamped >= 0
+        ? 1 + clamped * 0.4
+        : 1 + clamped * 0.45;
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const breath =
+        now < internalThoughtBreathRef.current.untilMs ? internalThoughtBreathRef.current.mul : 1;
+      const rhythm = useBrainStore.getState().userSpeechRhythm;
+      const rhythmMul = rhythm === 'fast' ? 1.04 : rhythm === 'slow' ? 0.96 : 1;
+      motorSpeedMulRef.current = Math.max(0.55, Math.min(1.4, padMul * breath * rhythmMul));
+    };
     const unsub = useBrainStore.subscribe(
-      (s) => ({ arousal: s.pad.arousal, thinking: s.thinking, isListening: s.physical.isListening }),
+      (s) => ({
+        arousal: s.pad.arousal,
+        thinking: s.thinking,
+        isListening: s.physical.isListening,
+        rhythm: s.userSpeechRhythm,
+      }),
       ({ arousal, thinking, isListening }) => {
-        // Arousal [-1..1] → motor multiplier [0.55..1.4]
-        const clamped = Math.max(-1, Math.min(1, arousal));
-        const mul = clamped >= 0
-          ? 1 + clamped * 0.4          // excited: up to 1.4×
-          : 1 + clamped * 0.45;        // bored/sad: down to 0.55×
-        motorSpeedMulRef.current = Math.max(0.55, Math.min(1.4, mul));
+        applyPadToMotor(arousal);
         isThinkingRef.current = thinking;
         isListeningRef.current = isListening;
       },
       { equalityFn: (a, b) =>
           Math.abs(a.arousal - b.arousal) < 0.04 &&
           a.thinking === b.thinking &&
-          a.isListening === b.isListening
+          a.isListening === b.isListening &&
+          a.rhythm === b.rhythm
       },
     );
     return unsub;
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const onMotor = (e: Event) => {
+      const d = (e as CustomEvent<{ mul?: number; durationMs?: number }>).detail;
+      const mul = typeof d?.mul === 'number' ? d.mul : 1.07;
+      const durationMs = typeof d?.durationMs === 'number' ? d.durationMs : 500;
+      internalThoughtBreathRef.current = { untilMs: now() + durationMs, mul };
+      const arousal = useBrainStore.getState().pad.arousal;
+      const clamped = Math.max(-1, Math.min(1, arousal));
+      const padMul = clamped >= 0 ? 1 + clamped * 0.4 : 1 + clamped * 0.45;
+      const rhythm = useBrainStore.getState().userSpeechRhythm;
+      const rhythmMul = rhythm === 'fast' ? 1.04 : rhythm === 'slow' ? 0.96 : 1;
+      motorSpeedMulRef.current = Math.max(0.55, Math.min(1.4, padMul * mul * rhythmMul));
+    };
+    const onEnd = () => {
+      internalThoughtBreathRef.current = { untilMs: 0, mul: 1 };
+      const arousal = useBrainStore.getState().pad.arousal;
+      const clamped = Math.max(-1, Math.min(1, arousal));
+      const padMul = clamped >= 0 ? 1 + clamped * 0.4 : 1 + clamped * 0.45;
+      const rhythm = useBrainStore.getState().userSpeechRhythm;
+      const rhythmMul = rhythm === 'fast' ? 1.04 : rhythm === 'slow' ? 0.96 : 1;
+      motorSpeedMulRef.current = Math.max(0.55, Math.min(1.4, padMul * rhythmMul));
+    };
+    window.addEventListener(INTERNAL_THOUGHT_MOTOR_EVENT, onMotor as EventListener);
+    window.addEventListener(INTERNAL_THOUGHT_END_EVENT, onEnd as EventListener);
+    return () => {
+      window.removeEventListener(INTERNAL_THOUGHT_MOTOR_EVENT, onMotor as EventListener);
+      window.removeEventListener(INTERNAL_THOUGHT_END_EVENT, onEnd as EventListener);
+    };
   }, []);
 
   useEffect(() => {
@@ -672,15 +884,14 @@ export default function AvatarCanvas({
       // Do NOT set autoUpdateHumanBones = false here.
       // VRMSkeletonManager uses normalized bones; vrm.update() propagates them to raw.
 
-      // ── DIAGNOSTIC: humanoid + skeleton integrity ────────────────────────
-      console.log('[AvatarCanvas] 🔍 Pre-setVrm check:');
-      console.log('  humanoid present:', !!loadedVrm.humanoid);
-      console.log('  autoUpdateHumanBones:', loadedVrm.humanoid?.autoUpdateHumanBones);
+      // ── DIAGNOSTIC: humanoid + skeleton integrity (verbose: NEXT_PUBLIC_DEBUG_AVATAR) ──
       const testBone = loadedVrm.humanoid?.getRawBoneNode('rightUpperArm' as never);
-      console.log('  rightUpperArm:', testBone);
-      console.log('  hips:', loadedVrm.humanoid?.getRawBoneNode('hips' as never));
+      avatarDebug('[AvatarCanvas] 🔍 Pre-setVrm check:');
+      avatarDebug('  humanoid present:', !!loadedVrm.humanoid);
+      avatarDebug('  autoUpdateHumanBones:', loadedVrm.humanoid?.autoUpdateHumanBones);
+      avatarDebug('  rightUpperArm:', testBone);
+      avatarDebug('  hips:', loadedVrm.humanoid?.getRawBoneNode('hips' as never));
 
-      // ── DIAGNOSTIC: all available humanoid bones in THIS model ──────────
       if (loadedVrm.humanoid) {
         const hb = loadedVrm.humanoid.humanBones;
         const presentBones = Object.keys(hb).filter(
@@ -689,10 +900,12 @@ export default function AvatarCanvas({
         const nullBones = Object.keys(hb).filter(
           (k) => (hb as Record<string, { node?: unknown }>)[k]?.node == null,
         );
-        console.log('[AvatarCanvas] ✅ Present bones:', presentBones);
-        console.log('[AvatarCanvas] ❌ Null bones:', nullBones);
+        avatarDebug('[AvatarCanvas] ✅ Present bones:', presentBones);
+        avatarDebug('[AvatarCanvas] ❌ Null bones:', nullBones);
       }
 
+      const lift = createLiftNode(loadedVrm);
+      setLiftNode(lift);
       setVrm(loadedVrm);
       setLoading(false);
       console.log(
@@ -709,6 +922,7 @@ export default function AvatarCanvas({
   useEffect(() => {
     let cancelled = false;
     setVrm(null);
+    setLiftNode(null);
     setError(false);
     setLoading(true);
 
@@ -744,18 +958,11 @@ export default function AvatarCanvas({
 
   // ── Web Audio: create / resume context lazily on first user interaction ──
   const ensureAudioContext = (): AudioContext | null => {
-    if (typeof window === 'undefined') return null;
-    if (!audioCtxRef.current) {
-      try {
-        const Ctx = window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-        if (Ctx) audioCtxRef.current = new Ctx();
-      } catch { /* SSR or locked browser */ }
-    }
-    const ctx = audioCtxRef.current;
-    if (ctx && ctx.state === 'suspended') {
+    const ctx = getSharedAudioContext();
+    if (ctx?.state === 'suspended') {
       void ctx.resume().catch(() => { /* ignore */ });
     }
-    return ctx ?? null;
+    return ctx;
   };
 
   /**
@@ -786,7 +993,7 @@ export default function AvatarCanvas({
       analyserRef.current          = analyser;
       analyserSourceAudioRef.current = audio;
       if (process.env.NODE_ENV === 'development') {
-        console.log('[AvatarCanvas] ✅ Analyser wired — lip energy drive active');
+        avatarDebug('[AvatarCanvas] ✅ Analyser wired — lip energy drive active');
       }
     } catch (e) {
       // MediaElementSource can only be created once per element;
@@ -812,6 +1019,7 @@ export default function AvatarCanvas({
     const onAudioElement = (e: Event) => {
       const d = (e as CustomEvent<{ audio?: HTMLAudioElement }>).detail;
       if (!d?.audio) return;
+      setPlaybackAudio(d.audio);
       // Update audioElementRef so LipSyncManager tracks currentTime correctly.
       // MUST happen before avatar:speak:start if possible — the event ordering from
       // playServerTTSAudio means they both arrive in the same onplay turn.
@@ -828,6 +1036,7 @@ export default function AvatarCanvas({
         .filter(c => typeof c.t === 'number' && typeof c.id === 'number')
         .map(c => ({ t: c.t as number, id: c.id as number }));
       if (validated.length > 0) {
+        patchTimelineCues(validated);
         visemeCueQueueRef.current = validated;
       }
     };
@@ -839,6 +1048,7 @@ export default function AvatarCanvas({
 
     const onSpeakEnd = () => {
       isTalkingRef.current = false;
+      clearAudioTimeline('canvas:speak:end');
       onVisemesClear();          // also clear visemes on every speak:end
     };
 
@@ -855,12 +1065,7 @@ export default function AvatarCanvas({
       window.removeEventListener('avatar:speak:end', onSpeakEnd);
       window.removeEventListener('avatar:visemes:timeline', onVisemesTimeline as EventListener);
       window.removeEventListener('avatar:visemes:clear', onVisemesClear);
-      // Clean up AudioContext on unmount
-      if (audioCtxRef.current) {
-        void audioCtxRef.current.close().catch(() => { /* ignore */ });
-        audioCtxRef.current = null;
-        analyserSourceAudioRef.current = null;
-      }
+      analyserSourceAudioRef.current = null;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -904,6 +1109,18 @@ export default function AvatarCanvas({
     return () => window.removeEventListener('agent:message', onAgentMessage as EventListener);
   }, [onAgentSpeak]);
 
+  useEffect(() => {
+    vrmRef.current = vrm;
+  }, [vrm]);
+
+  useLayoutEffect(() => {
+    vrmRef.current = vrm;
+    if (!vrm || !liftNode || !groupRef.current) return;
+    captureLowerBodyBindPose();
+    applyFootFloorCalib({ vrm, liftNode, group: groupRef.current });
+    resetLowerBodyToIdle();
+  }, [vrm, liftNode, captureLowerBodyBindPose, resetLowerBodyToIdle]);
+
   const ax = avatarXZ[0];
   const ay = avatarPosition[1];
   const az = avatarXZ[1];
@@ -920,6 +1137,8 @@ export default function AvatarCanvas({
   // Loading/error overlays are positioned on top — never use early return before this div.
   return (
     <div ref={r3fEventSourceRef} className="relative w-full h-full bg-[#0a0a12]">
+      <MotionTraceOverlay />
+      <ObservabilityOverlay />
       <BehaviorBrainHost motorSpeedMulRef={motorSpeedMulRef} isTalkingRef={isTalkingRef} />
       {showOfficeEnvironment && (
         <>
@@ -983,7 +1202,9 @@ export default function AvatarCanvas({
                       <div>scl: {sceneLive.scale.map((n) => n.toFixed(3)).join(', ')}</div>
                     </>
                   ) : (
-                    <span className="text-gray-500">انقر على قطعة في الغرفة…</span>
+                    <span className="text-gray-500">
+                      انقر على الغرفة لتحريك المحتوى كاملاً (الخلفية ثابتة)…
+                    </span>
                   )}
                 </div>
                 <div className="flex flex-wrap gap-1">
@@ -1095,29 +1316,7 @@ export default function AvatarCanvas({
         />
 
         <Suspense fallback={null}>
-          {showOfficeEnvironment && (
-            <OfficeSceneWithEditor
-              url={officeGlbUrl}
-              position={[officePosition[0], officePosition[1], officePosition[2]]}
-              scale={officeScale}
-              editorEnabled={sceneEditorEnabled}
-              transformMode={sceneTransformMode}
-              gizmoVisible={sceneGizmoVisible}
-              selectedUuid={sceneSelectedUuid}
-              onSelect={onOfficeSceneSelect}
-              officeGltfRef={officeGltfRef}
-            />
-          )}
-        </Suspense>
-
-        {/* Invisible floor — right-click moves the avatar */}
-        <FloorClickDetector
-          floorY={avatarPosition[1]}
-          onRightClick={onAvatarFloorNavigate}
-        />
-
-        <Suspense fallback={null}>
-          {vrm && (
+          {vrm && liftNode && (
             <group
               ref={groupRef}
               name="AvatarRoot"
@@ -1131,7 +1330,7 @@ export default function AvatarCanvas({
               ]}
               scale={avatarScale}
             >
-              <primitive object={vrm.scene} />
+              {liftNode && <primitive object={liftNode} />}
 
               <AnimationController
                 vrm={vrm}
@@ -1139,6 +1338,7 @@ export default function AvatarCanvas({
                 neckGazeYawRef={neckGazeYawRef}
                 neckGazePitchRef={neckGazePitchRef}
                 groupRef={groupRef}
+                vrmaActiveRef={vrmaActiveRef}
               />
 
               <LipSyncManager
@@ -1147,6 +1347,12 @@ export default function AvatarCanvas({
                 visemeCueQueueRef={visemeCueQueueRef}
                 audioElementRef={audioElementRef}
                 analyserRef={analyserRef}
+              />
+
+              <VRMAPlayer
+                vrm={vrm}
+                vrmaActiveRef={vrmaActiveRef}
+                vrmaPoseRef={vrmaPoseRef}
               />
 
               <VRMSkeletonManager
@@ -1162,16 +1368,54 @@ export default function AvatarCanvas({
                 vrmaPoseRef={vrmaPoseRef}
               />
 
-              {/* VRMAPlayer معطَّل — انظر تعليق الاستيراد في أعلى الملف */}
-
               <GenerativeGestureManager
                 vrm={vrm}
                 isTalkingRef={isTalkingRef}
                 wsUrl={generativeGestureWsUrl}
               />
+
+              {liftNode && (
+                <FloorLockRuntime
+                  vrm={vrm}
+                  liftNode={liftNode}
+                  groupRef={groupRef}
+                />
+              )}
+              {observabilityEnabled && (
+                <ObservabilityR3F enabled={observabilityEnabled} groupRef={groupRef} />
+              )}
             </group>
           )}
         </Suspense>
+
+        <Suspense fallback={null}>
+          {showOfficeEnvironment && (
+            <group name="RoomGroup">
+              <group name={ENV_ROOT_NAME} position={[0, 0, 0]} scale={[1, 1, 1]}>
+                <OfficeSceneWithEditor
+                  url={officeGlbUrl}
+                  position={roomGroupPosition}
+                  scale={officeScale}
+                  floorProbeXZ={[avatarPosition[0], avatarPosition[2]]}
+                  editorEnabled={sceneEditorEnabled}
+                  transformMode={sceneTransformMode}
+                  gizmoVisible={sceneGizmoVisible}
+                  selectedUuid={sceneSelectedUuid}
+                  onSelect={onOfficeSceneSelect}
+                  officeGltfRef={officeGltfRef}
+                />
+              </group>
+            </group>
+          )}
+        </Suspense>
+
+        {readDebugFloorGridEnv() && showOfficeEnvironment && <FloorBaselineDebugGrid />}
+
+        {/* Invisible floor — right-click moves the avatar */}
+        <FloorClickDetector
+          floorY={avatarPosition[1]}
+          onRightClick={onAvatarFloorNavigate}
+        />
       </Canvas>
 
     </div>

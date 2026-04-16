@@ -1,6 +1,5 @@
 # ── Stage 1: dependency build ────────────────────────────────────────────────
-# bullseye = Debian 11 with OpenSSL 1.1.x — required by Azure Speech SDK 1.38
-# (Debian 12/13 ships OpenSSL 3.x which triggers Error 27 in the SDK's HTTP singleton)
+# bullseye — stable base for scientific / audio wheels
 FROM python:3.10-slim-bullseye AS builder
 
 WORKDIR /install
@@ -17,7 +16,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-# Includes pysqlite3-binary (SQLite >= 3.35 for Chroma) and azure-cognitiveservices-speech
+# Includes pysqlite3-binary (SQLite >= 3.35 for Chroma) and edge-tts (see requirements.txt)
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir --prefix=/install/pkgs -r requirements.txt
 
@@ -31,11 +30,12 @@ RUN printf 'Acquire::Retries "8";\nAcquire::http::Timeout "120";\nAcquire::https
     > /etc/apt/apt.conf.d/99retry
 
 # Only runtime system libs — no compiler, no headers
-# libssl1.1 provides OpenSSL 1.1.x needed by Azure Speech SDK on Debian 11
+# libssl1.1 — some wheels link against OpenSSL 1.1 on bullseye
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
         ffmpeg \
         ca-certificates \
+        curl \
         openssl \
         libssl1.1 \
         libasound2 \
@@ -47,8 +47,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /install/pkgs /usr/local
 
 # Force UTF-8 stdout/stderr — prevents 'charmap' UnicodeEncodeError on Arabic text
-# SSL_CERT_FILE/DIR: required so Azure Speech SDK (libMicrosoft.CognitiveServices.Speech.core.so)
-# can locate CA certificates when initialising its HTTP singleton (fixes Error 27).
+# SSL_CERT_FILE/DIR: HTTPS clients (Google APIs, etc.)
 ENV PYTHONIOENCODING=utf-8 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \

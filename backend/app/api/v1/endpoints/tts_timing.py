@@ -2,11 +2,11 @@
 """
 TTS-with-timing: POST /api/v1/tts-with-timing
 
-Azure Speech SDK only — WAV 24 kHz + native viseme + word-boundary events.
-No Edge TTS, Kokoro, or gTTS fallbacks.
+Microsoft Edge TTS (edge-tts) — MP3 + stub viseme timeline (no native visemes).
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
@@ -20,11 +20,15 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.api.deps import get_current_user, get_teacher_user
 from app.api.v1.dependencies.phase2_gates import gate_tts_user
-from app.core.config import settings
 from app.models.db_models import User
 from app.archive.dialect_corrector import maybe_correct_egyptian_for_tts
-from app.services.azure_tts import require_azure_speech_config, synthesize as azure_synthesize
-from app.services.tts_service import _locked_jordanian_male_voice
+from app.services.tts_service import (
+    _EDGE_TTS_AVAILABLE,
+    edge_tts_voice_name,
+    stub_viseme_timeline_for_text,
+    synthesize_edge_tts_async,
+    synthesize_elevenlabs_async,
+)
 from app.services.conversation_store import get_store as _get_store
 
 try:
@@ -43,27 +47,27 @@ _CB_THRESHOLD = 5
 _CB_COOLDOWN = 20.0
 
 
-def _azure_cb_ok() -> bool:
+def _tts_cb_ok() -> bool:
     return time.monotonic() >= _cb_open_until
 
 
-def _azure_cb_record_failure() -> None:
+def _tts_cb_record_failure() -> None:
     global _cb_failures, _cb_open_until
     with _CB_LOCK:
         _cb_failures += 1
         if _cb_failures >= _CB_THRESHOLD:
             _cb_open_until = time.monotonic() + _CB_COOLDOWN
             logger.warning(
-                "Azure TTS circuit OPENED — %d consecutive failures, cooldown %.0fs",
+                "Edge TTS circuit OPENED — %d consecutive failures, cooldown %.0fs",
                 _cb_failures, _CB_COOLDOWN,
             )
 
 
-def _azure_cb_record_success() -> None:
+def _tts_cb_record_success() -> None:
     global _cb_failures, _cb_open_until
     with _CB_LOCK:
         if _cb_failures:
-            logger.info("Azure TTS circuit CLOSED after %d failure(s)", _cb_failures)
+            logger.info("Edge TTS circuit CLOSED after %d failure(s)", _cb_failures)
         _cb_failures = 0
         _cb_open_until = 0.0
 
@@ -91,9 +95,9 @@ router = APIRouter()
 _OBS_LOCK = Lock()
 _tts_obs_counters: Dict[str, int] = {
     "requests_total": 0,
-    "success_azure": 0,
+    "success_edge": 0,
     "errors_rate_limited": 0,
-    "errors_azure": 0,
+    "errors_edge": 0,
 }
 
 
@@ -110,9 +114,15 @@ async def tts_observability(_auth: User = Depends(get_current_user)):
         cb = {
             "failures": _cb_failures,
             "open_until_monotonic": _cb_open_until,
-            "circuit_closed": _azure_cb_ok(),
+            "circuit_closed": _tts_cb_ok(),
         }
-    return {"ok": True, "counters": snap, "azure_circuit": cb, "provider": "azure-only"}
+    env_prov = (os.getenv("TTS_PROVIDER", "edge") or "edge").lower().strip()
+    return {
+        "ok": True,
+        "counters": snap,
+        "tts_circuit": cb,
+        "tts_provider_env": env_prov,
+    }
 
 
 class TTSRequest(BaseModel):
@@ -124,27 +134,26 @@ class TTSRequest(BaseModel):
         default=0.72,
         ge=0.0,
         le=1.0,
-        description="0–1 scales Azure express-as styledegree + prosody strength",
+        description="Ignored for Edge TTS (kept for API compatibility)",
     )
     pitch: Optional[str] = Field(default=None)
     ar_voice: Optional[str] = Field(default=None)
     provider: Optional[str] = Field(default=None)
     language: Optional[str] = Field(default=None)
-    format: Optional[str] = Field(default="wav")
+    format: Optional[str] = Field(default="mp3")
     sample_rate: Optional[int] = Field(default=24000)
     with_timing: Optional[bool] = Field(default=True)
 
     @field_validator("provider", mode="before")
     @classmethod
-    def _azure_only_provider(cls, v: object) -> Optional[str]:
+    def _provider_allowed(cls, v: object) -> Optional[str]:
         if v is None or v == "":
             return None
         s = str(v).strip().lower()
-        if s in ("azure", "auto"):
+        if s in ("edge", "auto", "elevenlabs"):
             return s
         raise ValueError(
-            f"TTS provider {v!r} is not allowed — only 'azure' (or omit). "
-            "Non-Azure backends are disabled."
+            f"TTS provider {v!r} is not allowed — use 'edge', 'auto', or 'elevenlabs' (or omit). "
         )
 
 
@@ -155,16 +164,16 @@ class TTSResponse(BaseModel):
     word_timings: List[Dict[str, Any]] = []
     viseme_events: List[Dict[str, Any]] = []
     sample_rate: int = 24000
-    format: str = "wav"
-    timing_mode: str = "native"
+    format: str = "mp3"
+    timing_mode: str = "stub"
     provider: Optional[str] = None
     voice: Optional[str] = None
 
 
 @router.post("/tts-reset-circuit")
 async def tts_reset_circuit(_auth: User = Depends(get_teacher_user)):
-    _azure_cb_record_success()
-    return {"ok": True, "message": "Azure TTS circuit breaker reset"}
+    _tts_cb_record_success()
+    return {"ok": True, "message": "Edge TTS circuit breaker reset"}
 
 
 @router.post("/tts-with-timing", response_model=TTSResponse)
@@ -182,17 +191,90 @@ async def tts_with_timing(
         _tts_obs_inc("errors_rate_limited")
         raise HTTPException(status_code=429, detail="Rate limit exceeded (3 req/s per user)")
 
-    try:
-        require_azure_speech_config(settings.AZURE_SPEECH_KEY, settings.AZURE_SPEECH_REGION)
-    except RuntimeError as e:
-        logger.error("Azure TTS configuration error: %s", e)
-        raise HTTPException(status_code=503, detail=str(e)) from e
-
-    if not _azure_cb_ok():
-        logger.warning("Azure TTS circuit open — rejecting request")
+    env_prov = (os.getenv("TTS_PROVIDER", "edge") or "edge").lower().strip()
+    if env_prov not in ("edge", "auto", "elevenlabs"):
+        logger.error("tts-with-timing: TTS_PROVIDER env=%r is not allowed", env_prov)
         raise HTTPException(
             status_code=503,
-            detail="Azure TTS temporarily unavailable (circuit open). Retry shortly or POST /tts-reset-circuit.",
+            detail="Server misconfiguration: TTS_PROVIDER must be 'edge', 'auto', or 'elevenlabs'.",
+        )
+
+    if env_prov == "elevenlabs":
+        _tts_obs_inc("requests_total")
+        t_start = time.monotonic()
+        _el_voice = (os.getenv("ELEVENLABS_VOICE_ID") or "").strip() or "elevenlabs"
+        try:
+            mp3_bytes = await asyncio.wait_for(
+                synthesize_elevenlabs_async(text),
+                timeout=float(os.getenv("ELEVENLABS_TTS_TIMEOUT_SEC", "120")),
+            )
+        except Exception as e:
+            logger.exception("ElevenLabs TTS failed: %s", e)
+            raise HTTPException(
+                status_code=502,
+                detail=f"ElevenLabs TTS failed: {e!s}",
+            ) from e
+
+        if not mp3_bytes or len(mp3_bytes) < 32:
+            raise HTTPException(
+                status_code=502,
+                detail="ElevenLabs returned empty audio — synthesis integrity check failed.",
+            )
+
+        viseme_events = stub_viseme_timeline_for_text(text)
+        word_timings: List[Dict[str, Any]] = []
+
+        b64 = base64.b64encode(mp3_bytes).decode("ascii")
+        if not b64:
+            raise HTTPException(status_code=502, detail="ElevenLabs audio encoding failed.")
+
+        t_mode = "stub"
+        ms = int((time.monotonic() - t_start) * 1000)
+        audio_b = len(mp3_bytes)
+        vis_n = len(viseme_events)
+        logger.info(
+            "TTS provider=elevenlabs | format=mp3 | timing=%s | duration_ms=%d | audio_bytes=%d | viseme_count=%d | word_count=%d",
+            t_mode,
+            ms,
+            audio_b,
+            vis_n,
+            len(word_timings),
+        )
+
+        _resp = TTSResponse(
+            audio_base64=b64,
+            audio_wav_base64=None,
+            audio_mp3_base64=b64,
+            word_timings=word_timings,
+            viseme_events=viseme_events,
+            sample_rate=44100,
+            format="mp3",
+            timing_mode=t_mode,
+            provider="elevenlabs",
+            voice=_el_voice,
+        )
+        if _store is not None:
+            background_tasks.add_task(
+                _store.append_from_response,
+                text, "elevenlabs", _resp.timing_mode, _resp.sample_rate,
+                _resp.audio_mp3_base64, _resp.word_timings, _resp.viseme_events,
+                int((time.monotonic() - t_start) * 1000),
+            )
+        _tts_obs_inc("success_elevenlabs")
+        return _resp
+
+    # --- Microsoft Edge TTS (TTS_PROVIDER=edge|auto) ---
+    if not _EDGE_TTS_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="edge-tts is not installed on the server.",
+        )
+
+    if not _tts_cb_ok():
+        logger.warning("Edge TTS circuit open — rejecting request")
+        raise HTTPException(
+            status_code=503,
+            detail="Edge TTS temporarily unavailable (circuit open). Retry shortly or POST /tts-reset-circuit.",
         )
 
     _tts_obs_inc("requests_total")
@@ -200,66 +282,45 @@ async def tts_with_timing(
 
     _ar_voice_req = (payload.ar_voice or "").strip().lower()
     if _ar_voice_req == "female":
-        logger.warning("tts-with-timing: ar_voice=female ignored — Cogni locked to male Jordanian TTS")
+        logger.warning("tts-with-timing: ar_voice=female — set EDGE_TTS_VOICE=ar-JO-SanaNeural if needed")
 
-    _azure_voice = (
-        payload.voice if payload.voice and payload.voice not in ("am_michael",)
-        else os.getenv("TTS_VOICE", settings.TTS_ARABIC_VOICE)
-    )
-    _azure_voice = _locked_jordanian_male_voice(_azure_voice)
-
-    env_prov = (os.getenv("TTS_PROVIDER", "azure") or "azure").lower().strip()
-    if env_prov not in ("azure", "auto"):
-        logger.error("tts-with-timing: TTS_PROVIDER env=%r is not allowed — Azure only", env_prov)
-        raise HTTPException(
-            status_code=503,
-            detail="Server misconfiguration: TTS_PROVIDER must be 'azure' (or unset).",
-        )
+    _voice = edge_tts_voice_name()
 
     try:
-        _ei = float(payload.emotion_intensity if payload.emotion_intensity is not None else 0.72)
-        _ei = max(0.0, min(1.0, _ei))
-        wav_bytes, word_timings, viseme_events, timing_approx = await azure_synthesize(
-            text,
-            key=settings.AZURE_SPEECH_KEY,
-            region=settings.AZURE_SPEECH_REGION,
-            voice=_azure_voice,
-            emotion=(payload.emotion or 'neutral'),
-            intensity=_ei,
+        mp3_bytes = await asyncio.wait_for(
+            synthesize_edge_tts_async(text, _voice),
+            timeout=float(os.getenv("EDGE_TTS_TIMEOUT_SEC", "120")),
         )
-        _azure_cb_record_success()
+        _tts_cb_record_success()
     except Exception as e:
-        _azure_cb_record_failure()
-        _tts_obs_inc("errors_azure")
-        logger.exception("Azure TTS synthesis failed: %s", e)
+        _tts_cb_record_failure()
+        _tts_obs_inc("errors_edge")
+        logger.exception("Edge TTS synthesis failed: %s", e)
         raise HTTPException(
             status_code=502,
-            detail=f"Azure TTS failed: {e!s}",
+            detail=f"Edge TTS failed: {e!s}",
         ) from e
 
-    if not wav_bytes or len(wav_bytes) < 48:
-        logger.error("Azure TTS returned empty or invalid WAV payload")
+    if not mp3_bytes or len(mp3_bytes) < 32:
+        logger.error("Edge TTS returned empty or invalid MP3 payload")
         raise HTTPException(
             status_code=502,
-            detail="Azure TTS returned empty audio — synthesis integrity check failed.",
-        )
-    if not viseme_events:
-        logger.error("Azure TTS returned no viseme events — lip-sync unavailable")
-        raise HTTPException(
-            status_code=502,
-            detail="Azure TTS returned no viseme events — cannot drive lip sync.",
+            detail="Edge TTS returned empty audio — synthesis integrity check failed.",
         )
 
-    b64 = base64.b64encode(wav_bytes).decode("ascii")
+    viseme_events = stub_viseme_timeline_for_text(text)
+    word_timings: List[Dict[str, Any]] = []
+
+    b64 = base64.b64encode(mp3_bytes).decode("ascii")
     if not b64:
-        raise HTTPException(status_code=502, detail="Azure TTS audio encoding failed.")
+        raise HTTPException(status_code=502, detail="Edge TTS audio encoding failed.")
 
-    t_mode = "approx" if timing_approx else "native"
+    t_mode = "stub"
     ms = int((time.monotonic() - t_start) * 1000)
-    audio_b = len(wav_bytes)
+    audio_b = len(mp3_bytes)
     vis_n = len(viseme_events)
     logger.info(
-        "TTS provider=azure | format=wav | timing=%s | duration_ms=%d | audio_bytes=%d | viseme_count=%d | word_count=%d",
+        "TTS provider=edge | format=mp3 | timing=%s | duration_ms=%d | audio_bytes=%d | viseme_count=%d | word_count=%d",
         t_mode,
         ms,
         audio_b,
@@ -269,22 +330,22 @@ async def tts_with_timing(
 
     _resp = TTSResponse(
         audio_base64=b64,
-        audio_wav_base64=b64,
-        audio_mp3_base64=None,
+        audio_wav_base64=None,
+        audio_mp3_base64=b64,
         word_timings=word_timings,
         viseme_events=viseme_events,
         sample_rate=24000,
-        format="wav",
+        format="mp3",
         timing_mode=t_mode,
-        provider="azure",
-        voice=_azure_voice,
+        provider=None,
+        voice=_voice,
     )
     if _store is not None:
         background_tasks.add_task(
             _store.append_from_response,
-            text, _resp.provider, _resp.timing_mode, _resp.sample_rate,
-            _resp.audio_wav_base64, _resp.word_timings, _resp.viseme_events,
+            text, "edge", _resp.timing_mode, _resp.sample_rate,
+            _resp.audio_mp3_base64, _resp.word_timings, _resp.viseme_events,
             int((time.monotonic() - t_start) * 1000),
         )
-    _tts_obs_inc("success_azure")
+    _tts_obs_inc("success_edge")
     return _resp

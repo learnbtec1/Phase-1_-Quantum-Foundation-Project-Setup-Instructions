@@ -62,7 +62,7 @@ export async function POST(req: NextRequest) {
         {
           ok: true,
           tts: {
-            provider: j.provider ?? 'azure',
+            provider: j.provider ?? 'edge',
             voice: j.voice ?? (body as { voice?: string })?.voice ?? null,
             format: j.format ?? 'wav',
             sampleRate: j.sample_rate ?? 24000,

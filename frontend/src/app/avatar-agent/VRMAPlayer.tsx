@@ -244,6 +244,10 @@ export type VRMAPlayEventDetail = {
   loop?: boolean;
   /** Engine stem (optional) — for logging / dedupe hints. */
   vrmaStem?: string;
+  /** Brain contract urgency 0–1 → crossFade duration 0.4−0.2×u */
+  urgency?: number;
+  /** Phase 5 — slower crossfade when cognitive load high */
+  cognitiveLoad?: number;
   /** داخلي — عدّ محاولات إعادة التحميل بعد الفشل */
   _retry?: number;
 };
@@ -414,6 +418,8 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
       durationMs: number,
       loop: boolean,
       authorityTier?: 'baseline' | 'full',
+      urgency?: number,
+      cognitiveLoad?: number,
     ) => boolean
   >(() => false);
 
@@ -422,6 +428,8 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
     durationMs: number,
     loop: boolean,
     authorityTier: 'baseline' | 'full' = 'full',
+    urgency?: number,
+    cognitiveLoad?: number,
   ): boolean => {
     const mixer = mixerRef.current;
     if (!mixer) {
@@ -459,23 +467,31 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
       }
     }
 
-    // أوقف الإيماءة السابقة بتلاشٍ سلس (≥ 0.25s)
-    if (cur) {
-      cur.fadeOut(VRMA_CROSSFADE_SEC);
-    }
+    const cl =
+      typeof cognitiveLoad === 'number' ? THREE.MathUtils.clamp(cognitiveLoad, 0, 1) : 0;
+    const fadeSec = THREE.MathUtils.clamp(
+      (typeof urgency === 'number' ? 0.4 - urgency * 0.2 : VRMA_CROSSFADE_SEC) * (1 + cl * 0.6),
+      0.2,
+      0.95,
+    );
 
-    const action = mixer.clipAction(clip);
-    action.reset();
-    action.setLoop(
+    const nextAction = mixer.clipAction(clip);
+    nextAction.reset();
+    nextAction.setLoop(
       loop ? THREE.LoopRepeat : THREE.LoopOnce,
       loop ? Infinity : 1,
     );
-    action.clampWhenFinished = !loop;
-    action.fadeIn(VRMA_CROSSFADE_SEC).play();
+    nextAction.clampWhenFinished = !loop;
 
-    currentActionRef.current = action;
+    if (cur && cur.isRunning()) {
+      cur.crossFadeTo(nextAction, fadeSec, false);
+    } else {
+      nextAction.fadeIn(fadeSec).play();
+    }
+
+    currentActionRef.current = nextAction;
     lastPlayingClipUuidRef.current = clip.uuid;
-    actionEndMsRef.current   = performance.now() + durationMs;
+    actionEndMsRef.current   = (typeof performance !== 'undefined' ? performance.now() : Date.now()) + durationMs;
     isLoopingRef.current     = loop;
 
     if (process.env.NODE_ENV === 'development') {
@@ -641,7 +657,14 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
         detail.durationMs ??
         (clip.duration > 0 ? clip.duration * 1050 : DEFAULT_DURATION_MS);
       const tier = isBaselineIdleVrma(detail, url, loop) ? 'baseline' : 'full';
-      const ok = playClipRef.current(clip, durationMs, loop, tier);
+      const ok = playClipRef.current(
+        clip,
+        durationMs,
+        loop,
+        tier,
+        detail.urgency,
+        detail.cognitiveLoad,
+      );
       if (!ok) {
         motionDebug('VRMA IGNORED:', 'playClip-false-after-load', clip.name, url);
       }

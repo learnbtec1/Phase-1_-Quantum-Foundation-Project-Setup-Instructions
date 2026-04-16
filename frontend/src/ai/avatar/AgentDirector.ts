@@ -10,6 +10,7 @@ import type {
   AgentFrame,
 } from '@/types/ai';
 import { useBrainStore }                     from '@/store/useBrainStore';
+import { nowMs as masterClockNowMs } from '@/lib/avatar/masterClock';
 import { decideBehaviorFromPAD }             from '@/ai/cognitive/BehaviorRulesEngine';
 import type { EmotionalContextBrief }        from '@/ai/cognitive/BehaviorRulesEngine';
 import { gestureEngine, unifiedGestureEngine } from '@/ai/cognitive/GestureEngine';
@@ -20,7 +21,7 @@ import { dispatchAvatar }                    from '@/utils/events/normalizeAvata
 import { resetSpeechIntentHints, setSpeechIntentHintsFromText } from '@/lib/avatar/speechIntentHints';
 import { speakWithTTS, stopTTSGlobally, resolveSpeakRate } from '@/ai/io/tts';
 import { COGNI_PERSONA, AVATAR_PERSONALITY } from '@/config/personality';
-import { ENABLE_MIME_MODE, LEVEL6_UNIFIED_BEHAVIOR } from '@/config/avatar';
+import { LEVEL6_UNIFIED_BEHAVIOR } from '@/config/avatar';
 import { emotionalMemoryManager }            from '@/ai/avatar/EmotionalMemoryManager';
 import {
   microReactionDelay,
@@ -30,10 +31,7 @@ import {
   estimateSpeechDurationMs,
   gesturePrerollMs,
 } from '@/utils/TimingUtils';
-import {
-  computeInteractionIntent,
-  type InteractionIntent,
-} from '@/ai/avatar/avatarIntent';
+import type { InteractionIntent } from '@/ai/avatar/avatarIntent';
 
 declare global {
   interface Window {
@@ -162,13 +160,6 @@ function emitAgentMessage(text: string, emotion: EmotionLabel): void {
   );
 }
 
-function useAgentMessageAzureTts(): boolean {
-  return (
-    typeof process !== 'undefined' &&
-    process.env.NEXT_PUBLIC_USE_AGENT_MESSAGE_AZURE_TTS === 'true'
-  );
-}
-
 export class AgentDirector {
   /** V31 — dedupe rapid identical scheduleTTS (quota / WS duplicate frames) */
   private _lastScheduledTtsText = '';
@@ -207,16 +198,16 @@ export class AgentDirector {
     const subs = [
       // 1. مراقبة العواطف
       useBrainStore.subscribe(s => s.emotionLabel, (next, prev) => {
-        if (next !== prev && Date.now() - this._lastEmotionReact > EMOTION_DEBOUNCE_MS) {
-          this._lastEmotionReact = Date.now();
+        if (next !== prev && masterClockNowMs() - this._lastEmotionReact > EMOTION_DEBOUNCE_MS) {
+          this._lastEmotionReact = masterClockNowMs();
           this._reactToEmotion(next);
         }
       }),
       // 2. مراقبة متجهات PAD
       useBrainStore.subscribe(s => s.pad, (next, prev) => {
         const delta = Math.abs(next.pleasure - prev.pleasure) + Math.abs(next.arousal - prev.arousal);
-        if (delta > 0.1 && Date.now() - this._lastPADReact > PAD_DEBOUNCE_MS) {
-          this._lastPADReact = Date.now();
+        if (delta > 0.1 && masterClockNowMs() - this._lastPADReact > PAD_DEBOUNCE_MS) {
+          this._lastPADReact = masterClockNowMs();
           this._reactToPAD(next);
         }
       }),
@@ -288,6 +279,7 @@ export class AgentDirector {
     this._unsubs.push(useBrainStore.subscribe(s => s.physical.isListening, scheduleIntent));
     this._unsubs.push(useBrainStore.subscribe(s => s.emotionLabel, scheduleIntent));
     this._unsubs.push(useBrainStore.subscribe(s => s.lastFrame, scheduleIntent));
+    this._unsubs.push(useBrainStore.subscribe(s => s.pad, scheduleIntent));
     this._later(320, () => this._flushInteractionIntent());
   }
 
@@ -321,18 +313,8 @@ export class AgentDirector {
 
   private _flushInteractionIntent(): void {
     if (!this._running) return;
-    const s = useBrainStore.getState();
-    const next = computeInteractionIntent({
-      talking: s.talking,
-      thinking: s.thinking,
-      isUserSpeaking: s.isUserSpeaking,
-      isListening: s.physical.isListening,
-      emotionLabel: s.emotionLabel,
-      lastFrame: s.lastFrame,
-    });
-    if (next === s.interactionIntent) return;
-    s.setInteractionIntent(next);
-    this._emitIntentPresentationCue(next);
+    const { changed, intent } = useBrainStore.getState().tickIntentBrain(masterClockNowMs());
+    if (changed) this._emitIntentPresentationCue(intent);
   }
 
   /**
@@ -359,10 +341,15 @@ export class AgentDirector {
       );
       return;
     }
-    if (intent === 'explaining') {
+    if (intent === 'explaining' || intent === 'emphasizing') {
       window.dispatchEvent(new CustomEvent('avatar:blink', { detail: { style: 'normal' } }));
       window.dispatchEvent(
-        new CustomEvent('avatar:gaze', { detail: { yaw: -0.02, pitch: -0.018, durationMs: 1500 } }),
+        new CustomEvent('avatar:gaze', {
+          detail:
+            intent === 'emphasizing'
+              ? { yaw: -0.04, pitch: -0.026, durationMs: 1200 }
+              : { yaw: -0.02, pitch: -0.018, durationMs: 1500 },
+        }),
       );
       return;
     }
@@ -671,22 +658,6 @@ export class AgentDirector {
     }, delay);
   }
 
-  /** خطة بديلة عند تعطل الصوت: محاكاة أداء الكلام حركياً */
-  private _handleTTSFallback(text: string, emotion: EmotionLabel): void {
-    console.warn('[AgentDirector] TTS Fallback — Simulating performance');
-    // CRITICAL ORDER: fire gesture FIRST so vrmaGestureUntilRef is set
-    // before avatar:speak:start reaches AvatarCanvas onSpeakStart.
-    // If speak:start fires first, onSpeakStart sees no active gesture and
-    // immediately plays sitTalk, killing the gesture animation.
-    this._applyEmotionContract(emotion);
-    setSpeechIntentHintsFromText(text);
-    emit('avatar:speak:start', {});
-    this._later(estimateSpeechDurationMs(text), () => {
-      resetSpeechIntentHints();
-      emit('avatar:speak:end', {});
-    });
-  }
-
   // ── Emotion Contracts ───────────────────────────────────────────────────────
 
   private _applyEmotionContract(emotion: EmotionLabel): void {
@@ -822,7 +793,7 @@ export class AgentDirector {
   async scheduleTTS(text: string, emotion: EmotionLabel, delay = 0): Promise<void> {
     if (!text?.trim()) return;
     const trimmed = text.trim();
-    const now = Date.now();
+    const now = masterClockNowMs();
     if (
       trimmed === this._lastScheduledTtsText
       && now - this._lastScheduledTtsAt < 10_000
@@ -833,74 +804,45 @@ export class AgentDirector {
     this._lastScheduledTtsText = trimmed;
     this._lastScheduledTtsAt = now;
 
-    if (ENABLE_MIME_MODE) {
-      await new Promise<void>(res => {
-        this._later(delay, () => {
-          if (typeof window !== 'undefined') {
-            window.dispatchEvent(
-              new CustomEvent('cogni:pre_speech', {
-                detail: { text: trimmed.slice(0, 160), emotion: String(emotion) },
-              }),
-            );
-          }
-          stopTTSGlobally();
-          emitAgentMessage(trimmed, emotion);
-          if (LEVEL6_UNIFIED_BEHAVIOR) emitBehaviorText(trimmed, 'conversation');
-          useBrainStore.getState().setTalking(true);
-          setSpeechIntentHintsFromText(trimmed);
-          emit('avatar:speak:start', {});
-          const simulatedMs = Math.max(400, Math.min(120_000, trimmed.length * 65));
-          const endT = setTimeout(() => {
-            this._timers = this._timers.filter(x => x !== endT);
-            useBrainStore.getState().setTalking(false);
-            resetSpeechIntentHints();
-            emit('avatar:speak:end', {});
-            res();
-          }, simulatedMs);
-          this._timers.push(endT);
-        });
-      });
-      return;
-    }
-
-    const clientAzure = useAgentMessageAzureTts();
-
     await new Promise<void>(res => {
       this._later(delay, async () => {
         stopTTSGlobally();
         emitAgentMessage(trimmed, emotion);
         if (LEVEL6_UNIFIED_BEHAVIOR) emitBehaviorText(trimmed, 'conversation');
 
-        if (clientAzure) {
-          if (typeof window !== 'undefined') {
-            window.dispatchEvent(
-              new CustomEvent('cogni:pre_speech', {
-                detail: { text: trimmed.slice(0, 160), emotion: String(emotion) },
-              }),
-            );
-          }
-          // الصوت يُشغَّل من `AvatarCanvas` عبر `onAgentSpeak` (Azure SDK + visemes).
-          res();
-          return;
-        }
-
         useBrainStore.getState().setTalking(true);
-        const ok = await speakWithTTS(text, { 
-          emotion,
-          rate: resolveSpeakRate(emotion, COGNI_VOICE.rate),
-          ...(COGNI_VOICE.pitchScale > 1.01 ? { pitch: '+2Hz' as const } : {}),
-          arVoice: 'male', 
-          onStart: () => {
-            emit('avatar:speak:start', {});
-          }, 
-          onEnd: () => { 
-            useBrainStore.getState().setTalking(false); 
+        try {
+          const audio = await speakWithTTS(text, {
+            emotion,
+            rate: resolveSpeakRate(emotion, COGNI_VOICE.rate),
+            ...(COGNI_VOICE.pitchScale > 1.01 ? { pitch: '+2Hz' as const } : {}),
+            arVoice: 'male',
+            onStart: () => {
+              emit('avatar:speak:start', {});
+            },
+            onEnd: () => {
+              useBrainStore.getState().setTalking(false);
+              resetSpeechIntentHints();
+              emit('avatar:speak:end', {});
+              res();
+            },
+          });
+          if (!audio) {
+            useBrainStore.getState().setTalking(false);
             resetSpeechIntentHints();
-            emit('avatar:speak:end', {}); 
-            res(); 
-          } 
-        });
-        if (!ok) { this._handleTTSFallback(text, emotion); res(); }
+            // eslint-disable-next-line no-console
+            console.warn(
+              '[AgentDirector] speakWithTTS failed — TTS API error, empty visemes/audio, or playback blocked (see [speakWithTTS] logs)',
+            );
+            res();
+          }
+        } catch (e) {
+          useBrainStore.getState().setTalking(false);
+          resetSpeechIntentHints();
+          // eslint-disable-next-line no-console
+          console.error('[AgentDirector] speakWithTTS error:', e);
+          res();
+        }
       });
     });
   }

@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Kokoro TTS — DISABLED. Production uses Azure Speech only.
+Kokoro TTS — DISABLED. Production uses Microsoft Edge TTS (edge-tts) only.
 
 This module remains as a stub so accidental imports fail loudly instead of
-pulling optional kokoro dependencies. Use ``app.services.azure_tts`` for synthesis.
+pulling optional kokoro dependencies. Use ``app.services.tts_service`` (Edge TTS) for synthesis.
 """
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 _DISABLED_MSG = (
-    "Kokoro TTS is disabled — Cogni uses Azure Speech only. "
-    "Configure AZURE_SPEECH_KEY and AZURE_SPEECH_REGION."
+    "Kokoro TTS is disabled — Cogni uses Edge TTS (edge-tts) only. "
+    "No API key required; ensure outbound network to Microsoft."
 )
 
 

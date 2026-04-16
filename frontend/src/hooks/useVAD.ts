@@ -11,6 +11,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { getSharedAudioContext } from '@/lib/audio/avatarAudioContext';
 
 export interface UseVADOptions {
   /** Called when speech segment ends; receives WAV blob. */
@@ -53,12 +54,13 @@ async function buildWavBlob(chunks: Blob[], sampleRate: number): Promise<Blob | 
   try {
     const combined = new Blob(chunks);
     const arrBuf = await combined.arrayBuffer();
-    const ctx = new AudioContext({ sampleRate });
-    const decoded = await ctx.decodeAudioData(arrBuf);
-    await ctx.close();
+    const ctx = getSharedAudioContext();
+    if (!ctx) return null;
+    const decoded = await ctx.decodeAudioData(arrBuf.slice(0));
 
     const numChannels = 1;
     const numSamples = decoded.length;
+    const outRate = decoded.sampleRate || sampleRate;
     const bytesPerSample = 2;
     const bufSize = 44 + numSamples * bytesPerSample;
     const buf = new ArrayBuffer(bufSize);
@@ -67,7 +69,7 @@ async function buildWavBlob(chunks: Blob[], sampleRate: number): Promise<Blob | 
     const writeStr = (offset: number, s: string) => {
       for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
     };
-    const byteRate = sampleRate * numChannels * bytesPerSample;
+    const byteRate = outRate * numChannels * bytesPerSample;
     writeStr(0, 'RIFF');
     view.setUint32(4, bufSize - 8, true);
     writeStr(8, 'WAVE');
@@ -75,7 +77,7 @@ async function buildWavBlob(chunks: Blob[], sampleRate: number): Promise<Blob | 
     view.setUint32(16, 16, true);
     view.setUint16(20, 1, true);         // PCM
     view.setUint16(22, numChannels, true);
-    view.setUint32(24, sampleRate, true);
+    view.setUint32(24, outRate, true);
     view.setUint32(28, byteRate, true);
     view.setUint16(32, numChannels * bytesPerSample, true);
     view.setUint16(34, 16, true);        // bitsPerSample
@@ -113,6 +115,7 @@ export function useVAD({
   const chunksRef = useRef<Blob[]>([]);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const vadMediaSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rafRef = useRef<number>(0);
   const speechStartedRef = useRef(false);
@@ -175,7 +178,10 @@ export function useVAD({
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
 
-    try { audioCtxRef.current?.close(); } catch { /* ignore */ }
+    try {
+      vadMediaSourceRef.current?.disconnect();
+    } catch { /* ignore */ }
+    vadMediaSourceRef.current = null;
     audioCtxRef.current = null;
     try { (window as unknown as Record<string, unknown>).__AUDIO_CTX__ = null; } catch { /* SSR */ }
     analyserRef.current = null;
@@ -255,7 +261,10 @@ export function useVAD({
           if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
           streamRef.current   = null;
           recorderRef.current = null;
-          try { audioCtxRef.current?.close(); } catch { /* ignore */ }
+          try {
+            vadMediaSourceRef.current?.disconnect();
+          } catch { /* ignore */ }
+          vadMediaSourceRef.current = null;
           audioCtxRef.current  = null;
           analyserRef.current  = null;
           chunksRef.current    = [];
@@ -344,13 +353,21 @@ export function useVAD({
       wireRecorder(recorder);
       recorder.start(100);
 
-      // Set up analyser for VAD
-      const ctx = new AudioContext();
-      ctx.resume().catch(() => {/* browsers may start AudioContext suspended; useAgentAgent unlocks on first gesture */});
+      // Set up analyser for VAD — single shared AudioContext (do not close on stop)
+      const ctx = getSharedAudioContext();
+      if (!ctx) {
+        throw new Error('[useVAD] getSharedAudioContext() unavailable');
+      }
+      void ctx.resume().catch(() => {
+        console.warn('[useVAD] Shared AudioContext still suspended — mic graph may be silent until unlock');
+      });
       audioCtxRef.current = ctx;
-      // Expose for Page Lifecycle suspend/resume from useAgentAgent.ts
       try { (window as unknown as Record<string, unknown>).__AUDIO_CTX__ = ctx; } catch { /* SSR */ }
+      try {
+        vadMediaSourceRef.current?.disconnect();
+      } catch { /* ignore */ }
       const source = ctx.createMediaStreamSource(stream);
+      vadMediaSourceRef.current = source;
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 512;
       source.connect(analyser);

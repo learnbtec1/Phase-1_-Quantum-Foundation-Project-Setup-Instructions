@@ -7,7 +7,13 @@ import type { VRM } from '@pixiv/three-vrm';
 import { DEBUG_AVATAR } from '@/app/avatar-agent/debugAvatar';
 import { lerp } from './utils';
 import { useBrainStore } from '@/store/useBrainStore';
-import { getIntentPresentation } from '@/ai/avatar/avatarIntent';
+import { isExplainingIntent } from '@/ai/avatar/avatarIntent';
+import { getBlendedIntentPresentation, humanVariationMul } from '@/ai/avatar/brainState';
+import {
+  getBehavioralSignature,
+  modulateEyeIntentionForPersonality,
+  modulatePresentationForPersonality,
+} from '@/ai/avatar/personalityProfile';
 import { getPersonality } from '@/ai/avatar/avatarPersonality';
 import { tickMicroExpressions } from '@/ai/avatar/microExpressionLayer';
 import { getEyeEmotionMods, PRE_SPEECH_DECAY_SEC } from '@/lib/avatar/eyeIntelligence';
@@ -18,7 +24,11 @@ import {
   getEyeIntentionScalars,
 } from '@/lib/avatar/eyeIntention';
 import { getUserMirrorMicroAdds } from '@/lib/avatar/userEmotionMirror';
+import { nowMs as masterClockNowMs, sessionElapsedSec } from '@/lib/avatar/masterClock';
+import { tickEngagement, getAttentionDriftEulerAdd } from '@/lib/avatar/consciousStateManager';
+import { usePerceptionStore, getPerceptionBlinkIntervalMul } from '@/store/usePerceptionStore';
 import { getEmbodimentHints } from '@/lib/avatar/emotionalMemory';
+import { getActiveAudioElement, getPlaybackTimeSec } from '@/lib/avatar/audioTimeline';
 import { getGazeIntentionPersonalityMods } from '@/lib/avatar/personalityEvolution';
 
 const TAB_SAFE_MAX_DELTA = 0.1;
@@ -172,6 +182,8 @@ export type AnimationControllerProps = {
   neckGazeYawRef: MutableRefObject<number>;
   neckGazePitchRef: MutableRefObject<number>;
   groupRef: RefObject<THREE.Group | null>;
+  /** From VRMAPlayer — when true, skip VRM lookAt eye target updates to avoid fighting VRMA head. */
+  vrmaActiveRef?: MutableRefObject<boolean>;
 };
 
 /**
@@ -185,6 +197,7 @@ export function AnimationController({
   neckGazeYawRef,
   neckGazePitchRef,
   groupRef,
+  vrmaActiveRef,
 }: AnimationControllerProps): null {
   const { camera, pointer } = useThree();
 
@@ -205,6 +218,7 @@ export function AnimationController({
   const eyeBobPhaseARef = useRef(Math.random() * Math.PI * 2);
   const eyeBobPhaseBRef = useRef(Math.random() * Math.PI * 2);
   const eyeBobJitterNextRef = useRef(0);
+  const prevDesireGazeRef = useRef({ y: 0, p: 0 });
 
   // ── Gaze override (from avatar:gaze / SpontaneousBehavior look_away) ────────
   /** Target yaw override; fades back to pointer after durationMs */
@@ -305,7 +319,7 @@ export function AnimationController({
       gazeOverrideYawRef.current   = THREE.MathUtils.clamp(yaw,   -0.6, 0.6);
       gazeOverridePitchRef.current = THREE.MathUtils.clamp(pitch, -0.3, 0.3);
       gazeOverrideBlendRef.current = 1;
-      gazeOverrideUntilMsRef.current = performance.now() + dur;
+      gazeOverrideUntilMsRef.current = masterClockNowMs() + dur;
     };
     window.addEventListener('avatar:gaze', onGaze as EventListener);
 
@@ -332,6 +346,7 @@ export function AnimationController({
 
     const onPreSpeech = (): void => {
       preSpeechStrengthRef.current = 1;
+      useBrainStore.getState().pulseIntentAnticipation();
     };
     window.addEventListener('cogni:pre_speech', onPreSpeech as EventListener);
 
@@ -345,16 +360,18 @@ export function AnimationController({
     };
   }, []);
 
-  useFrame((state, delta) => {
+  useFrame((_, delta) => {
     if (!vrm?.expressionManager) return;
 
     const safeDelta = Math.min(Math.max(delta, 0), TAB_SAFE_MAX_DELTA);
-    const t = state.clock.elapsedTime;
-    const nowMs = performance.now();
+    const t = sessionElapsedSec();
+    const nowMs = masterClockNowMs();
     const em = vrm.expressionManager;
 
     // One-time expression audit (dev only) — reveals which VRM alias names work
     runExprAudit(em);
+
+    useBrainStore.getState().brainCognitiveFrame(safeDelta, nowMs);
 
     const brainEarly = useBrainStore.getState();
     const userEngagedEarly = brainEarly.isUserSpeaking || brainEarly.physical.isListening;
@@ -369,13 +386,54 @@ export function AnimationController({
     }
 
     const phaseTalking = isTalkingRef.current;
+    if (
+      phaseTalking
+      && process.env.NEXT_PUBLIC_DEBUG_LIP_DRIFT === 'true'
+      && typeof window !== 'undefined'
+    ) {
+      const el = getActiveAudioElement();
+      if (el && !el.paused) {
+        (window as Window & { __cogniAudioPlayheadSec?: number }).__cogniAudioPlayheadSec =
+          getPlaybackTimeSec();
+      }
+    }
     const skGesture =
       typeof window !== 'undefined'
         ? (window as Window & { __avatarSkeletonGesture?: string }).__avatarSkeletonGesture ?? 'idle'
         : 'idle';
-    const brain = brainEarly;
+    usePerceptionStore.getState().tickSilence(safeDelta * 1000);
+
+    const brain = useBrainStore.getState();
+    tickEngagement({
+      delta: safeDelta,
+      speaking: phaseTalking,
+      listening: brain.physical.isListening,
+      thinking:
+        brain.preSpeechCognitiveWindow ||
+        brain.interactionIntent === 'thinking' ||
+        isThinkingBrainRef.current,
+    });
     const interactionIntent = brain.interactionIntent;
-    const pres = getIntentPresentation(interactionIntent);
+    const intentE = brain.intentEnergy ?? 0.5;
+    const hv = humanVariationMul(t + brain.interactionIntent.length * 0.17);
+    const presBlended = getBlendedIntentPresentation({
+      committedIntent: brain.interactionIntent,
+      visualFromIntent: brain.intentVisualFrom,
+      visualBlend01: brain.intentVisualBlend01,
+    });
+    const cb = brain.cognitiveAvatarBrain;
+    const presPersonality = modulatePresentationForPersonality(
+      presBlended,
+      cb.effectiveTraits,
+      cb.personality.motionSignature,
+    );
+    const pres = {
+      ...presPersonality,
+      headNoiseMul: presPersonality.headNoiseMul * (0.9 + 0.16 * intentE) * hv,
+      headGazeMul: presPersonality.headGazeMul * (0.94 + 0.1 * intentE) * hv,
+      animationSaccadeMul: presPersonality.animationSaccadeMul * (0.92 + 0.14 * intentE),
+      humanIdleNeckMul: presPersonality.humanIdleNeckMul * (0.93 + 0.12 * intentE),
+    };
     const { curiosity, calm } = getPersonality();
     const userEngaged = brain.isUserSpeaking || brain.physical.isListening;
     const userFocusRaw = userEngaged || interactionIntent === 'listening';
@@ -397,7 +455,7 @@ export function AnimationController({
       (window as Window & { __cogniStabilizeMix?: number }).__cogniStabilizeMix = stabilizeMix;
     }
 
-    const cognitionEye = getEyeIntentionScalars({
+    let cognitionEye = getEyeIntentionScalars({
       intent: interactionIntent,
       isUserSpeaking: brain.isUserSpeaking,
       isListening: brain.physical.isListening,
@@ -410,6 +468,10 @@ export function AnimationController({
     const peGaze = getGazeIntentionPersonalityMods();
     cognitionEye.driftMul *= peGaze.driftMul;
     cognitionEye.gazeDirectAdd += peGaze.gazeDirectAdd;
+    cognitionEye = modulateEyeIntentionForPersonality(
+      cognitionEye,
+      brain.cognitiveAvatarBrain.effectiveTraits,
+    );
     const embLt = getEmbodimentHints();
     const connectionHold =
       gazeConnectionHold(t, stabilizeMix, userEngaged) * embLt.gazeConnectionMul;
@@ -427,6 +489,9 @@ export function AnimationController({
     gazeScale *= THREE.MathUtils.lerp(1, 0.2, stabilizeMix);
     let desireYaw = -pointer.x * gazeScale * 0.55;
     let desirePitch = pointer.y * gazeScale * 0.38;
+    const headTiltBias = getBehavioralSignature(brain.cognitiveAvatarBrain.personality).headTiltBiasRad;
+    const tiltOpen = THREE.MathUtils.lerp(1, 0.28, stabilizeMix);
+    desireYaw += headTiltBias * tiltOpen;
 
     const thinkCtx =
       interactionIntent === 'thinking' || isThinkingBrainRef.current ? 1 : 0;
@@ -445,13 +510,13 @@ export function AnimationController({
       (1 - stabilizeMix * 0.48) * (1 - THREE.MathUtils.clamp(pszEarly, 0, 1) * 0.88);
     desireYaw += tb.yaw * tbBlend;
     desirePitch += tb.pitch * tbBlend;
-    if (interactionIntent === 'explaining' && phaseTalking) {
+    if (isExplainingIntent(interactionIntent) && phaseTalking) {
       const pull = Math.min(1, safeDelta * 2.4);
       desireYaw = THREE.MathUtils.lerp(desireYaw, -pointer.x * gazeScale * 0.35, pull * 0.55);
       desirePitch = THREE.MathUtils.lerp(desirePitch, pointer.y * gazeScale * 0.28, pull * 0.5);
     }
     {
-      const exb = explainingContextualBias(t, interactionIntent === 'explaining' && phaseTalking);
+      const exb = explainingContextualBias(t, isExplainingIntent(interactionIntent) && phaseTalking);
       const exDamp = 1 - stabilizeMix * 0.55;
       desireYaw += exb.yaw * exDamp;
       desirePitch += exb.pitch * exDamp;
@@ -463,14 +528,15 @@ export function AnimationController({
       desirePitch += Math.cos(t * 0.23) * 0.028 * curiosity * idleEnv;
     }
 
-    // ── Attention drift (3–6 s): slow gaze shift, damped when addressing user / speaking ──
+    // ── Attention drift (fixed cadence): deterministic targets from clock (no RNG) ──
     if (nextAttentionDriftAtRef.current === 0) {
-      nextAttentionDriftAtRef.current = nowMs + 3000 + Math.random() * 3000;
+      nextAttentionDriftAtRef.current = nowMs + 4000;
     }
     if (nowMs >= nextAttentionDriftAtRef.current) {
-      attnDriftYawTgtRef.current = (Math.random() - 0.5) * 0.09;
-      attnDriftPitchTgtRef.current = (Math.random() - 0.5) * 0.06;
-      nextAttentionDriftAtRef.current = nowMs + 3000 + Math.random() * 3000;
+      const tick = Math.floor(nowMs / 4000);
+      attnDriftYawTgtRef.current = ((((tick * 1103515245) >>> 0) % 1000) / 1000 - 0.5) * 0.18;
+      attnDriftPitchTgtRef.current = ((((tick * 2246822507) >>> 0) % 1000) / 1000 - 0.5) * 0.12;
+      nextAttentionDriftAtRef.current = nowMs + 4000;
     }
     const driftK = THREE.MathUtils.clamp(safeDelta * 3.2, 0.08, 0.18);
     attnDriftYawSmRef.current = THREE.MathUtils.lerp(
@@ -489,6 +555,10 @@ export function AnimationController({
       cognitionEye.driftMul;
     desireYaw += attnDriftYawSmRef.current * driftVis * 0.48;
     desirePitch += attnDriftPitchSmRef.current * driftVis * 0.48;
+
+    const cAtt = getAttentionDriftEulerAdd(t);
+    desireYaw += cAtt.yaw;
+    desirePitch += cAtt.pitch;
 
     // Blend in gaze override (look_away / spontaneous gaze shift)
     if (gazeOverrideBlendRef.current > 0.01) {
@@ -529,6 +599,13 @@ export function AnimationController({
     const cap = 0.34;
     desireYaw = THREE.MathUtils.clamp(desireYaw, -cap, cap);
     desirePitch = THREE.MathUtils.clamp(desirePitch, -cap, cap);
+    const dMove =
+      Math.abs(desireYaw - prevDesireGazeRef.current.y)
+      + Math.abs(desirePitch - prevDesireGazeRef.current.p);
+    prevDesireGazeRef.current = { y: desireYaw, p: desirePitch };
+    if (dMove > 0.007) {
+      useBrainStore.getState().pulseEmbodimentMotion(nowMs);
+    }
 
     // Eyes lead, neck follows (~80–120 ms equivalent via slower neck lerp)
     let eyeMul = THREE.MathUtils.clamp(safeDelta * 5.5, 0.15, 0.22);
@@ -554,14 +631,17 @@ export function AnimationController({
     // ── Blink — natural interval 2–5 s, closure ~100–200 ms; slow style stretches both ──
     const blinkSlow = blinkStyleRef.current === 'slow';
     const blinkLerpSpeed = blinkSlow ? 12 : 18;
+    const blinkMul = getPerceptionBlinkIntervalMul();
     const blinkIntervalMin =
       (blinkSlow ? 3200 : 2000) *
+      blinkMul *
       microExpr.blinkIntervalScale *
       mirrorAdds.blinkIntervalScaleMul *
       eyeMods.blinkIntervalMul *
       cognitionEye.blinkIntervalMul;
     const blinkIntervalVar =
       (blinkSlow ? 4800 : 3000) *
+      blinkMul *
       microExpr.blinkIntervalScale *
       mirrorAdds.blinkIntervalScaleMul *
       eyeMods.blinkIntervalMul *
@@ -775,7 +855,8 @@ export function AnimationController({
       eyeAccumRef.current.lerp(_fusedEyeScratch, eyeSpd);
     }
 
-    if (lookAt?.lookAt && group) {
+    const vrmaBlocksLookAt = vrmaActiveRef?.current === true;
+    if (!vrmaBlocksLookAt && lookAt?.lookAt && group) {
       lookAt.autoUpdate = false;
       lookAt.lookAt(eyeAccumRef.current);
     }

@@ -1,47 +1,57 @@
 /**
  * TTS-with-timing bridge: forwards to backend POST /api/v1/tts-with-timing
- * Returns { audio_base64, word_timings, sample_rate } for lip-sync.
- * Requires Authorization: Bearer (validated by Python API).
- *
- * Proxies to backend Azure Speech only (no Kokoro/OpenAI TTS fallback).
- * Upstream errors: forward 401/403/429/503 where applicable; other 5xx → 502; detail truncated (bffProxy).
+ * Returns { audio_base64, viseme_events, visemes, sample_rate } for lip-sync.
+ * Requires Authorization: Bearer
+ * Backend may use Microsoft Edge TTS (edge-tts) — provider may be null/edge/azure in JSON.
  */
+
 import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'node:crypto';
 import { backendBaseUrl } from '@/lib/server/bffAuth';
 import {
   extractUpstreamDetail,
-  requireIncomingBearer,
+  resolveIncomingBearerOrDevBypass,
   resolveUpstreamErrorStatus,
   truncateUpstreamDetail,
 } from '@/lib/server/bffProxy';
 
-/** Azure + chunking can exceed 20s; configurable via env (Next server-side only). */
+const MAX_TEXT_LENGTH = 5000;
+
+/** Timeout config */
 function ttsProxyTimeoutMs(): number {
   const raw = process.env.TTS_PROXY_TIMEOUT_MS;
   const n = raw ? parseInt(raw, 10) : NaN;
-  if (Number.isFinite(n) && n >= 15_000) return Math.min(n, 180_000);
-  return 90_000;
+  if (Number.isFinite(n) && n >= 15000) return Math.min(n, 180000);
+  return 90000;
 }
-const MAX_TEXT_LENGTH = 5000;
 
 export async function POST(req: NextRequest) {
   const reqId = randomUUID();
-  const traceHeaders: Record<string, string> = { 'X-Request-ID': reqId };
+  const traceHeaders: Record<string, string> = {
+    'X-Request-ID': reqId,
+  };
 
-  const bearer = requireIncomingBearer(req);
+  // 🔐 AUTH (optional when COGNI_BFF_DEV_BYPASS_AUTH + backend COGNI_DEV_BYPASS_AUTH — Docker demo)
+  const bearer = resolveIncomingBearerOrDevBypass(req);
   if (!bearer.ok) return bearer.response;
 
   try {
-    const payload = await req.json().catch(() => ({}));
-    let text = (payload?.text ?? '').toString().trim().slice(0, MAX_TEXT_LENGTH);
+    // 📥 REQUEST PAYLOAD
+    const requestPayload = await req.json().catch(() => ({}));
+
+    let text = (requestPayload?.text ?? '')
+      .toString()
+      .trim()
+      .slice(0, MAX_TEXT_LENGTH);
+
     if (!text) {
       return NextResponse.json(
         { error: 'Empty text', reqId },
-        { status: 400, headers: traceHeaders },
+        { status: 400, headers: traceHeaders }
       );
     }
 
+    // 🧠 Normalize names
     text = text
       .replace(/Cogni/gi, 'كُوجْنِي')
       .replace(/EDUVERSE/gi, 'إِيدُوفِيرْس');
@@ -50,80 +60,85 @@ export async function POST(req: NextRequest) {
     const upstream =
       process.env.TTS_BACKEND_URL ||
       `${base}/api/v1/tts-with-timing`;
+
     const defaultArabicVoice =
       process.env.TTS_ARABIC_VOICE?.trim() || 'ar-JO-TaimNeural';
 
+    // ⏱ TIMEOUT CONTROL
     const controller = new AbortController();
     const timeoutMs = ttsProxyTimeoutMs();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    const mergeAbort = (AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal })
-      .any;
+
     const upstreamSignal =
-      typeof mergeAbort === 'function'
-        ? mergeAbort([controller.signal, req.signal])
+      typeof (AbortSignal as any).any === 'function'
+        ? (AbortSignal as any).any([controller.signal, req.signal])
         : controller.signal;
 
     let res: Response;
+
     try {
+      const upstreamHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'X-Request-ID': reqId,
+      };
+      if (bearer.authHeader) {
+        upstreamHeaders.Authorization = bearer.authHeader;
+      }
+
       res = await fetch(upstream, {
         method: 'POST',
-        headers: {
-          Authorization: bearer.authHeader,
-          'Content-Type': 'application/json',
-          'X-Request-ID': reqId,
-        },
+        headers: upstreamHeaders,
         body: JSON.stringify({
           text,
-          provider: 'azure',
-          voice: payload?.voice ?? defaultArabicVoice,
-          speed: payload?.speed ?? 0.85,
-          emotion: payload?.emotion ?? 'neutral',
+          provider: 'edge',
+          voice: requestPayload?.voice ?? defaultArabicVoice,
+          speed: requestPayload?.speed ?? 0.85,
+          emotion: requestPayload?.emotion ?? 'neutral',
           emotion_intensity:
-            typeof payload?.emotion_intensity === 'number' && Number.isFinite(payload.emotion_intensity)
-              ? payload.emotion_intensity
+            typeof requestPayload?.emotion_intensity === 'number' &&
+            Number.isFinite(requestPayload.emotion_intensity)
+              ? requestPayload.emotion_intensity
               : 0.72,
-          ...(payload?.pitch ? { pitch: payload.pitch } : {}),
-          ar_voice: payload?.ar_voice ?? 'male',
+          ...(requestPayload?.pitch ? { pitch: requestPayload.pitch } : {}),
+          ar_voice: requestPayload?.ar_voice ?? 'male',
         }),
         signal: upstreamSignal,
       });
     } catch (fetchErr) {
       clearTimeout(timeoutId);
-      console.error(
-        `[tts-route] ❌ Cannot reach backend TTS at ${upstream} (timeout=${timeoutMs}ms) —`,
-        fetchErr,
-      );
+
+      console.error('[tts-route] Backend unreachable:', fetchErr);
+
       return NextResponse.json(
         {
           error: 'Backend unreachable',
           detail: truncateUpstreamDetail(String(fetchErr)),
           reqId,
         },
-        { status: 503, headers: traceHeaders },
+        { status: 503, headers: traceHeaders }
       );
     }
+
     clearTimeout(timeoutId);
 
+    // ❌ ERROR HANDLING
     if (!res.ok) {
       const msg = await res.text().catch(() => '');
-      console.error(
-        `[tts-route] ❌ Backend returned HTTP ${res.status} from ${upstream}:`,
-        msg.slice(0, 500),
-      );
+
       const detail = extractUpstreamDetail(msg);
+
       let upstreamCode: string | undefined;
       try {
-        const j = JSON.parse(msg) as { code?: string };
-        upstreamCode = typeof j?.code === 'string' ? j.code : undefined;
-      } catch {
-        /* plain */
-      }
-      const hourlyQuota =
+        const parsed = JSON.parse(msg);
+        upstreamCode = parsed?.code;
+      } catch {}
+
+      const isQuota =
         res.status === 429 ||
         upstreamCode === 'tts_rate_limit' ||
-        /hourly limit exceeded|TTS hourly limit/i.test(detail) ||
-        /hourly limit exceeded/i.test(msg);
-      if (hourlyQuota) {
+        /hourly limit/i.test(detail);
+
+      if (isQuota) {
         return NextResponse.json(
           {
             error: 'TTS hourly limit exceeded',
@@ -131,68 +146,104 @@ export async function POST(req: NextRequest) {
             code: 'tts_hourly_limit',
             reqId,
           },
-          { status: 429, headers: traceHeaders },
+          { status: 429, headers: traceHeaders }
         );
       }
+
       if (res.status === 503) {
-        const rateLimited =
-          /rate limit|429|too many requests/i.test(detail) ||
-          /rate limit|429/i.test(msg);
         return NextResponse.json(
           {
-            error: rateLimited ? 'Azure TTS rate limited' : 'TTS unavailable',
+            error: 'TTS unavailable',
             detail,
-            code: rateLimited ? 'azure_rate_limited' : 'tts_unavailable',
             reqId,
           },
-          { status: 503, headers: traceHeaders },
+          { status: 503, headers: traceHeaders }
         );
       }
+
       const outStatus = resolveUpstreamErrorStatus(res.status);
+
       return NextResponse.json(
         { error: 'Upstream error', detail, reqId },
-        { status: outStatus, headers: traceHeaders },
+        { status: outStatus, headers: traceHeaders }
       );
     }
 
-    const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-    const provider = typeof data?.provider === 'string' ? data.provider.toLowerCase() : '';
-    const audio = typeof data?.audio_base64 === 'string' ? data.audio_base64 : '';
-    const vis = data?.viseme_events;
-    const visOk = Array.isArray(vis) && vis.length > 0;
-    if (provider !== 'azure') {
-      console.error('[tts-route] Upstream TTS provider is not azure:', provider);
+    // ✅ SUCCESS RESPONSE
+    const data = (await res.json().catch(() => null)) as Record<
+      string,
+      unknown
+    > | null;
+
+    const providerRaw = data?.provider;
+    const provider =
+      typeof providerRaw === 'string' ? providerRaw.toLowerCase().trim() : '';
+
+    const audio =
+      typeof data?.audio_base64 === 'string'
+        ? data.audio_base64
+        : '';
+
+    const visemes = data?.viseme_events;
+
+    const providerOk =
+      !provider ||
+      provider === 'azure' ||
+      provider === 'edge' ||
+      provider === 'auto' ||
+      provider === 'elevenlabs';
+    if (!providerOk) {
       return NextResponse.json(
-        { error: 'TTS integrity', detail: 'Expected provider=azure from backend', reqId },
-        { status: 502, headers: traceHeaders },
+        {
+          error: 'TTS integrity',
+          detail: `Unexpected provider=${String(providerRaw)}`,
+          reqId,
+        },
+        { status: 502, headers: traceHeaders }
       );
     }
-    if (!audio?.length) {
+
+    if (!audio) {
       return NextResponse.json(
-        { error: 'TTS integrity', detail: 'Empty audio from backend', reqId },
-        { status: 502, headers: traceHeaders },
+        {
+          error: 'TTS integrity',
+          detail: 'Empty audio',
+          reqId,
+        },
+        { status: 502, headers: traceHeaders }
       );
     }
-    if (!visOk) {
+
+    if (!Array.isArray(visemes) || visemes.length === 0) {
       return NextResponse.json(
-        { error: 'TTS integrity', detail: 'Missing viseme_events for lip sync', reqId },
-        { status: 502, headers: traceHeaders },
+        {
+          error: 'TTS integrity',
+          detail: 'Missing viseme_events',
+          reqId,
+        },
+        { status: 502, headers: traceHeaders }
       );
     }
-    return NextResponse.json(data ?? {}, { headers: traceHeaders });
+
+    // 👑 FINAL RESPONSE (FIXED)
+    const responsePayload: Record<string, unknown> = {
+      ...data,
+      visemes: visemes, // alias
+    };
+
+    return NextResponse.json(responsePayload, {
+      headers: traceHeaders,
+    });
   } catch (err: unknown) {
     const isTimeout = err instanceof Error && err.name === 'AbortError';
-    console.error(
-      `[tts-route] ❌ ${isTimeout ? 'TTS timeout' : 'Server error'}:`,
-      err,
-    );
+
     return NextResponse.json(
       {
         error: isTimeout ? 'TTS timeout' : 'Server error',
         detail: truncateUpstreamDetail(String(err)),
         reqId,
       },
-      { status: isTimeout ? 408 : 500, headers: traceHeaders },
+      { status: isTimeout ? 408 : 500, headers: traceHeaders }
     );
   }
 }
