@@ -25,7 +25,14 @@ def get_redis():
         return None
     try:
         import redis as redis_lib
-
+    except ModuleNotFoundError:
+        logger.warning(
+            "Redis package not installed — `pip install redis` (see requirements.txt). "
+            "Session/state features degrade gracefully without Redis.",
+        )
+        _redis = False
+        return None
+    try:
         client = redis_lib.from_url(url, decode_responses=True, socket_connect_timeout=2.0)
         client.ping()
         _redis = client

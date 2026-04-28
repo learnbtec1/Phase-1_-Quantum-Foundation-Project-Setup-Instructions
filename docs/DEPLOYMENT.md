@@ -18,7 +18,7 @@
 ### ChromaDB
 
 - **الافتراضي:** بيانات المتجهات تحت `./backend/data/chroma_cogni` داخل حاوية الـ backend.
-- **خادم منفصل (اختياري):** `docker compose --profile chroma up -d chromadb` — المنفذ على المضيف `8001`. يمكن لاحقاً ربط العميل عبر متغيرات بيئة مثل `CHROMA_HOST` عندما يدعم المسار ذلك في الكود.
+- **خادم منفصل (اختياري):** `docker compose --profile chroma up -d chromadb` — المنفذ على المضيف `8010` (داخل الحاوية 8000). **avatar_brain** يُنشر على المضيف **`8011`** (→ 8001 داخل الحاوية)؛ اضبط `NEXT_PUBLIC_GENERATIVE_GESTURE_WS=ws://127.0.0.1:8011` للمتصفح على المضيف.
 
 ### استيعاب BTEC إلى Chroma
 

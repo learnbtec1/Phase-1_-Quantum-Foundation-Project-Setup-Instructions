@@ -35,12 +35,20 @@ metadata (path relative to btec-bus) are deleted.
 """
 from __future__ import annotations
 
+import sys
+
+# Chroma PersistentClient — same SQLite swap as app.main (pysqlite3-binary in requirements.txt).
+try:
+    __import__("pysqlite3")
+    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+except ImportError:
+    pass
+
 import argparse
 import hashlib
 import logging
 import os
 import re
-import sys
 import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
@@ -49,10 +57,6 @@ from typing import Dict, Iterable, List, Tuple
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
-
-from sqlite_chroma_patch import apply_sqlite_chroma_patch
-
-apply_sqlite_chroma_patch()
 
 try:
     from dotenv import load_dotenv
@@ -92,10 +96,28 @@ def _load_env() -> None:
 
 
 def _iter_txt_files(root: Path) -> Iterable[Path]:
-    for p in sorted(root.rglob("*.txt")):
+    for p in sorted(root.rglob("*")):
         if not p.is_file() or p.name.startswith("~$") or p.name.startswith("."):
             continue
+        if p.suffix.lower() != ".txt":
+            continue
         yield p
+
+
+def _count_ingestable_files(root: Path) -> tuple[int, int, int]:
+    """Counts by extension, case-insensitive (Docker/Linux is case-sensitive for globs)."""
+    pdf = docx = txt = 0
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        s = p.suffix.lower()
+        if s == ".pdf":
+            pdf += 1
+        elif s == ".docx":
+            docx += 1
+        elif s == ".txt":
+            txt += 1
+    return pdf, docx, txt
 
 
 def _directory_loader_document_batches(
@@ -389,6 +411,15 @@ def main() -> int:
     chroma_dir = args.chroma_dir.resolve()
     chroma_dir.mkdir(parents=True, exist_ok=True)
 
+    npdf, ndocx, ntxt = _count_ingestable_files(btec_root)
+    logger.info(
+        "Corpus %s — files found: pdf=%d docx=%d txt=%d (all zero → nothing to ingest; on host add files under backend/data/btec-bus)",
+        btec_root,
+        npdf,
+        ndocx,
+        ntxt,
+    )
+
     try:
         import chromadb
         from langchain_community.document_loaders import PyPDFLoader, UnstructuredWordDocumentLoader
@@ -417,8 +448,13 @@ def main() -> int:
         _EMBED_MODEL,
     )
 
-    # ── PDF / DOCX: recursive DirectoryLoader ─────────────────────────────────
-    for glob_pat, cls in (("**/*.pdf", PyPDFLoader), ("**/*.docx", UnstructuredWordDocumentLoader)):
+    # ── PDF / DOCX: recursive DirectoryLoader (uppercase extensions: Linux bind mounts)
+    for glob_pat, cls in (
+        ("**/*.pdf", PyPDFLoader),
+        ("**/*.PDF", PyPDFLoader),
+        ("**/*.docx", UnstructuredWordDocumentLoader),
+        ("**/*.DOCX", UnstructuredWordDocumentLoader),
+    ):
         for path_key, doc_batch in _directory_loader_document_batches(btec_root, glob_pat, cls):
             seen_paths.add(path_key)
             try:
@@ -436,24 +472,25 @@ def main() -> int:
     from langchain_community.document_loaders import TextLoader
 
     txt_seen: set[Path] = set()
-    for path_key, doc_batch in _directory_loader_document_batches(
-        btec_root,
-        "**/*.txt",
-        TextLoader,
-        loader_kwargs={"encoding": "utf-8"},
-    ):
-        txt_seen.add(path_key)
-        seen_paths.add(path_key)
-        try:
-            n = _ingest_document_list(
-                path_key, btec_root, doc_batch, collection, embeddings, args.dry_run
-            )
-            if n > 0:
-                ok_sources += 1
-            total_chunks += n
-        except Exception as e:
-            failed += 1
-            logger.error("Skipped after error: %s — %s", path_key.name, e)
+    for txt_glob in ("**/*.txt", "**/*.TXT"):
+        for path_key, doc_batch in _directory_loader_document_batches(
+            btec_root,
+            txt_glob,
+            TextLoader,
+            loader_kwargs={"encoding": "utf-8"},
+        ):
+            txt_seen.add(path_key)
+            seen_paths.add(path_key)
+            try:
+                n = _ingest_document_list(
+                    path_key, btec_root, doc_batch, collection, embeddings, args.dry_run
+                )
+                if n > 0:
+                    ok_sources += 1
+                total_chunks += n
+            except Exception as e:
+                failed += 1
+                logger.error("Skipped after error: %s — %s", path_key.name, e)
 
     for txt_path in _iter_txt_files(btec_root):
         rp = txt_path.resolve()

@@ -16,7 +16,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-# Includes pysqlite3-binary (SQLite >= 3.35 for Chroma) and edge-tts (see requirements.txt)
+# Includes edge-tts (pinned in requirements.txt — PHASE 14) and other API deps.
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir --prefix=/install/pkgs -r requirements.txt
 
@@ -40,6 +40,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl1.1 \
         libasound2 \
         libgomp1 \
+        poppler-utils \
+        libmagic1 \
     && update-ca-certificates --fresh \
     && rm -rf /var/lib/apt/lists/*
 

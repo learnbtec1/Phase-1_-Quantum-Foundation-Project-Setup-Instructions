@@ -1,8 +1,9 @@
 """
 ChromaDB requires SQLite >= 3.35. Many Linux images ship older libsqlite.
 
-Call apply_sqlite_chroma_patch() once at process start, before `import chromadb`,
-so Python's stdlib `sqlite3` uses the bundled binary from `pysqlite3-binary` when installed.
+The app uses an inline patch in ``app.main``, ``tutor`` endpoint, and ``btec_ingest``.
+Call ``apply_sqlite_chroma_patch()`` from standalone scripts if you prefer one import.
+Requires ``pysqlite3-binary`` (see requirements.txt).
 """
 from __future__ import annotations
 

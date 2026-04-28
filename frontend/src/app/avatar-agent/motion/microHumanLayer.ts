@@ -9,6 +9,7 @@ import { createNoise3D } from 'simplex-noise';
 import type { EmbodimentState } from '@/lib/avatar/embodimentState';
 import { getLastIntentUpdateTime } from '@/lib/ai/cognitiveOrchestrator';
 import type { BonePoseMap } from './PoseComposer';
+import { isPoseKeyProcedurallySuppressed } from './proceduralSuppressionContext';
 import { nowMs as masterClockNowMs } from '@/lib/avatar/masterClock';
 
 const _e = new THREE.Euler(0, 0, 0, 'YXZ');
@@ -28,6 +29,7 @@ function hash01(s: string): number {
 }
 
 function mulBoneDeltaEuler(finalPose: BonePoseMap, key: string, rx: number, ry: number, rz: number): void {
+  if (isPoseKeyProcedurallySuppressed(key)) return;
   const q = finalPose.get(key);
   if (!q) return;
   _e.set(rx, ry, rz, 'YXZ');
@@ -44,10 +46,9 @@ function mulFirstPresent(
   rz: number,
 ): void {
   for (const key of keys) {
-    if (finalPose.has(key)) {
-      mulBoneDeltaEuler(finalPose, key, rx, ry, rz);
-      return;
-    }
+    if (!finalPose.has(key) || isPoseKeyProcedurallySuppressed(key)) continue;
+    mulBoneDeltaEuler(finalPose, key, rx, ry, rz);
+    return;
   }
 }
 

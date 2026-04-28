@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import uuid
 from types import SimpleNamespace
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.security import decode_token
@@ -16,6 +19,11 @@ from app.database import SessionLocal, get_db
 from app.models.db_models import User, UserRole
 
 security = HTTPBearer(auto_error=False)
+logger = logging.getLogger(__name__)
+
+
+def _dev_bypass_auth_enabled() -> bool:
+    return os.getenv("COGNI_DEV_BYPASS_AUTH", "false").lower() in ("1", "true", "yes")
 
 
 def load_user_from_access_token(token: str) -> Optional[User]:
@@ -56,7 +64,20 @@ async def get_current_user_optional(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: Session = Depends(get_db),
 ) -> Optional[User]:
-    return _user_from_token(credentials, db)
+    try:
+        return _user_from_token(credentials, db)
+    except SQLAlchemyError as e:
+        # Postgres down (e.g. after `docker compose down`) — JWT path used to 500 the whole TTS route.
+        logger.warning("get_current_user_optional: database error: %s", e)
+        if _dev_bypass_auth_enabled():
+            return None
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Database unavailable — cannot validate session. "
+                "Start Postgres (e.g. docker compose up -d db) or set COGNI_DEV_BYPASS_AUTH=true for local TTS without DB."
+            ),
+        ) from e
 
 
 async def get_current_user(

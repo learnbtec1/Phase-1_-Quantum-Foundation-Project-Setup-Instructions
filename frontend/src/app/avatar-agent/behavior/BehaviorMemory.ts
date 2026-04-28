@@ -1,5 +1,16 @@
 /**
- * Level 6.1 — Short-term behavior memory (anti-repetition, personality consistency).
+ * Level 6.1 — **Ultra-short** behavior memory (sliding window, ~8s).
+ *
+ * **Purpose:** Used only inside {@link BehaviorBrainHost} to avoid repeating the same
+ * motion *intent class* back-to-back in the Level-6 pipeline (anti-repetition).
+ *
+ * **Not the same as:**
+ * - **`useBrainStore.longTermMemory`** — persistent user profile (interests, important moments);
+ *   session-scoped, updated via `learnInterest` / `addImportantMoment` / EmotionalMemoryManager.
+ * - **`useBrainStore.emotionalMemory`** — rolling emotional *trajectory* entries for analytics
+ *   and LLM context; managed by {@link EmotionalMemoryManager}.
+ *
+ * This class is **not** persisted, not sent to the LLM, and not user-specific narrative memory.
  */
 
 export type BehaviorMemoryEntry = {

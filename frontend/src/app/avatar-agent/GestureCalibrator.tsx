@@ -8,6 +8,7 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { unifiedGestureEngine } from '@/ai/cognitive/UnifiedGestureEngine';
+import { showGestureCalibrationUi } from '@/config/avatar';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -572,7 +573,7 @@ function MouseEditPad({
 // ─── Component ─────────────────────────────────────────────────────────────
 
 export function GestureCalibrator() {
-  if (process.env.NODE_ENV !== 'development') return null;
+  if (!showGestureCalibrationUi()) return null;
 
   const [tab, setTab] = useState<TabName>('idle');
   const [poses, setPoses] = useState<Record<GestureName, ArmPose>>(deepCopy(DEFAULT_POSES));

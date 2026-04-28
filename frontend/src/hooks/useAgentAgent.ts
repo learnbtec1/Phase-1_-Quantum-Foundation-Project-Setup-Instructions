@@ -6,7 +6,8 @@
  *   [Microphone] → useVAD → WebSocket → [Backend]
  *       → JSON AgentFrame → BrainStore.processFrame()
  *       → AgentDirector (gestures, expressions, head, voice)
- *       → Client /api/tts-with-timing only (single TTS authority; no WS raw audio playback)
+ *       → WebSocket `speech_data` + `playWsAgentTtsAudio` when enabled (single audio authority),
+ *         else fallback to AgentDirector → /api/tts-with-timing
  *       → EmotionalMemoryManager (trajectory tracking)
  *
  * Key differences from useAvatarAgent:
@@ -40,13 +41,21 @@ import { agentDirector }                   from '@/ai/avatar/AgentDirector';
 import { unifiedGestureEngine, initGestureNormalizer } from '@/ai/cognitive/UnifiedGestureEngine';
 import { emitUserSpeechTickForAnticipation } from '@/lib/behavior/anticipationLayer';
 import { PRIORITY } from '@/constants/gestures';
+import { PROACTIVE_QUESTION_MS } from '@/config/avatar';
+import { fireMentorSilenceCheckInMotion } from '@/lib/avatar/motionIntentContinuity';
 import { emotionalMemoryManager }          from '@/ai/avatar/EmotionalMemoryManager';
 import type { EmotionLabel, AgentFrame } from '@/types/ai';
 import { COGNI_PERSONA, COGNI_JSON_BRAIN_SYSTEM_APPEND } from '@/config/personality';
 import { buildDeviceContextPayload }       from '@/lib/deviceContext';
-import { resetSpeechIntentHints } from '@/lib/avatar/speechIntentHints';
+import { resetSpeechIntentHints, setSpeechIntentHintsFromText } from '@/lib/avatar/speechIntentHints';
 import { automaticGestureInjectorsDisabled } from '@/lib/avatar/automaticGestureInjectors';
-import { stopTTSGlobally } from '@/ai/io/tts';
+import {
+  getClientTtsAudioElement,
+  isElevenLabsTtsProvider,
+  playWsAgentTtsAudio,
+  stopTTSGlobally,
+} from '@/ai/io/tts';
+import { setSpeechEmotionBridge } from '@/ai/voice/speechEmotionBridge';
 import { getAccessToken, hasStoredAccessToken } from '@/lib/auth';
 import { handleUserMessage } from '@/lib/ai/handleUserMessage';
 import { microExprBargeInPulse } from '@/ai/avatar/microExpressionLayer';
@@ -96,7 +105,12 @@ import {
   type AssessmentCoachingPayload,
 } from '@/lib/cogniSessionContext';
 import { nowMs as masterClockNowMs } from '@/lib/avatar/masterClock';
-import { ipv4LoopbackWsUrl, buildDefaultWsAgentUrl } from '@/lib/wsAgentUrl';
+import {
+  ipv4LoopbackWsUrl,
+  buildDefaultWsAgentUrl,
+  agentApiHealthUrlFromWsAgentUrl,
+} from '@/lib/wsAgentUrl';
+import { traceCogniIntegration } from '@/lib/integrationTrace';
 
 /** When true (and backend `COGNI_WS_ALLOW_ANONYMOUS=true`), open `/ws/agent` without JWT subprotocol if no valid token. */
 function wsGuestModeEnabled(): boolean {
@@ -104,6 +118,16 @@ function wsGuestModeEnabled(): boolean {
     process.env.NEXT_PUBLIC_COGNI_WS_ALLOW_ANONYMOUS === 'true' ||
     process.env.NEXT_PUBLIC_COGNI_WS_GUEST_OK === 'true'
   );
+}
+
+/**
+ * When not false (default): GET /api/health before opening WebSocket on initial mount.
+ * Avoids Chromium's native "WebSocket connection … failed" when nothing listens on the port.
+ * Set `NEXT_PUBLIC_WS_PREFLIGHT_HEALTH=false` if /api/health is blocked by a proxy.
+ */
+function wsPreflightHealthEnabled(): boolean {
+  if (typeof process === 'undefined') return true;
+  return process.env.NEXT_PUBLIC_WS_PREFLIGHT_HEALTH !== 'false';
 }
 
 /** Trim + strip whitespace — JWT in Sec-WebSocket-Protocol must be a single opaque token string. */
@@ -151,6 +175,9 @@ export interface AgentAgentOptions {
   lang?:          string;
 }
 
+/** Mic / Whisper pipeline phase for conversational UI status lines. */
+export type SttUiPhase = 'idle' | 'listening' | 'converting';
+
 export interface AgentAgentState {
   /** True while the microphone / VAD is actively recording */
   isListening:     boolean;
@@ -158,6 +185,8 @@ export interface AgentAgentState {
   isConnected:     boolean;
   /** True while waiting for a backend reply */
   isProcessing:    boolean;
+  /** VAD / backend STT status for user-facing indicators */
+  sttUiPhase:      SttUiPhase;
   /** Current avatar emotion label (from last speech frame) */
   emotion:         string;
   /** Last speech-to-text transcript received from the backend */
@@ -323,9 +352,6 @@ function _parseClientInlineGestures(text: string): PerformanceCue[] {
  */
 const IDLE_TIMEOUT = 16_000;
 
-/** FIX: Phase 3/4 — proactive gentle check-in after user silence (ms) */
-const PROACTIVE_QUESTION_MS = 30_000;
-
 /** داخلي فقط — عربي لتفعيل proactive_engagement في الباكند دون تسريب إنجليزي للنموذج/الواجهة */
 const PROACTIVE_PROMPT =
   '[SYSTEM_EVENT: لاحظت صمتًا من الطالب منذ فترة. ردّ بتحية دافئة أو سؤال تفاعلي قصير باللهجة الأردنية يرتبط بالدرس.]';
@@ -347,6 +373,20 @@ function stripInternalSystemEvents(raw: string): string {
  * Read and consume the BTEC grade snapshot saved by the assessment page.
  * Returns the parsed snapshot on first call, then clears it so it isn't re-sent.
  */
+/** BrainPersist / initBrainPersistence — optional returning-student opener for first WS prompt. */
+function _readResumeSessionForProactiveGreeting(): { lastTopic: string; lastMood: string } | null {
+  if (typeof window === 'undefined') return null;
+  const w = (window as unknown as {
+    __cogniLastSession?: { lastTopic?: string; lastMood?: string; lastSeen?: string };
+  }).__cogniLastSession;
+  const topic = String(w?.lastTopic ?? '').trim();
+  if (!topic) return null;
+  const seen = w?.lastSeen ? new Date(w.lastSeen).getTime() : NaN;
+  const ageMs = Number.isFinite(seen) ? Date.now() - seen : 0;
+  if (ageMs > 14 * 86_400_000) return null;
+  return { lastTopic: topic.slice(0, 200), lastMood: String(w?.lastMood ?? 'neutral').slice(0, 48) };
+}
+
 function _consumeLastGrade(): Record<string, unknown> | null {
   if (typeof window === 'undefined') return null;
   try {
@@ -377,10 +417,8 @@ function trimAssessmentCoachingForWs(p: AssessmentCoachingPayload): Record<strin
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
-const DEFAULT_WS_AGENT_URL = buildDefaultWsAgentUrl();
-
 export function useAgentAgent({
-  wsUrl         = DEFAULT_WS_AGENT_URL,
+  wsUrl: wsUrlProp,
   autoReconnect = true,
   lang          = 'ar-JO',   // Jordanian Arabic dialect — Dr. Hamza
 }: AgentAgentOptions = {}): AgentAgentState {
@@ -393,10 +431,13 @@ export function useAgentAgent({
   const [lastDialogue,   setLastDialogue]   = useState('');
   const [emotion,        setEmotion]        = useState('neutral');
   const [error,          setError]          = useState<string | null>(null);
+  const [sttUiPhase,     setSttUiPhase]     = useState<SttUiPhase>('idle');
   /** True after the one-time proactive greeting has been sent this session. */
   const [hasInitiated,   setHasInitiated]   = useState(false);
 
   // ── Refs ─────────────────────────────────────────────────────────────────
+  /** Set when an audio segment is sent; cleared when `speech` includes `transcript` (voice turn). */
+  const pendingUserSttRef  = useRef(false);
   const wsRef              = useRef<WebSocket | null>(null);
   const reconnectTimer     = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef         = useRef(true);
@@ -438,6 +479,15 @@ export function useAgentAgent({
   /** VAD segment timing — used with transcript length for speech rhythm mirroring */
   const vadSpeechStartMsRef = useRef(0);
   const lastUtteranceDurationMsRef = useRef(2400);
+  /** Matches backend ``speech_start`` / ``speech`` ``turn_id`` for stale-frame drops */
+  const currentSpeechTurnIdRef = useRef<string | null>(null);
+  /** Turn id for which ``speech_data`` successfully started ``playWsAgentTtsAudio`` */
+  const wsPlaybackTurnIdRef = useRef<string | null>(null);
+
+  const useWsAgentAudio = useCallback((): boolean => {
+    if (typeof process === 'undefined') return true;
+    return process.env.NEXT_PUBLIC_USE_WS_AGENT_AUDIO !== 'false';
+  }, []);
   /** Segments captured while WS is CONNECTING/CLOSED — sent after OPEN (see flush effect). */
   const pendingAudioBlobsRef = useRef<Blob[]>([]);
   const MAX_PENDING_AUDIO_BLOBS = 5;
@@ -457,6 +507,10 @@ export function useAgentAgent({
   const keepAliveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   /** Connection-open timeout — cleared in onopen; fires close() if server never opens. */
   const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Retries GET /api/health when preflight fails (backend down). Cleared on success or unmount. */
+  const wsPreflightRetryRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Latest preflight runner — interval always calls this ref (avoids stale connect). */
+  const runHealthPreflightOnceRef = useRef<() => Promise<void>>(async () => {});
   /** Consecutive abnormal closes (1006) — stop reconnect after threshold. */
   const ws1006StreakRef = useRef(0);
   /** Set true after repeated 1006; cleared on auth-changed or successful open. */
@@ -510,7 +564,7 @@ export function useAgentAgent({
     });
   }, [clearCoSpeechTimers]);
 
-  // ── Audio: client `/api/tts-with-timing` via AgentDirector.speakWithTTS; cancel speechSynthesis on interrupt ──
+  // ── Audio: WS `speech_data` + playWsAgentTtsAudio (default), or AgentDirector → /api/tts-with-timing; stopTTSGlobally on interrupt ──
 
   const stopAllAudio = useCallback((): void => {
     clearCoSpeechTimers();
@@ -591,6 +645,7 @@ export function useAgentAgent({
     vadSpeechStartMsRef.current = masterClockNowMs();
     runAvatarBargeIn();
     useBrainStore.getState().setUserSpeaking(true);
+    setSttUiPhase('listening');
     if (typeof window === 'undefined') return;
     window.dispatchEvent(new CustomEvent('cogni:user:speaking'));
   }, [runAvatarBargeIn]);
@@ -604,15 +659,29 @@ export function useAgentAgent({
 
     // pong: keep silent — avoid console spam from 28s keep-alive
     if (type !== 'pong') {
+      traceCogniIntegration('ws_inbound', {
+        type,
+        id: frame.id,
+        turn_id: frame.turn_id,
+        v: frame.v,
+      });
       console.log(`[useAgentAgent] 📨 Received:`, type, frame);
     }
 
     switch (type) {
 
+      case 'transcribing': {
+        setSttUiPhase('converting');
+        setIsProcessing(true);
+        break;
+      }
+
       // ── STT transcript ────────────────────────────────────────────────
       case 'transcript': {
         const transcript = ((frame.text ?? frame.transcript ?? '') as string).trim();
         if (!transcript) break;
+        pendingUserSttRef.current = false;
+        setSttUiPhase('idle');
         setLastTranscript(transcript);
         useBrainStore.getState().pushTurn({ role: 'user', text: transcript });
         useBrainStore.getState().setUserSpeaking(true);
@@ -832,6 +901,19 @@ export function useAgentAgent({
 
       // ── Backend asked to stop TTS immediately (barge-in / turn cancelled) ───
       case 'stop_speech': {
+        const stopTid =
+          typeof (frame as { turn_id?: string }).turn_id === 'string'
+            ? (frame as { turn_id?: string }).turn_id
+            : undefined;
+        if (
+          stopTid &&
+          currentSpeechTurnIdRef.current &&
+          stopTid !== currentSpeechTurnIdRef.current
+        ) {
+          break;
+        }
+        currentSpeechTurnIdRef.current = null;
+        wsPlaybackTurnIdRef.current = null;
         clearCoSpeechTimers();
         stopAllAudio();
         useBrainStore.getState().setThinking(false);
@@ -843,6 +925,85 @@ export function useAgentAgent({
           window.dispatchEvent(new CustomEvent('avatar:speak:end'));
         }
         console.log('[useAgentAgent] stop_speech — playback halted', frame);
+        break;
+      }
+
+      case 'speech_start': {
+        const tid = typeof (frame as { turn_id?: string }).turn_id === 'string' ? (frame as { turn_id?: string }).turn_id : undefined;
+        const dur = typeof (frame as { duration_ms?: number }).duration_ms === 'number' ? (frame as { duration_ms?: number }).duration_ms : undefined;
+        if (tid) {
+          currentSpeechTurnIdRef.current = tid;
+        }
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('avatar:speak:timeline-start', {
+              detail: { turnId: tid, durationMs: dur, id: frame.id },
+            }),
+          );
+        }
+        break;
+      }
+
+      case 'speech_data': {
+        const sdTurn =
+          typeof (frame as { turn_id?: string }).turn_id === 'string'
+            ? (frame as { turn_id?: string }).turn_id
+            : undefined;
+        if (
+          sdTurn &&
+          currentSpeechTurnIdRef.current &&
+          sdTurn !== currentSpeechTurnIdRef.current
+        ) {
+          break;
+        }
+        const b64 = (frame as { audio_base64?: string }).audio_base64;
+        const visRaw = (frame as { viseme_cues?: unknown }).viseme_cues;
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('avatar:speak:timeline-data', {
+              detail: {
+                turnId: sdTurn,
+                audioBase64: b64,
+                visemeCues: visRaw,
+                wordCues: (frame as { word_cues?: unknown }).word_cues,
+              },
+            }),
+          );
+        }
+        if (useWsAgentAudio() && b64 && typeof b64 === 'string' && b64.length > 8) {
+          if (sdTurn) {
+            wsPlaybackTurnIdRef.current = sdTurn;
+          }
+          void (async () => {
+            const el = await playWsAgentTtsAudio({
+              audioBase64: b64,
+              visemeRaw: visRaw,
+              emotion: 'neutral',
+              emotionIntensity: 0.55,
+              bufferedStartMs: 50,
+            });
+            if (!el && sdTurn && wsPlaybackTurnIdRef.current === sdTurn) {
+              wsPlaybackTurnIdRef.current = null;
+            }
+          })();
+        }
+        break;
+      }
+
+      case 'speech_end': {
+        const eid = typeof (frame as { turn_id?: string }).turn_id === 'string' ? (frame as { turn_id?: string }).turn_id : undefined;
+        if (eid && currentSpeechTurnIdRef.current && eid !== currentSpeechTurnIdRef.current) {
+          break;
+        }
+        if (eid && currentSpeechTurnIdRef.current === eid) {
+          currentSpeechTurnIdRef.current = null;
+          wsPlaybackTurnIdRef.current = null;
+        }
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('avatar:speak:timeline-end', { detail: { turnId: eid } }),
+          );
+        }
         break;
       }
 
@@ -869,10 +1030,47 @@ export function useAgentAgent({
       // ── Speech (with or without PCM audio) ───────────────────────────
       case 'speech':
       case 'tts_unavailable': {
+        const userTranscript = ((frame as { transcript?: string }).transcript ?? '').trim();
+        if (userTranscript && pendingUserSttRef.current) {
+          pendingUserSttRef.current = false;
+          setLastTranscript(userTranscript);
+        }
+        setSttUiPhase('idle');
+
         const dialogueRaw = (frame.dialogue ?? frame.text ?? '') as string;
         const dialogue   = stripInternalSystemEvents(dialogueRaw.trim());
         const norm       = normalizeSpeechFrame({ ...frame, dialogue });
         if (!norm) break;
+
+        const ftid =
+          typeof (frame as { turn_id?: string }).turn_id === 'string'
+            ? (frame as { turn_id?: string }).turn_id
+            : undefined;
+        if (ftid) {
+          if (
+            currentSpeechTurnIdRef.current &&
+            ftid !== currentSpeechTurnIdRef.current
+          ) {
+            if (process.env.NODE_ENV === 'development') {
+              console.warn('[useAgentAgent] Ignoring stale speech frame', {
+                frameTurnId: ftid,
+                expectedTurnId: currentSpeechTurnIdRef.current,
+              });
+            }
+            break;
+          }
+          currentSpeechTurnIdRef.current = ftid;
+        }
+
+        const wsAudioActive =
+          type === 'speech' &&
+          useWsAgentAudio() &&
+          !!ftid &&
+          wsPlaybackTurnIdRef.current === ftid;
+
+        if (!wsAudioActive) {
+          stopAllAudio();
+        }
 
         const rawEmotion = norm.emotionRaw;
         const action     = norm.actionRaw;
@@ -885,7 +1083,6 @@ export function useAgentAgent({
           console.warn('[useAgentAgent] Skipping duplicate TTS fallback (same text within 10s — likely quota loop)');
           break;
         }
-        stopAllAudio();
 
         setIsProcessing(false);
         setLastReply(dialogue);
@@ -995,7 +1192,11 @@ export function useAgentAgent({
           window.dispatchEvent(new CustomEvent('cogni:student_contagion', { detail: contagion }));
         }
 
-        if (type === 'tts_unavailable' && typeof window !== 'undefined') {
+        if (
+          type === 'tts_unavailable'
+          && typeof window !== 'undefined'
+          && !isElevenLabsTtsProvider()
+        ) {
           window.dispatchEvent(
             new CustomEvent('cogni:tts-secondary-voice', {
               detail: { message: 'Using secondary voice engine...', source: 'ws' },
@@ -1021,10 +1222,65 @@ export function useAgentAgent({
         if (!perfMerged.length) {
           scheduleCoSpeechForDialogue(dialogue, estimateDialogueDurationMs(dialogue));
         }
-        agentDirector.scheduleTTS(dialogue, emotionLabel);
+
+        const skipHttpTts = wsAudioActive;
+
+        if (type === 'tts_unavailable' || !skipHttpTts) {
+          agentDirector.scheduleTTS(
+            dialogue,
+            emotionLabel,
+            0,
+            type === 'tts_unavailable' ? { forceEdgeBff: true } : undefined,
+          );
+        } else if (typeof window !== 'undefined') {
+          setSpeechIntentHintsFromText(dialogue);
+          setSpeechEmotionBridge({
+            emotion: emotionLabel,
+            intensity: 0.55,
+          });
+          window.dispatchEvent(
+            new CustomEvent('avatar:speak', {
+              detail: {
+                text: dialogue,
+                timings: wcForPerf ?? [],
+                sampleRate: 24000,
+                audio: getClientTtsAudioElement() ?? undefined,
+              },
+            }),
+          );
+          window.dispatchEvent(
+            new CustomEvent('agent:message', {
+              detail: {
+                text: dialogue,
+                emotion: emotionLabel,
+                gesture:
+                  (
+                    {
+                      excited: 'openHand',
+                      happy: 'openHand',
+                      encouraging: 'openHand',
+                      proud: 'openHand',
+                      surprised: 'openHand',
+                      thinking: 'openHand',
+                      curious: 'beat',
+                      attentive: 'beat',
+                      concerned: 'openHand',
+                      calm: 'openHand',
+                      empathetic: 'openHand',
+                      sad: 'beat',
+                      anxious: 'beat',
+                      bored: 'beat',
+                      sleepy: 'beat',
+                      neutral: 'beat',
+                    } as Partial<Record<EmotionLabel, string>>
+                  )[emotionLabel] ?? 'openHand',
+              },
+            }),
+          );
+        }
 
         console.log(
-          `[useAgentAgent] Speech frame — emotion="${rawEmotion}" len=${dialogue.length}`,
+          `[useAgentAgent] Speech frame — emotion="${rawEmotion}" len=${dialogue.length} wsAudio=${skipHttpTts}`,
         );
         break;
       }
@@ -1048,10 +1304,14 @@ export function useAgentAgent({
             lastEmptyErrorRef.current = now;
             console.warn('[useAgentAgent] No speech detected (rate-limited — suppressed after this line):', msg);
           }
+          pendingUserSttRef.current = false;
+          setSttUiPhase('idle');
           setIsProcessing(false);
           break;
         }
 
+        pendingUserSttRef.current = false;
+        setSttUiPhase('idle');
         setError(msg);
         setIsProcessing(false);
         const detail = (errorObj?.detail ?? '') as string;
@@ -1203,7 +1463,14 @@ export function useAgentAgent({
       console.log('[AUTH] token preview:', tokenForWs.slice(0, 12));
     }
 
-    const url = ipv4LoopbackWsUrl(wsUrl);
+    const resolvedWs = wsUrlProp ?? buildDefaultWsAgentUrl();
+    const url = ipv4LoopbackWsUrl(resolvedWs);
+    if (process.env.NODE_ENV === 'development') {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[WS] Resolved agent URL (${wsUrlProp ? 'from prop' : 'NEXT_PUBLIC_WS_URL / NEXT_PUBLIC_API_URL'}) → ${url}`,
+      );
+    }
     console.log(`[useAgentAgent] Connecting → ${url}`);
     // Backend `agent_ws`: JWT via Sec-WebSocket-Protocol (`cogni-auth-v1`, token) and/or first text frame
     // `{ type: "auth", token }`. Query `?token=` is explicitly rejected (close 1008) — do not use URL params.
@@ -1439,17 +1706,24 @@ export function useAgentAgent({
               : rs === WebSocket.CLOSED
                 ? 'CLOSED'
                 : String(rs);
-      // Single string — some devtools render a second `console.error` object as literal "{}".
-      console.error(
-        `[WS] ❌ ERROR type=${event.type} readyState=${stateStr} url=${url}`,
-      );
+
       setError('WebSocket connection error');
+
+      // Failed handshake / connection refused: socket is often already CLOSED; `onclose` follows with code (e.g. 1006).
+      // Do not use console.error here — it looks like an app bug; the situation is usually "backend down or wrong URL".
+      if (rs === WebSocket.CLOSED || rs === WebSocket.CLOSING) {
+        if (process.env.NODE_ENV === 'development') {
+          console.warn(
+            `[WS] connection failed (${stateStr}) url=${url} — ` +
+              'ensure FastAPI is running and reachable (e.g. uvicorn on :8000). Close code/reason: next [WS] CLOSED log.',
+          );
+        }
+        return;
+      }
+
       if (rs === WebSocket.CONNECTING) {
-        console.warn('[WS] error (CONNECTING)', event.type, '— see onclose for code');
         console.warn(
-          '[useAgentAgent] WS error during CONNECTING — url=',
-          url,
-          '(onclose will report code/reason)',
+          `[WS] error during CONNECTING type=${event.type} url=${url} — see following [WS] CLOSED for code/reason`,
         );
         try {
           ws.close();
@@ -1458,10 +1732,11 @@ export function useAgentAgent({
         }
         return;
       }
-      if (rs === WebSocket.CLOSED || rs === WebSocket.CLOSING) {
-        return;
-      }
-      console.warn('[WS] error', event.type, stateStr);
+
+      // Rare: error while OPEN — worth a visible error.
+      console.error(
+        `[WS] ❌ ERROR type=${event.type} readyState=${stateStr} url=${url}`,
+      );
       console.warn(
         '[useAgentAgent] WS error:',
         event.type,
@@ -1472,7 +1747,54 @@ export function useAgentAgent({
         '(see onclose for code/reason)',
       );
     };
-  }, [wsUrl, autoReconnect, handleFrame]);
+  }, [wsUrlProp, autoReconnect, handleFrame]);
+
+  /**
+   * Initial mount only: optional HTTP preflight so we do not call `new WebSocket` when the API host is down
+   * (Chromium always logs that as a red "WebSocket connection failed" — cannot be suppressed in JS).
+   */
+  const runHealthPreflightOnce = useCallback(async (): Promise<void> => {
+    if (!wsPreflightHealthEnabled()) {
+      connect();
+      return;
+    }
+    const resolvedWs = ipv4LoopbackWsUrl(wsUrlProp ?? buildDefaultWsAgentUrl());
+    const healthUrl = agentApiHealthUrlFromWsAgentUrl(resolvedWs);
+    const ac = new AbortController();
+    const tmo = window.setTimeout(() => ac.abort(), 3000);
+    try {
+      const r = await fetch(healthUrl, { method: 'GET', cache: 'no-store', signal: ac.signal });
+      clearTimeout(tmo);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    } catch (e) {
+      clearTimeout(tmo);
+      if (!mountedRef.current) return;
+      if (!wsPreflightRetryRef.current) {
+        console.warn(
+          '[WS] Preflight GET',
+          healthUrl,
+          'failed — API not reachable; skipping WebSocket open (avoids Chromium "WebSocket connection failed").',
+          'Start FastAPI (e.g. uvicorn :8000) or set NEXT_PUBLIC_WS_PREFLIGHT_HEALTH=false.',
+          e,
+        );
+      }
+      setError('Backend unreachable — is the API running?');
+      if (!wsPreflightRetryRef.current) {
+        wsPreflightRetryRef.current = setInterval(() => {
+          void runHealthPreflightOnceRef.current();
+        }, 5000);
+      }
+      return;
+    }
+    if (wsPreflightRetryRef.current) {
+      clearInterval(wsPreflightRetryRef.current);
+      wsPreflightRetryRef.current = null;
+    }
+    if (!mountedRef.current) return;
+    connect();
+  }, [connect, wsUrlProp]);
+
+  runHealthPreflightOnceRef.current = runHealthPreflightOnce;
 
   const sendWsPayload = useCallback((payload: Record<string, unknown>) => {
     const ws = wsRef.current;
@@ -1539,6 +1861,8 @@ export function useAgentAgent({
         ...(coachingOut ? { assessment_coaching: coachingOut } : {}),
       };
       ws.send(JSON.stringify(payload));
+      pendingUserSttRef.current = true;
+      setSttUiPhase('converting');
       console.log(
         '[Agent] Audio WS sent — base64 length:',
         audioBase64.length,
@@ -1556,8 +1880,10 @@ export function useAgentAgent({
 
   const { isRecording, startListening: vadStart, stopListening: vadStop } = useVAD({
     lang,
-    silenceThreshold: 0.03,
-    silenceGapMs:     700,
+    // Less sensitive RMS + longer silence tail + min vocal span — fewer breath/keyboard/echo false STT sends.
+    silenceThreshold:     0.045,
+    silenceGapMs:         1300,
+    minSpeechDurationMs: 280,
     onSpeechStart: onVadSpeechStart,
     onSpeechEnd: async (blob: Blob) => {
       const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -1674,6 +2000,7 @@ export function useAgentAgent({
     vadStop();
     useBrainStore.getState().setPhysical({ isListening: false });
     emitListeningEvent(false);
+    setSttUiPhase('idle');
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('cogni:user:silent'));
     }
@@ -1849,7 +2176,8 @@ export function useAgentAgent({
         return;
       }
       const prompt =
-        '[SYSTEM_EVENT: لاحظت صمتك. اسأل الطالب بلهجة أردنية دافئة إن كان يفضّل نرجع لنقطة سابقة أو يحتاج مثال إضافي — جملة واحدة قصيرة.]';
+        '[SYSTEM_EVENT: يبدو أنك تفكّر بعمق أو متوقف. بلهجة أردنية دافئة اسأل جملة واحدة قصيرة: هل في نقطة مش واضحة أو بدك نرجع خطوة؟ لا تكرر عبارات الجلسة السابقة.]';
+      fireMentorSilenceCheckInMotion();
       sendTextRef.current(prompt);
       lastUserActivityRef.current = Date.now();
       resetProactiveSilenceTimer();
@@ -1902,6 +2230,8 @@ export function useAgentAgent({
     setLastDialogue('');
     setEmotion('neutral');
     setError(null);
+    pendingUserSttRef.current = false;
+    setSttUiPhase('idle');
     setHasInitiated(false); // Allow one new proactive greeting after history reset
     if (proactiveSilenceTimerRef.current) {
       clearTimeout(proactiveSilenceTimerRef.current);
@@ -2035,9 +2365,12 @@ export function useAgentAgent({
         } catch { return null; }
       })();
 
+      const resume = _readResumeSessionForProactiveGreeting();
       const prompt = pendingGrade
         ? `[SYSTEM_EVENT: الطالب عاد للتو من صفحة التقييم. درجته: ${pendingGrade.final_grade ?? ''}، المادة: ${pendingGrade.subject ?? ''}. قدّم له تغذية راجعة تشجيعية باللهجة الأردنية — اذكر الدرجة بشكل طبيعي في حديثك ثم اسأله عن نقطة يريد تحسينها.]`
-        : PROACTIVE_PROMPT;
+        : resume
+          ? `[SYSTEM_EVENT: طالب عائد. آخر موضوع اشتغلنا عليه: "${resume.lastTopic}". آخر مزاج مسجّل: ${resume.lastMood}. رحّب بلهجة أردنية دافئة واسأل بلطف إذا بده يكمّل على هالموضوع — جملة أو جملتين بس، بدون تكرار نمطي.]`
+          : PROACTIVE_PROMPT;
 
       sendText(prompt);
       setHasInitiated(true);
@@ -2087,13 +2420,17 @@ export function useAgentAgent({
     // Start AgentDirector (subscribes to BrainStore; idempotent)
     agentDirector.start();
 
-    // WebSocket: guest mode (no JWT) or valid token — one getAccessToken() only when not guest-only.
+    // WebSocket: guest mode (no JWT) or valid token — optional GET /api/health before new WebSocket (see runHealthPreflightOnce).
     if (wsGuestModeEnabled() || getAccessToken()) {
-      connect();
+      void runHealthPreflightOnce();
     }
 
     return () => {
       mountedRef.current = false;
+      if (wsPreflightRetryRef.current) {
+        clearInterval(wsPreflightRetryRef.current);
+        wsPreflightRetryRef.current = null;
+      }
       if (vadResumeTimerRef.current) {
         clearTimeout(vadResumeTimerRef.current);
         vadResumeTimerRef.current = null;
@@ -2138,6 +2475,7 @@ export function useAgentAgent({
     isListening:     isRecording,
     isConnected,
     isProcessing,
+    sttUiPhase,
     emotion,
     lastTranscript,
     lastReply,

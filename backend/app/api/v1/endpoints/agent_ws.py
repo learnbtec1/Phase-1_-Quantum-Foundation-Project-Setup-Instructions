@@ -19,6 +19,9 @@ Message protocol (client → server):
   { "type": "training_request", "topic": "<optional>", "difficulty": "pass|merit|distinction" }
   { "type": "clear" }
 
+Full loop (reference): client audio/text → Whisper STT (when audio) → tutor `_get_cogni_response`
+  (brain_logic Socratic + BTEC mandate + RAG) → `transcribing` / `llm_thinking` frames → `speech` + TTS.
+
 Message protocol (server → client):
   { "type": "pong" }
   { "type": "transcribing" }
@@ -27,12 +30,17 @@ Message protocol (server → client):
                                 "emotion": "...", "action": "...",
                                 "performance": [ { "tag", "start_word", "blendshape?", "intensity?", "animation?" } ],
                                 "audio_base64": "...", "audio_format": "mp3",
-                                "viseme_cues": [...], "word_cues": [...] }
+                                "viseme_cues": [...], "word_cues": [...],
+                                "turn_id": "<uuid>", "duration_ms": <int> }
+  { "type": "speech_start",    "turn_id": "<uuid>", "duration_ms": <int>, "id": "<req>" }  # timeline (COGNI_WS_SPEECH_TIMELINE)
+  { "type": "speech_data",      "turn_id": "<uuid>", "audio_base64": "...", "audio_format": "mp3",
+                                "viseme_cues": [...], "word_cues": [...] }  # audio payload when timeline split is on
+  { "type": "speech_end",      "turn_id": "<uuid>" }
   { "type": "tts_unavailable", "transcript": "...", "reply": "...", "dialogue": "...",
                                 "emotion": "...", "action": "..." }
   { "type": "error",           "error": { "message": "...", "severity": "error|warn" } }
   { "type": "cleared" }
-  { "type": "stop_speech",     "reason": "interrupted|..." }  # stop avatar TTS (full-duplex interrupt)
+  { "type": "stop_speech",     "reason": "interrupted|...", "turn_id": "<uuid optional>" }  # stop avatar TTS (full-duplex interrupt)
   { "type": "tool_result",     "tool": "...", "ok": true|false, "result_preview": "..." }  # LLM function-calling
   { "type": "deep_link_ack",   "deep_link": { ... } }
   { "type": "deep_link_cleared", "v": 1.1 }
@@ -56,6 +64,8 @@ from app.core.config import settings
 from app.api.deps import load_user_from_access_token
 from app.api.v1.ws_message_security import validate_ws_client_message
 from app.models.db_models import User
+from app.services.turn_manager import AgentTurnSession
+from app.services.tts_manager import AgentTTSManager
 from app.services.thinker import Thinker
 from app.archive.emotional_memory_manager import EmotionalMemoryManager
 from app.services.cogni_reply_parse_legacy import (
@@ -80,6 +90,15 @@ except Exception as _hb_import_exc:
     )
 
 logger = logging.getLogger("cogni.agent_ws")
+
+
+def _ws_speech_timeline_enabled() -> bool:
+    """When true, emit speech_start / speech_data / speech_end and split audio out of ``speech``."""
+    return (os.getenv("COGNI_WS_SPEECH_TIMELINE", "true") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 def _ws_ctx(session_id: str, req_id: Optional[str] = None) -> str:
@@ -447,6 +466,9 @@ async def agent_ws(websocket: WebSocket):
 
     pipeline_busy: bool = False
     playing_tts: bool = False
+    tts_grace_task: Optional[asyncio.Task[Any]] = None
+    turn_session = AgentTurnSession()
+    tts_manager = AgentTTSManager()
     think_mm = EmotionalMemoryManager(
         user_id=user_uuid,
         session_only=_session_only,
@@ -546,6 +568,22 @@ async def agent_ws(websocket: WebSocket):
         except Exception as _hb_end:
             logger.debug("%s heartbeat sender ended: %s", _ws_ctx(session_id), _hb_end)
 
+    async def _send_speech_timeline_frame(
+        phase: str,
+        *,
+        turn_id: str,
+        req_id: Optional[str],
+        duration_ms: Optional[int] = None,
+    ) -> None:
+        if not _ws_speech_timeline_enabled():
+            return
+        payload: dict = {"type": f"speech_{phase}", "v": 1.1, "turn_id": turn_id}
+        if req_id:
+            payload["id"] = req_id
+        if phase == "start" and duration_ms is not None:
+            payload["duration_ms"] = int(duration_ms)
+        await send(payload)
+
     heartbeat_task = asyncio.create_task(_heartbeat_sender())
 
     if user_uuid and getattr(settings, "ENABLE_REDIS_SESSION_SYNC", True):
@@ -572,17 +610,30 @@ async def agent_ws(websocket: WebSocket):
 
     async def cancel_in_flight(reason: str = "interrupted") -> None:
         """Cancel the running LLM+TTS turn and tell the client to stop playback (full-duplex)."""
-        nonlocal active_llm_task
+        nonlocal active_llm_task, tts_grace_task
         # ═══ NEW ═══
         _active_llm_tasks.pop(session_id, None)
         # ═══ NEW END ═══
+        if tts_grace_task and not tts_grace_task.done():
+            tts_grace_task.cancel()
+            try:
+                await tts_grace_task
+            except asyncio.CancelledError:
+                logger.debug("%s tts_grace_task cancel awaited (expected)", _ws_ctx(session_id))
+            except Exception as _gte:
+                logger.debug("%s tts_grace_task await: %s", _ws_ctx(session_id), _gte)
+        tts_grace_task = None
+        interrupted_turn_id = turn_session.pop_cancellable_turn()
         if active_llm_task and not active_llm_task.done():
             active_llm_task.cancel()
             try:
                 await active_llm_task
             except asyncio.CancelledError:
                 logger.debug("%s active_llm_task cancel awaited (expected)", _ws_ctx(session_id))
-            await send({"type": "stop_speech", "v": 1.1, "reason": reason})
+            _stop: dict = {"type": "stop_speech", "v": 1.1, "reason": reason}
+            if interrupted_turn_id:
+                _stop["turn_id"] = interrupted_turn_id
+            await send(_stop)
         active_llm_task = None
 
     async def start_user_turn(**kwargs) -> None:
@@ -590,8 +641,13 @@ async def agent_ws(websocket: WebSocket):
         nonlocal active_llm_task
         await cancel_in_flight("interrupted")
 
+        tid = turn_session.begin_cancellable_turn()
+
         async def _runner() -> None:
-            await process_text(**kwargs)
+            try:
+                await process_text(**kwargs, turn_id=tid)
+            finally:
+                turn_session.end_cancellable_turn(tid)
 
         active_llm_task = asyncio.create_task(_runner())
         # ═══ NEW ═══
@@ -608,6 +664,7 @@ async def agent_ws(websocket: WebSocket):
         thinker_proactive: bool = False,
         extra_context: Optional[dict] = None,
         ws_client_intent: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> None:
         """Run LLM + TTS and stream results back to the client.
 
@@ -624,15 +681,19 @@ async def agent_ws(websocket: WebSocket):
             cogni_welcome_turn: When True, tutor adds varied opening-greeting instructions.
             thinker_proactive: When True, tutor adds instructions for Thinker-initiated ice-breaker.
             ws_client_intent: Optional intent string from WebSocket `text` frame (`intent` / `user_intent`).
+            turn_id:        Optional logical turn id for speech_start / speech_end and interrupt correlation.
         """
-        nonlocal pipeline_busy, playing_tts, last_outbound_dialogue, pending_grade_nudge, pending_redis_grade, _ws_grade_result_delivered_fp
+        nonlocal pipeline_busy, playing_tts, last_outbound_dialogue, pending_grade_nudge, pending_redis_grade, _ws_grade_result_delivered_fp, tts_grace_task
+        if turn_id is None:
+            turn_id = str(uuid.uuid4())
         pipeline_busy = True
         _nudge_for_turn = False
         _nudge_snapshot_for_ack: Optional[dict] = None
         _grade_result_fp_for_turn: Optional[str] = None
         _proc_ctx = _ws_ctx(session_id, req_id)
         _proc_t0 = time.monotonic()
-        logger.debug(
+        # INFO: aids tracing mic/STT → LLM when clients see a silent drop (check logs after transcribing).
+        logger.info(
             "%s process_text start text_len=%d proactive=%s",
             _proc_ctx,
             len(user_text or ""),
@@ -1154,10 +1215,11 @@ async def agent_ws(websocket: WebSocket):
             except Exception as _cont_exc:
                 logger.debug("%s contagion_avatar_hint skipped: %s", _proc_ctx, _cont_exc)
 
-            # ── Edge TTS (MP3) ─────────────────────────────────────────────────────
+            # ── Edge TTS (MP3) via AgentTTSManager ─────────────────────────────────────────
             audio_b64 = ""
-            viseme_cues = []
-            word_cues = []
+            viseme_cues: List[Dict[str, Any]] = []
+            word_cues: List[Dict[str, Any]] = []
+            mp3_bytes = b""
             edge_tts = getattr(websocket.app.state, 'tts_service', None) or _get_edge_tts()
 
             playing_tts = True
@@ -1169,8 +1231,9 @@ async def agent_ws(websocket: WebSocket):
                     _dlen = len(parsed.get("dialogue") or "")
                     _vname = str(getattr(edge_tts, "_default_voice", "") or "")
                     try:
-                        mp3_bytes, viseme_cues, word_cues, tts_provider = await edge_tts.synthesize(
-                            parsed['dialogue'],
+                        mp3_bytes, viseme_cues, word_cues, tts_provider = await tts_manager.synthesize_reply(
+                            edge_tts,
+                            dialogue=parsed['dialogue'],
                             voice_name=settings.TTS_ARABIC_VOICE,
                             emotion=parsed.get('emotion', 'neutral'),
                             persona_level=persona_level,
@@ -1179,14 +1242,13 @@ async def agent_ws(websocket: WebSocket):
                             usage_user_id=user_uuid,
                         )
 
-                        if tts_provider != "edge":
-                            raise RuntimeError(
-                                f"TTS integrity violation: expected Edge, got {tts_provider!r}"
-                            )
-                        if not mp3_bytes:
-                            raise RuntimeError("Edge TTS returned empty audio")
-
                         audio_b64 = base64.b64encode(mp3_bytes).decode('ascii')
+                        viseme_cues = tts_manager.repair_visemes_from_words(
+                            parsed["dialogue"],
+                            audio_b64,
+                            viseme_cues,
+                            word_cues,
+                        )
                         log_tts_success(
                             source=tts_provider,
                             text_len=_dlen,
@@ -1208,16 +1270,39 @@ async def agent_ws(websocket: WebSocket):
                             e,
                             exc_info=True,
                         )
+                        try:
+                            from app.services.tts_service import (
+                                estimate_mp3_duration_ms as _est_mp3_ms,
+                                stub_viseme_timeline_for_text,
+                                synthesize_edge_tts_async,
+                            )
 
-                # Lip-sync: same synthesis produced word_cues; approximate visemes if SDK omitted them (no extra TTS).
-                if audio_b64 and not viseme_cues and word_cues:
-                    from app.services.tts_service import approx_viseme_cues_from_word_cues
+                            _d_fb = (parsed.get("dialogue") or "").strip()[:8000]
+                            if _d_fb:
+                                mp3_bytes = await synthesize_edge_tts_async(
+                                    _d_fb, settings.TTS_ARABIC_VOICE
+                                )
+                                if mp3_bytes:
+                                    logger.info(
+                                        "[AgentWS] TTS USING EDGE FALLBACK synthesize_edge_tts_async | bytes=%d",
+                                        len(mp3_bytes),
+                                    )
+                                    audio_b64 = base64.b64encode(mp3_bytes).decode("ascii")
+                                    _dur_fb = int(_est_mp3_ms(mp3_bytes))
+                                    viseme_cues = stub_viseme_timeline_for_text(
+                                        _d_fb, duration_ms=_dur_fb
+                                    )
+                                    word_cues = []
+                        except Exception as _fb_exc:
+                            logger.warning(
+                                "[AgentWS] EDGE direct fallback failed: %s",
+                                _fb_exc,
+                                exc_info=True,
+                            )
 
-                    viseme_cues = approx_viseme_cues_from_word_cues(word_cues, parsed["dialogue"])
-                    logger.info(
-                        "[AgentWS] viseme timeline from word_cues | approx=%d (no duplicate synthesis)",
-                        len(viseme_cues),
-                    )
+                from app.services.tts_service import estimate_mp3_duration_ms
+
+                _duration_ms = int(estimate_mp3_duration_ms(mp3_bytes)) if mp3_bytes else 0
 
                 def _dedupe_tts_dialogue_outbound(raw: str) -> str:
                     d = (raw or "").strip()
@@ -1229,10 +1314,11 @@ async def agent_ws(websocket: WebSocket):
                     return raw or ""
 
                 _meta_out = context.get("_reply_meta") or {}
-                if audio_b64:
-                    d_out = parsed["dialogue"]
-                    last_outbound_dialogue = d_out
-                    await send({
+                _timeline = _ws_speech_timeline_enabled()
+                _split_audio = _timeline and bool(audio_b64)
+
+                def _speech_body(*, with_audio: bool) -> dict:
+                    return {
                         "type":         "speech",
                         "id":           req_id,
                         "transcript":   user_text,
@@ -1248,7 +1334,7 @@ async def agent_ws(websocket: WebSocket):
                         "user_mood":    user_mood,
                         "user_pad":     user_pad,
                         "persona_level": persona_level,
-                        "audio_base64": audio_b64,
+                        "audio_base64": audio_b64 if with_audio else "",
                         "audio_format": "mp3",
                         "viseme_cues":  viseme_cues,
                         "word_cues":    word_cues,
@@ -1261,11 +1347,40 @@ async def agent_ws(websocket: WebSocket):
                         "teaching_strategy": parsed.get("teaching_strategy") or context.get("cogni_teaching_strategy"),
                         "psychological_analysis": parsed.get("psychological_analysis"),
                         "behavior": parsed.get("behavior"),
-                    })
+                        "turn_id":      turn_id,
+                        "duration_ms":  _duration_ms,
+                    }
+
+                if audio_b64:
+                    d_out = parsed["dialogue"]
+                    last_outbound_dialogue = d_out
+                    if _split_audio:
+                        await _send_speech_timeline_frame(
+                            "start",
+                            turn_id=turn_id,
+                            req_id=req_id,
+                            duration_ms=_duration_ms,
+                        )
+                        await send(
+                            {
+                                "type": "speech_data",
+                                "v": 1.1,
+                                "turn_id": turn_id,
+                                "id": req_id,
+                                "audio_base64": audio_b64,
+                                "audio_format": "mp3",
+                                "viseme_cues": viseme_cues,
+                                "word_cues": word_cues,
+                            }
+                        )
+                        await send(_speech_body(with_audio=False))
+                        await _send_speech_timeline_frame("end", turn_id=turn_id, req_id=req_id)
+                    else:
+                        await send(_speech_body(with_audio=True))
                 else:
                     d_out = _dedupe_tts_dialogue_outbound(parsed["dialogue"])
                     last_outbound_dialogue = d_out
-                    await send({
+                    _tu: dict = {
                         "type":       "tts_unavailable",
                         "id":         req_id,
                         "transcript": user_text,
@@ -1290,7 +1405,20 @@ async def agent_ws(websocket: WebSocket):
                         "teaching_strategy": parsed.get("teaching_strategy") or context.get("cogni_teaching_strategy"),
                         "psychological_analysis": parsed.get("psychological_analysis"),
                         "behavior": parsed.get("behavior"),
-                    })
+                        "turn_id": turn_id,
+                        "duration_ms": 0,
+                    }
+                    if _timeline:
+                        await _send_speech_timeline_frame(
+                            "start",
+                            turn_id=turn_id,
+                            req_id=req_id,
+                            duration_ms=0,
+                        )
+                        await send(_tu)
+                        await _send_speech_timeline_frame("end", turn_id=turn_id, req_id=req_id)
+                    else:
+                        await send(_tu)
                 if cogni_welcome_turn and user_uuid and settings.ENABLE_REDIS_SESSION_SYNC:
                     try:
                         from app.services.session_state_redis import load_session_state, save_session_state
@@ -1320,7 +1448,9 @@ async def agent_ws(websocket: WebSocket):
                     finally:
                         playing_tts = False
 
-                asyncio.create_task(_reset_playing_tts_after_grace())
+                if tts_grace_task and not tts_grace_task.done():
+                    tts_grace_task.cancel()
+                tts_grace_task = asyncio.create_task(_reset_playing_tts_after_grace())
 
         finally:
             logger.debug(
@@ -1372,11 +1502,21 @@ async def agent_ws(websocket: WebSocket):
                 "لا تستخدم التحيات العامة كردٍ كامل.]"
             )
         logger.info("[AgentWS] Thinker proactive speech | req_id=%s has_inner_thought=%s", req_id, bool(last_thought))
-        await process_text(
-            user_text=prompt,
-            req_id=req_id,
-            thinker_proactive=True,
-        )
+        tid = turn_session.begin_cancellable_turn()
+
+        async def _pro_runner() -> None:
+            try:
+                await process_text(
+                    user_text=prompt,
+                    req_id=req_id,
+                    thinker_proactive=True,
+                    turn_id=tid,
+                )
+            finally:
+                turn_session.end_cancellable_turn(tid)
+
+        active_llm_task = asyncio.create_task(_pro_runner())
+        _track_llm_task(active_llm_task)
         # Virtual interaction: resets idle window so Thinker does not immediately re-fire.
         _touch_interaction()
         logger.debug("[AgentWS] proactive done — last_interaction_time refreshed (virtual turn)")
@@ -1412,7 +1552,16 @@ async def agent_ws(websocket: WebSocket):
 
         prompt = _rnd.choice(_nudge_pool)
         logger.info("[AgentWS] Thinker soft nudge | req_id=%s", req_id)
-        await process_text(user_text=prompt, req_id=req_id)
+        tid = turn_session.begin_cancellable_turn()
+
+        async def _sn_runner() -> None:
+            try:
+                await process_text(user_text=prompt, req_id=req_id, turn_id=tid)
+            finally:
+                turn_session.end_cancellable_turn(tid)
+
+        active_llm_task = asyncio.create_task(_sn_runner())
+        _track_llm_task(active_llm_task)
 
     try:
         _tiv = int(os.getenv("THINKER_INTERVAL_SEC", "45"))
@@ -1588,11 +1737,16 @@ async def agent_ws(websocket: WebSocket):
         ]
 
         async def _greet() -> None:
-            await process_text(
-                random.choice(_welcome_events),
-                req_id="greet_0",
-                cogni_welcome_turn=True,
-            )
+            tid = turn_session.begin_cancellable_turn()
+            try:
+                await process_text(
+                    random.choice(_welcome_events),
+                    req_id="greet_0",
+                    cogni_welcome_turn=True,
+                    turn_id=tid,
+                )
+            finally:
+                turn_session.end_cancellable_turn(tid)
 
         active_llm_task = asyncio.create_task(_greet())
         # ═══ NEW ═══
@@ -1672,9 +1826,20 @@ async def agent_ws(websocket: WebSocket):
                 _touch_interaction()
                 req_audio = str(msg.get("id") or f"audio_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}")
                 b64 = msg.get("data") or ""
+                _b64_len = len(b64) if isinstance(b64, str) else 0
+                logger.info(
+                    "[AgentWS] audio_inbound id=%s b64_chars=%d (decode next)",
+                    req_audio,
+                    _b64_len,
+                )
                 try:
                     raw_audio = base64.b64decode(b64, validate=True) if isinstance(b64, str) else b""
                 except Exception:
+                    logger.exception(
+                        "[AgentWS] audio_b64_decode_failed id=%s b64_chars=%d",
+                        req_audio,
+                        _b64_len,
+                    )
                     await send(
                         {
                             "type": "error",
@@ -1688,16 +1853,65 @@ async def agent_ws(websocket: WebSocket):
                         }
                     )
                     continue
+                if not raw_audio:
+                    logger.warning(
+                        "[AgentWS] audio_empty_after_decode id=%s b64_chars=%d",
+                        req_audio,
+                        _b64_len,
+                    )
+                    await send(
+                        {
+                            "type": "error",
+                            "v": 1.1,
+                            "id": req_audio,
+                            "error": {
+                                "message": "audio_decode_failed",
+                                "severity": "warn",
+                                "code": "audio_empty",
+                            },
+                        }
+                    )
+                    continue
                 await send({"type": "transcribing", "v": 1.1, "id": req_audio})
+                logger.info(
+                    "[AgentWS] transcribing_emitted id=%s raw_bytes=%d — calling STT",
+                    req_audio,
+                    len(raw_audio),
+                )
                 try:
                     from app.services.whisper_stt import transcribe_audio as _transcribe_audio
 
                     _mime_a = msg.get("mime_type") or msg.get("mime")
                     _mime_s = str(_mime_a).strip()[:128] if _mime_a else None
+                    _head = raw_audio[:16].hex() if len(raw_audio) >= 16 else raw_audio.hex()
+                    _is_riff = len(raw_audio) >= 12 and raw_audio[:4] == b"RIFF" and raw_audio[8:12] == b"WAVE"
+                    logger.info(
+                        "[AgentWS] audio_frame id=%s bytes=%d mime=%s riff_wave=%s head16=%s",
+                        req_audio,
+                        len(raw_audio),
+                        _mime_s,
+                        _is_riff,
+                        _head,
+                    )
                     transcript_clean = (
                         await _transcribe_audio(raw_audio, mime_type=_mime_s, req_id=req_audio)
                     ).strip()
+                    logger.info(
+                        "[AgentWS] stt_ok id=%s mime=%s bytes=%d transcript_len=%d preview=%r",
+                        req_audio,
+                        _mime_s,
+                        len(raw_audio),
+                        len(transcript_clean),
+                        (transcript_clean[:200] + "…")
+                        if len(transcript_clean) > 200
+                        else transcript_clean,
+                    )
                 except Exception as stt_exc:
+                    logger.exception(
+                        "[AgentWS] stt_failed id=%s err=%s",
+                        req_audio,
+                        stt_exc,
+                    )
                     _code = getattr(stt_exc, "code", None)
                     err_code = str(_code) if _code else "stt_error"
                     _detail = getattr(stt_exc, "detail", None) or str(stt_exc)
@@ -1734,6 +1948,10 @@ async def agent_ws(websocket: WebSocket):
                 msg["type"] = "text"
                 msg["text"] = transcript_clean
                 msg_type = "text"
+                logger.info(
+                    "[AgentWS] audio_promoted_to_text id=%s → start_user_turn on same iteration",
+                    req_audio,
+                )
 
             if msg_type == "ping":
                 # v1.1: echo back the id so client can correlate heartbeat latency
@@ -1838,18 +2056,28 @@ async def agent_ws(websocket: WebSocket):
                         "topic": topic,
                         "difficulty": difficulty,
                     }
-                    await process_text(
-                        user_text=(
-                            "[SYSTEM_EVENT: الطالب طلب وضع تدريب BTEC من قاعدة المعرفة. "
-                            "اعرض سؤال التدريب بلهجة أردنية دافئة في جملة أو جملتين فقط.]"
-                        ),
-                        req_id=req_tid,
-                        extra_context={
-                            "btec_training_deliver_question": nq,
-                            "cogni_training_mode": True,
-                            "btec_training_examiner": True,
-                        },
-                    )
+                    _tid_tr = turn_session.begin_cancellable_turn()
+
+                    async def _train_runner() -> None:
+                        try:
+                            await process_text(
+                                user_text=(
+                                    "[SYSTEM_EVENT: الطالب طلب وضع تدريب BTEC من قاعدة المعرفة. "
+                                    "اعرض سؤال التدريب بلهجة أردنية دافئة في جملة أو جملتين فقط.]"
+                                ),
+                                req_id=req_tid,
+                                extra_context={
+                                    "btec_training_deliver_question": nq,
+                                    "cogni_training_mode": True,
+                                    "btec_training_examiner": True,
+                                },
+                                turn_id=_tid_tr,
+                            )
+                        finally:
+                            turn_session.end_cancellable_turn(_tid_tr)
+
+                    active_llm_task = asyncio.create_task(_train_runner())
+                    _track_llm_task(active_llm_task)
                 except Exception as tr_ex:
                     logger.warning("[AgentWS] training_request failed: %s", tr_ex)
                     await send(
@@ -1974,18 +2202,28 @@ async def agent_ws(websocket: WebSocket):
                             "topic": _kbt,
                             "difficulty": str(msg.get("difficulty") or "merit"),
                         }
-                        await process_text(
-                            user_text=(
-                                "[SYSTEM_EVENT: الطالب طلب تدريب BTEC من قاعدة المعرفة. "
-                                "اعرض سؤال التدريب بلهجة أردنية دافئة في جملة أو جملتين فقط.]"
-                            ),
-                            req_id=req_id,
-                            extra_context={
-                                "btec_training_deliver_question": nq_kb,
-                                "cogni_training_mode": True,
-                                "btec_training_examiner": True,
-                            },
-                        )
+                        _tid_kb = turn_session.begin_cancellable_turn()
+
+                        async def _kb_train_runner() -> None:
+                            try:
+                                await process_text(
+                                    user_text=(
+                                        "[SYSTEM_EVENT: الطالب طلب تدريب BTEC من قاعدة المعرفة. "
+                                        "اعرض سؤال التدريب بلهجة أردنية دافئة في جملة أو جملتين فقط.]"
+                                    ),
+                                    req_id=req_id,
+                                    extra_context={
+                                        "btec_training_deliver_question": nq_kb,
+                                        "cogni_training_mode": True,
+                                        "btec_training_examiner": True,
+                                    },
+                                    turn_id=_tid_kb,
+                                )
+                            finally:
+                                turn_session.end_cancellable_turn(_tid_kb)
+
+                        active_llm_task = asyncio.create_task(_kb_train_runner())
+                        _track_llm_task(active_llm_task)
                     except Exception as _kb_ex:
                         logger.warning("[AgentWS] BTEC KB training (text keyword) failed: %s", _kb_ex)
                     continue

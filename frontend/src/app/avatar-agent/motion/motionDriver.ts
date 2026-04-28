@@ -9,6 +9,8 @@ import { createNoise3D } from 'simplex-noise';
 import type { EmbodimentState } from '@/lib/avatar/embodimentState';
 import { isBodyDrivenByVRMA } from '@/lib/avatar/vrmaBodyDrive';
 import type { BonePoseMap } from './PoseComposer';
+import { isPoseKeyProcedurallySuppressed } from './proceduralSuppressionContext';
+import { isVrmaPlaybackGloballyDisabled } from '@/lib/avatar/vrmaPlaybackPolicy';
 
 const _e = new THREE.Euler(0, 0, 0, 'YXZ');
 const _qDelta = new THREE.Quaternion();
@@ -19,8 +21,8 @@ const noise3 = createNoise3D(() => Math.random());
 /** Separate phase from intent motor — slower “through-line” continuity. */
 let driverPhaseSec = 0;
 
-/** Intent motor (`intentMotorLayer`) is the single intent oscillator; keep this at 0 to avoid dual oscillators on the same bones. */
-const DRIVER_GLOBAL_MUL = 0;
+/** Scales continuous intent-shaped bone deltas (explaining / thinking / listening). */
+const DRIVER_GLOBAL_MUL = 1.0;
 
 // ─── Variation memory: alternate styles when intent session changes (startTime) ───
 let lastExplainStart = -1;
@@ -88,6 +90,7 @@ function nDriver(t: number, u: number, v: number, amp: number): number {
 }
 
 function mulBoneDeltaEuler(finalPose: BonePoseMap, key: string, rx: number, ry: number, rz: number): void {
+  if (isPoseKeyProcedurallySuppressed(key)) return;
   const q = finalPose.get(key);
   if (!q) return;
   _e.set(rx, ry, rz, 'YXZ');
@@ -98,10 +101,9 @@ function mulBoneDeltaEuler(finalPose: BonePoseMap, key: string, rx: number, ry: 
 
 function mulFirstPresent(finalPose: BonePoseMap, keys: readonly string[], rx: number, ry: number, rz: number): void {
   for (const key of keys) {
-    if (finalPose.has(key)) {
-      mulBoneDeltaEuler(finalPose, key, rx, ry, rz);
-      return;
-    }
+    if (!finalPose.has(key) || isPoseKeyProcedurallySuppressed(key)) continue;
+    mulBoneDeltaEuler(finalPose, key, rx, ry, rz);
+    return;
   }
 }
 
@@ -121,7 +123,8 @@ export function applyMotionDriver(
   opts: MotionDriverApplyOpts,
 ): void {
   if (!isBodyDrivenByVRMA(opts)) return;
-  if (opts.gestureLayerW > 0.42) return;
+  /** With VRMA globally off, gesture weight does not skip this layer — intent-shaped motion stays on without VRMA clips. */
+  if (opts.gestureLayerW > 0.42 && !isVrmaPlaybackGloballyDisabled()) return;
 
   const intent = emb.intent.activeIntent;
   const w = Math.min(1, Math.max(0, emb.intent.intensity));
@@ -179,8 +182,8 @@ export function applyMotionDriver(
       : 0;
     const armL = arcWide + arcBeat;
     const armR = arcWideR * 0.94 - arcBeat * 0.85;
-    mulFirstPresent(finalPose, ['lua', 'leftUpperArm'], 0, armL * 0.65, armL);
-    mulFirstPresent(finalPose, ['rua', 'rightUpperArm'], 0, -armR * 0.65, -armR);
+    mulFirstPresent(finalPose, ['lua', 'leftUpperArm'], armL * 0.65, 0, armL);
+    mulFirstPresent(finalPose, ['rua', 'rightUpperArm'], -armR * 0.65, 0, -armR);
     const fore =
       (Math.sin(t * 0.47 + 0.5 + φL * 0.5) * genMul + nDriver(t, 3, 2, 0.18)) * 0.0024 * m * genMul * spike * focusArm * explainBurst;
     const foreR =
@@ -206,6 +209,17 @@ export function applyMotionDriver(
     mulBoneDeltaEuler(finalPose, 'chest', spineOpen * 0.35 - pushEx * 0.45, chestLift * 0.5, -spineOpen * 0.2);
     mulBoneDeltaEuler(finalPose, 'leftShoulder', strongEx * 0.00055 * explainBurst * focusArm, 0, strongEx * 0.0004 * explainBurst);
     mulBoneDeltaEuler(finalPose, 'rightShoulder', -strongEx * 0.0005 * explainBurst * focusArm, 0, -strongEx * 0.00035 * explainBurst);
+
+    const legL =
+      (Math.sin(t * 0.21 + φL * 0.85) + nDriver(t, 2.1, 1.9, 0.1)) * 0.0015 * m * genMul * spike * focusArm * explainBurst;
+    const legR =
+      (Math.sin(t * 0.19 + φR * 0.85) + nDriver(t, 1.9, 2.1, 0.1)) * 0.0015 * m * genMul * spike * focusArm * explainBurst;
+    mulFirstPresent(finalPose, ['leftUpperLeg'], legL * 0.55, 0, legL * 0.45);
+    mulFirstPresent(finalPose, ['rightUpperLeg'], -legR * 0.55, 0, -legR * 0.45);
+    mulFirstPresent(finalPose, ['leftLowerLeg'], legL * 0.38, 0, legL * 0.32);
+    mulFirstPresent(finalPose, ['rightLowerLeg'], -legR * 0.38, 0, -legR * 0.32);
+    mulFirstPresent(finalPose, ['leftFoot'], legL * 0.22, 0, legL * 0.18);
+    mulFirstPresent(finalPose, ['rightFoot'], -legR * 0.22, 0, -legR * 0.18);
     return;
   }
 
@@ -230,8 +244,15 @@ export function applyMotionDriver(
 
     const aL = (Math.sin(t * 0.19 + 0.4 + φL) + nDriver(t, 1, 1, 0.1)) * 0.0019 * m * spike * focusArm;
     const aR = (Math.sin(t * 0.17 + 1.1 + φR) + nDriver(t, 3, 3, 0.1)) * 0.0016 * m * spike * focusArm;
-    mulFirstPresent(finalPose, ['lua', 'leftUpperArm'], aL * 0.35, aL, rollAsym * 0.4);
-    mulFirstPresent(finalPose, ['rua', 'rightUpperArm'], -aR * 0.35, -aR, -rollAsym * 0.35);
+    mulFirstPresent(finalPose, ['lua', 'leftUpperArm'], aL, aL * 0.35, rollAsym * 0.4);
+    mulFirstPresent(finalPose, ['rua', 'rightUpperArm'], -aR, -aR * 0.35, -rollAsym * 0.35);
+
+    const legTL = (Math.sin(t * 0.12 + φL) + nDriver(t, 2.2, 2.2, 0.09)) * 0.0011 * m * spike * focusArm;
+    const legTR = (Math.sin(t * 0.11 + φR) + nDriver(t, 2.3, 2.1, 0.09)) * 0.0011 * m * spike * focusArm;
+    mulFirstPresent(finalPose, ['leftUpperLeg'], legTL * 0.45, 0, legTL * 0.4);
+    mulFirstPresent(finalPose, ['rightUpperLeg'], -legTR * 0.45, 0, -legTR * 0.4);
+    mulFirstPresent(finalPose, ['leftLowerLeg'], legTL * 0.3, 0, legTL * 0.25);
+    mulFirstPresent(finalPose, ['rightLowerLeg'], -legTR * 0.3, 0, -legTR * 0.25);
     return;
   }
 
@@ -261,7 +282,16 @@ export function applyMotionDriver(
       (Math.sin(t * 0.22 + φL) + nDriver(t, 6, 1, 0.07)) * 0.0009 * m * focusArm;
     const microR =
       (Math.sin(t * 0.23 + φR) + nDriver(t, 1, 6, 0.07)) * 0.0009 * m * focusArm;
-    mulFirstPresent(finalPose, ['lua', 'leftUpperArm'], 0, micro, micro * 0.5);
-    mulFirstPresent(finalPose, ['rua', 'rightUpperArm'], 0, -microR * 0.85, -microR * 0.45);
+    mulFirstPresent(finalPose, ['lua', 'leftUpperArm'], micro, 0, micro * 0.5);
+    mulFirstPresent(finalPose, ['rua', 'rightUpperArm'], -microR * 0.85, 0, -microR * 0.45);
+
+    const microLeg =
+      (Math.sin(t * 0.18 + φL * 0.6) + nDriver(t, 2.4, 2.5, 0.06)) * 0.00075 * m * genMul * focusArm;
+    const microLegR =
+      (Math.sin(t * 0.17 + φR * 0.6) + nDriver(t, 2.5, 2.4, 0.06)) * 0.00075 * m * genMul * focusArm;
+    mulFirstPresent(finalPose, ['leftUpperLeg'], microLeg * 0.4, 0, microLeg * 0.35);
+    mulFirstPresent(finalPose, ['rightUpperLeg'], -microLegR * 0.4, 0, -microLegR * 0.35);
+    mulFirstPresent(finalPose, ['leftLowerLeg'], microLeg * 0.28, 0, microLeg * 0.22);
+    mulFirstPresent(finalPose, ['rightLowerLeg'], -microLegR * 0.28, 0, -microLegR * 0.22);
   }
 }

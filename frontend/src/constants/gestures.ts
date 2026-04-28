@@ -1,6 +1,10 @@
 /**
  * Cogni Gesture System Constants
  * ─────────────────────────────────────────────────────────────────────────
+ * Kinematic philosophy (idle / VRMA / generative interplay) is defined in
+ * `frontend/src/app/avatar-agent/kinematicStandards.ts` and
+ * `frontend/src/app/avatar-agent/semanticCommand.ts` (empirical right-arm −X/−Z, mirrored left).
+ *
  * Single source of truth for:
  *  - All 40 confirmed VRMA files (from generatedGestures.ts)
  *  - Virtual gesture names that have smart fallback strategies

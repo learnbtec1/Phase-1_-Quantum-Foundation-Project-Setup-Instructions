@@ -14,9 +14,18 @@ import type { MotionIntentState } from '@/lib/avatar/motionIntentContinuity';
 import type { BehaviorMotionMode } from '@/lib/behavior/behaviorMotionBrain';
 import type { EmbodimentState } from '@/lib/avatar/embodimentState';
 import type { BonePoseMap } from './PoseComposer';
+import { isPoseKeyProcedurallySuppressed } from './proceduralSuppressionContext';
 import { nowMs as masterClockNowMs } from '@/lib/avatar/masterClock';
+import { isVrmaPlaybackGloballyDisabled } from '@/lib/avatar/vrmaPlaybackPolicy';
 
 const noise3 = createNoise3D(() => Math.random());
+
+/** Digital Human: slightly stronger baseline chest/spine breath (independent of speech cadence). */
+const ENHANCED_BASELINE_BREATH =
+  typeof process === 'undefined' ||
+  (process.env.NEXT_PUBLIC_AVATAR_ENHANCED_BREATHING !== 'false' &&
+    process.env.NEXT_PUBLIC_AVATAR_ENHANCED_BREATHING !== '0');
+const BREATH_AMP_BOOST = ENHANCED_BASELINE_BREATH ? 1.22 : 1;
 
 const _e = new THREE.Euler(0, 0, 0, 'YXZ');
 const _qDelta = new THREE.Quaternion();
@@ -29,6 +38,7 @@ let presenceEyeYawTgt = 0;
 let presenceEyePitchTgt = 0;
 
 function mulBoneDeltaEuler(finalPose: BonePoseMap, key: string, rx: number, ry: number, rz: number): void {
+  if (isPoseKeyProcedurallySuppressed(key)) return;
   const q = finalPose.get(key);
   if (!q) return;
   _e.set(rx, ry, rz, 'YXZ');
@@ -60,7 +70,13 @@ export function applyContinuousPresenceToFinalPose(
   opts: PresenceApplyOpts,
 ): void {
   if (!isBodyDrivenByVRMA(opts)) return;
-  if (opts.gestureLayerW > 0.42) return;
+  /**
+   * Strong procedural gestures (wave/point/…) still suppress idle head sway to avoid fighting the pose.
+   * Torso breath (spine/chest/shoulders) always runs — without it + frozen VRMA the body reads “dead”.
+   * When VRMA is globally frozen, soften the head gate so thinking/listening keep micro life.
+   */
+  const headPresenceGate = isVrmaPlaybackGloballyDisabled() ? 0.72 : 0.42;
+  const suppressIdleHeadPresence = opts.gestureLayerW > headPresenceGate;
 
   const intent =
     opts.intentSnapshot !== undefined
@@ -76,7 +92,7 @@ export function applyContinuousPresenceToFinalPose(
   }
   const modePresMul =
     opts.behaviorMode === 'LISTENING' ? 0.97
-    : opts.behaviorMode === 'THINKING' ? 0.96
+    : opts.behaviorMode === 'THINKING' ? 1.07
     : opts.behaviorMode === 'RESPONDING' ? 1.02
     : opts.behaviorMode === 'ANTICIPATING' ? 1.01
     : 1;
@@ -105,17 +121,62 @@ export function applyContinuousPresenceToFinalPose(
   presenceEyeYaw = THREE.MathUtils.lerp(presenceEyeYaw, presenceEyeYawTgt, eyeK);
   presenceEyePitch = THREE.MathUtils.lerp(presenceEyePitch, presenceEyePitchTgt, eyeK);
 
-  mulBoneDeltaEuler(finalPose, 'neck', headYaw * 0.52 + presenceEyeYaw * 0.35, headPitch * 0.42 + presenceEyePitch * 0.32, headRoll * 0.38);
-  mulBoneDeltaEuler(finalPose, 'head', headYaw * 0.88 + presenceEyeYaw * 0.55, headPitch * 0.92 + presenceEyePitch * 0.48, headRoll * 0.62);
+  const neckWeightSway =
+    (Math.sin(tBase * 0.18 + 0.4) * 0.0018 + n2 * 0.0014) * talkMul * intent.headYawPitchMul * modePresMul;
+  if (!suppressIdleHeadPresence) {
+    mulBoneDeltaEuler(
+      finalPose,
+      'neck',
+      headYaw * 0.52 + presenceEyeYaw * 0.35,
+      headPitch * 0.42 + presenceEyePitch * 0.32,
+      headRoll * 0.38 + neckWeightSway * 0.5,
+    );
+    mulBoneDeltaEuler(
+      finalPose,
+      'head',
+      headYaw * 0.88 + presenceEyeYaw * 0.55,
+      headPitch * 0.92 + presenceEyePitch * 0.48,
+      headRoll * 0.62 + neckWeightSway * 0.62,
+    );
+  }
 
   const breathPhase = t * (1.05 + 0.07 * Math.sin(t * 0.19));
   const breathSpine =
-    (Math.sin(breathPhase) + n1 * 0.35) * 0.013 * talkMul * intent.shoulderMul * modePresMul;
+    (Math.sin(breathPhase) + n1 * 0.35) *
+    0.013 *
+    BREATH_AMP_BOOST *
+    talkMul *
+    intent.shoulderMul *
+    modePresMul;
   const breathChest =
-    (Math.sin(breathPhase - 0.13) + n2 * 0.32) * 0.012 * talkMul * intent.shoulderMul * modePresMul;
-  mulBoneDeltaEuler(finalPose, 'spine', breathSpine * 0.48, 0, breathSpine * 0.2);
-  mulBoneDeltaEuler(finalPose, 'chest', breathChest * 0.42, 0, breathChest * 0.16);
-  const sh = breathSpine * 0.5 * intent.shoulderMul * modePresMul;
+    (Math.sin(breathPhase - 0.13) + n2 * 0.32) *
+    0.012 *
+    BREATH_AMP_BOOST *
+    talkMul *
+    intent.shoulderMul *
+    modePresMul;
+  const breathScale = suppressIdleHeadPresence
+    ? (isVrmaPlaybackGloballyDisabled() ? 0.82 : 0.62)
+    : 1;
+  const weightShiftY =
+    (Math.sin(tBase * 0.21) * 0.0031 + n1 * 0.0026) * talkMul * intent.headYawPitchMul * modePresMul * breathScale;
+  const weightShiftZ =
+    (Math.sin(tBase * 0.154 + 1.1) * 0.0024 + n3 * 0.002) * talkMul * intent.shoulderMul * modePresMul * breathScale;
+  mulBoneDeltaEuler(
+    finalPose,
+    'spine',
+    breathSpine * 0.48 * breathScale,
+    weightShiftY,
+    breathSpine * 0.2 * breathScale + weightShiftZ,
+  );
+  mulBoneDeltaEuler(
+    finalPose,
+    'chest',
+    breathChest * 0.42 * breathScale,
+    weightShiftY * 0.72,
+    breathChest * 0.16 * breathScale + weightShiftZ * 0.65,
+  );
+  const sh = breathSpine * 0.5 * intent.shoulderMul * modePresMul * breathScale;
   mulBoneDeltaEuler(finalPose, 'leftShoulder', 0, 0, sh);
   mulBoneDeltaEuler(finalPose, 'rightShoulder', 0, 0, -sh);
 }

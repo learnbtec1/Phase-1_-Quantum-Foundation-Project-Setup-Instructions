@@ -87,9 +87,9 @@ export function generateIntentPose(
   }
 
   if (intent === 'listening') {
-    const lean = 0.028 * iw;
-    setBindEulerOffset(out, bindPose, 'spine', lean, 0, 0);
-    setBindEulerOffset(out, bindPose, 'chest', lean * 0.9, 0, 0);
+    const leanBack = -0.034 * iw;
+    setBindEulerOffset(out, bindPose, 'spine', leanBack, 0, 0);
+    setBindEulerOffset(out, bindPose, 'chest', leanBack * 0.9, 0, 0);
     setBindEulerOffset(out, bindPose, 'neck', 0.012 * iw, 0.01 * iw * Math.sin(t * 0.2), 0);
     setBindEulerOffset(out, bindPose, 'lua', 0, 0.015 * iw, -0.012 * iw);
     setBindEulerOffset(out, bindPose, 'rua', 0, -0.015 * iw, 0.012 * iw);

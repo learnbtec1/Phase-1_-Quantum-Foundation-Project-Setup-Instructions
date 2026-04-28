@@ -3,6 +3,7 @@
  * VRMAPlayer stays unchanged; this layer gates `UnifiedGestureEngine.play()` only.
  */
 
+import { AVATAR_BEHAVIOR_SINGLE_CONTROLLER } from '@/config/avatar';
 import { PRIORITY, type PriorityValue } from '@/constants/gestures';
 import {
   ANTICIPATION_END_EVENT,
@@ -116,6 +117,7 @@ function emitMinimalHeadNod(): void {
  * min-silence only applies after a real completion (`hasRecordedBehaviorMotionCompletion`).
  */
 export function shouldAct(): boolean {
+  if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) return true;
   if (isBrainDisabled()) return true;
   if (automaticGestureInjectorsDisabled()) return true;
   const now = perfNow();
@@ -213,6 +215,7 @@ function onAnticipationEnd(e: Event): void {
 
 /** Idempotent — attach DOM listeners once (browser only). */
 export function initBehaviorMotionBrainListeners(): void {
+  if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) return;
   if (typeof window === 'undefined' || listenersAttached) return;
   listenersAttached = true;
   const t0 = perfNow();
@@ -242,6 +245,7 @@ export type BehaviorMotionBrainGateParams = {
 export async function behaviorMotionBrainGatePlay(
   params: BehaviorMotionBrainGateParams,
 ): Promise<boolean> {
+  if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) return true;
   if (isBrainDisabled()) return true;
   if (automaticGestureInjectorsDisabled()) return true;
 

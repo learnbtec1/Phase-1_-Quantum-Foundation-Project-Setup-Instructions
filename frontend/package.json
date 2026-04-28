@@ -12,7 +12,14 @@
     "type-check": "tsc --noEmit",
     "test:ui": "playwright test -c playwright.ui.config.ts --headed --project=chromium --reporter=list",
     "playwright:install": "playwright install chromium --with-deps",
-    "audit": "npm audit --audit-level=high"
+    "audit": "npm audit --audit-level=high",
+    "test:ws-url": "node --experimental-strip-types --test src/lib/wsAgentUrl.test.ts",
+    "test:brain": "tsx --test src/store/useBrainStore.brain.test.ts",
+    "test:normalize": "node --experimental-strip-types --test src/utils/events/__tests__/normalizeAvatarEvents.test.ts",
+    "test:unit": "npm run test:ws-url && npm run test:brain && npm run test:normalize",
+    "test:integration": "tsx --test src/integration/brainMotionPipeline.integration.test.ts",
+    "test:ci": "npm run test:unit && npm run test:integration",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.19.3",
@@ -44,7 +51,7 @@
     "lucide-react": "^0.563.0",
     "mammoth": "^1.11.0",
     "microsoft-cognitiveservices-speech-sdk": "^1.49.0",
-    "next": "^16.1.6",
+    "next": "^16.2.4",
     "number-to-arabic-words": "^1.5.3",
     "openai": "^6.25.0",
     "pdfjs-dist": "^5.4.624",
@@ -74,6 +81,7 @@
     "sharp": "^0.34.5",
     "sharp-ico": "^0.1.5",
     "tailwindcss": "^3.4.19",
+    "tsx": "^4.21.0",
     "typescript": "^5.3.0"
   }
 }

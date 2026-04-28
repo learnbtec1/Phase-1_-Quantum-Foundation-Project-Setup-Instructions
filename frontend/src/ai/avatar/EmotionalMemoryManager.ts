@@ -1,6 +1,10 @@
 /**
  * EmotionalMemoryManager.ts — Phase 4 Emotional Trajectory & Long-Term Memory
  *
+ * Operates on **`useBrainStore.emotionalMemory`** and **`useBrainStore.longTermMemory`** only.
+ * It does **not** use {@link BehaviorMemory} (`app/avatar-agent/behavior/BehaviorMemory.ts`) —
+ * that class is a separate ~8s motion anti-repeat buffer inside BehaviorBrainHost.
+ *
  * Provides a high-level API on top of the BrainStore memory primitives:
  *
  *   • recordMoment()            — snapshot the current PAD + mood, auto-promote
@@ -29,6 +33,7 @@ import {
   getAdaptationHints,
   getCompactSummaryForPrompt,
 } from '@/lib/avatar/emotionalMemory';
+import { getLastSessionContext } from '@/lib/brainPersistence';
 import { getPersonalityEvolutionSummary } from '@/lib/avatar/personalityEvolution';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
@@ -339,6 +344,16 @@ export class EmotionalMemoryManager {
     lines.push(getPersonalityEvolutionSummary());
     if (hints.recallHintAr) {
       lines.push(`Recall hint (optional): ${hints.recallHintAr}`);
+    }
+
+    const persisted = getLastSessionContext();
+    if (persisted?.lastTopic?.trim()) {
+      lines.push(
+        `BrainPersist last_topic: ${persisted.lastTopic.trim().slice(0, 200)}`,
+      );
+      lines.push(
+        `BrainPersist last_mood: ${String(persisted.lastMood ?? 'neutral').slice(0, 64)} | last_seen: ${persisted.lastSeen}`,
+      );
     }
 
     const summary = lines.join(' | ');

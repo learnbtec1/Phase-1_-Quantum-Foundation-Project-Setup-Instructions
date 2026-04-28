@@ -45,6 +45,7 @@ import {
   type VRMAnimation,
 } from '@pixiv/three-vrm-animation';
 import { remapClipForVRM } from './vrmaFingerRemapper';
+import { isVrmaPlaybackGloballyDisabled } from '@/lib/avatar/vrmaPlaybackPolicy';
 
 // ─── نوع الـ GLTF الموسّع بـ vrmAnimations ────────────────────────────────
 type GLTFWithVRMAnimations = {
@@ -363,6 +364,23 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
       }
       return;
     }
+    if (isVrmaPlaybackGloballyDisabled()) {
+      mixerRef.current?.stopAllAction();
+      mixerRef.current = null;
+      currentActionRef.current = null;
+      lastPlayingClipUuidRef.current = null;
+      lastAuthorityTierRef.current = 'full';
+      setVrmaBaselineLayerActive(false);
+      releaseMotion('VRMA');
+      vrmaActiveRef.current = false;
+      if (prevVrmaActiveRef.current) {
+        prevVrmaActiveRef.current = false;
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('avatar:vrma:active', { detail: { active: false } }));
+        }
+      }
+      return;
+    }
     const mixer = new THREE.AnimationMixer(vrm.scene);
     mixerRef.current = mixer;
     return () => {
@@ -376,6 +394,12 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
   // Single public API — mirrors `avatar:vrma:play` (no duplicate procedural path).
   useEffect(() => {
     if (!vrm || typeof window === 'undefined') return;
+    if (isVrmaPlaybackGloballyDisabled()) {
+      window.VRM_ANIMATION = { playVRMA: () => { /* VRMA frozen */ } };
+      return () => {
+        if (window.VRM_ANIMATION) delete window.VRM_ANIMATION;
+      };
+    }
     window.VRM_ANIMATION = {
       playVRMA: (url: string, opts?: { durationMs?: number; loop?: boolean }) => {
         window.dispatchEvent(
@@ -393,7 +417,7 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
   /** Optional one-shot `avatar:vrma:play` after load — `NEXT_PUBLIC_VRMA_PLAY_ON_LOAD` (trigger-only smoke test). */
   useEffect(() => {
     const url = readVrmaPlayOnLoadUrl();
-    if (!vrm || !url || typeof window === 'undefined') return;
+    if (!vrm || !url || typeof window === 'undefined' || isVrmaPlaybackGloballyDisabled()) return;
     const t = window.setTimeout(() => {
       window.dispatchEvent(
         new CustomEvent<VRMAPlayEventDetail>('avatar:vrma:play', {
@@ -508,6 +532,7 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
     if (!vrm) return;
 
     const onGesture = async (e: Event) => {
+      if (isVrmaPlaybackGloballyDisabled()) return;
       const detail = (e as CustomEvent<Record<string, unknown>>).detail ?? {};
       // Engine already fired `avatar:vrma:play` — do not load VRMA again from this event.
       if (detail.motion === 'vrma') {
@@ -626,6 +651,7 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
     };
 
     const onPlay = async (e: Event) => {
+      if (isVrmaPlaybackGloballyDisabled()) return;
       const detail = (e as CustomEvent<VRMAPlayEventDetail>).detail;
       if (!detail) {
         motionDebug('VRMA IGNORED:', 'avatar:vrma:play-no-detail');

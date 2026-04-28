@@ -63,5 +63,14 @@ def log_startup_security_and_ops_warnings(*, environment: str, jwt_secret: str) 
                     "Run: cd backend && set PYTHONPATH=. && python scripts/btec_ingest.py "
                     "(requires OPENAI_API_KEY). Docker: docker compose --profile ingest run --rm btec-ingest",
                 )
+        except ModuleNotFoundError as exc:
+            logger.warning(
+                "[startup] chromadb / vector store import failed (%s) — install `chromadb` "
+                "(requirements.txt). BTEC Chroma RAG is disabled until fixed; TTS and REST API still run.",
+                exc,
+            )
         except Exception as exc:
-            logger.debug("[startup] BTEC Chroma probe skipped: %s", exc)
+            logger.warning(
+                "[startup] BTEC Chroma probe skipped (non-fatal): %s",
+                exc,
+            )

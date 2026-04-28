@@ -151,8 +151,8 @@ export function computeThinkingGazeBias(
   if (!thinkingActive) return { yaw: 0, pitch: 0 };
   const env = 0.5 + 0.5 * Math.sin(tSec * 2.4);
   return {
-    yaw: Math.sin(tSec * 0.85) * 0.02 * env,
-    pitch: 0.034 * env,
+    yaw: Math.sin(tSec * 0.85) * 0.012 * env,
+    pitch: 0.017 * env,
   };
 }
 

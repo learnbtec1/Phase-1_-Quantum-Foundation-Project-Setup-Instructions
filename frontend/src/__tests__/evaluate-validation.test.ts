@@ -1,6 +1,9 @@
 /**
  * اختبار التحقق من صحة طلبات التقييم (evaluate route validation).
  * يتحقق من أن النص القصير أو الفارغ يُرجع 400 مع رسالة مناسبة.
+ *
+ * **Not wired to `npm run test:unit`** — uses Jest-style globals; run manually with a Jest/Vitest
+ * setup or migrate to `node:test` to include in CI.
  */
 import { POST } from '../app/api/evaluate/route';
 

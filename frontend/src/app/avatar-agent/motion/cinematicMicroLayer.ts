@@ -7,6 +7,7 @@
 
 import * as THREE from 'three';
 import type { BonePoseMap } from './PoseComposer';
+import { isPoseKeyProcedurallySuppressed } from './proceduralSuppressionContext';
 import { getCinematicMicroNoiseScale } from '@/ai/avatar/avatarPersonality';
 import { logCinematicMicroProbe } from '@/app/avatar-agent/motion/motionPipelineDebug';
 
@@ -24,6 +25,7 @@ function easeInOut01(u: number): number {
 }
 
 function mulBoneDeltaEuler(finalPose: BonePoseMap, key: string, rx: number, ry: number, rz: number): void {
+  if (isPoseKeyProcedurallySuppressed(key)) return;
   const q = finalPose.get(key);
   if (!q) return;
   _e.set(rx, ry, rz, 'YXZ');
@@ -40,10 +42,9 @@ function mulFirstPresent(
   rz: number,
 ): void {
   for (const key of keys) {
-    if (finalPose.has(key)) {
-      mulBoneDeltaEuler(finalPose, key, rx, ry, rz);
-      return;
-    }
+    if (!finalPose.has(key) || isPoseKeyProcedurallySuppressed(key)) continue;
+    mulBoneDeltaEuler(finalPose, key, rx, ry, rz);
+    return;
   }
 }
 

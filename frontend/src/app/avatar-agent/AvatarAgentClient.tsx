@@ -23,58 +23,14 @@ import { AvatarBodyPortal } from '@/components/portal/AvatarBodyPortal';
 import { Z_LAYERS } from '@/lib/z-layers';
 import { usePerceptionStore } from '@/store/usePerceptionStore';
 import { resumeSharedAudioContext } from '@/lib/audio/avatarAudioContext';
-import { setTtsPlaybackAudioElement } from '@/ai/io/tts';
+import { isElevenLabsTtsProvider, setTtsPlaybackAudioElement } from '@/ai/io/tts';
 import { useCogniAvatarDebug } from '@/hooks/useCogniAvatarDebug';
 import type { VisemeCue } from '@/app/avatar-agent/LipSyncManager';
+import AvatarCanvas from './AvatarCanvas';
 type HistoryEntry = { role: 'user' | 'teacher'; text: string; emotion?: string };
 type MeUser = { name: string; email: string; role: string };
 
-const AvatarCanvas = dynamic(() => import('./AvatarCanvas'), {
-  ssr: false,
-  loading: () => (
-    <div className="flex items-center justify-center min-h-screen bg-[#0a0a12] text-gray-300 text-sm animate-pulse">
-      جاري استدعاء كوجني... 🧑‍🏫
-    </div>
-  ),
-});
-
 const CameraPerception = dynamic(() => import('@/components/CameraPerception'), { ssr: false });
-
-const EMOTION_DISPLAY: Record<string, { icon: string; colour: string }> = {
-  happy:           { icon: '😊', colour: 'text-yellow-400' },
-  excited:         { icon: '🤩', colour: 'text-orange-400' },
-  celebrating:     { icon: '🎉', colour: 'text-pink-400' },
-  celebration:     { icon: '🎉', colour: 'text-pink-400' },
-  proud:           { icon: '😌', colour: 'text-violet-400' },
-  curious:         { icon: '🤔', colour: 'text-sky-400' },
-  thinking:        { icon: '💭', colour: 'text-blue-400' },
-  encouraging:     { icon: '💪', colour: 'text-green-400' },
-  empathetic:      { icon: '🤝', colour: 'text-rose-400' },
-  concerned:       { icon: '😟', colour: 'text-amber-400' },
-  sad:             { icon: '😢', colour: 'text-blue-300' },
-  anxious:         { icon: '😰', colour: 'text-orange-300' },
-  angry:           { icon: '😤', colour: 'text-red-400' },
-  surprised:       { icon: '😲', colour: 'text-yellow-300' },
-  attentive:       { icon: '👀', colour: 'text-cyan-400' },
-  friendly:        { icon: '🤗', colour: 'text-green-300' },
-  neutral:         { icon: '😐', colour: 'text-gray-400' },
-  relax:           { icon: '😌', colour: 'text-emerald-300' },
-  sleepy:          { icon: '😴', colour: 'text-indigo-300' },
-  strictEvaluation:{ icon: '📋', colour: 'text-red-300' },
-  // ── Phase 2: missing keys ──────────────────────────
-  calm:            { icon: '😌', colour: 'text-emerald-400' },
-  relaxed:         { icon: '🧘', colour: 'text-teal-400' },
-  bored:           { icon: '😒', colour: 'text-gray-500' },
-  confused:        { icon: '😕', colour: 'text-amber-300' },
-  disappointed:    { icon: '😞', colour: 'text-slate-400' },
-  motivated:       { icon: '🔥', colour: 'text-orange-400' },
-  playful:         { icon: '😜', colour: 'text-pink-400' },
-};
-
-function emitAvatarCmd(type: string, detail: Record<string, unknown> = {}) {
-  if (typeof window === 'undefined') return;
-  window.dispatchEvent(new CustomEvent(type, { detail }));
-}
 
 const ACTIVE_VRM = pickVrmUrl();
 
@@ -194,10 +150,8 @@ export default function AvatarAgentClient({
     }
   }, []);
 
-  const [userInput, setUserInput] = useState('');
   const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [isSitting, setIsSitting] = useState(false);
-  const [showHistory, setShowHistory] = useState(true);
+  const [extrasOpen, setExtrasOpen] = useState(false);
   const [audioBlocked, setAudioBlocked] = useState(false);
   const [blockedAudio, setBlockedAudio] = useState<HTMLAudioElement | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
@@ -275,13 +229,13 @@ export default function AvatarAgentClient({
     isConnected,
     isProcessing,
     isListening,
+    sttUiPhase,
     lastTranscript,
     lastDialogue,
     emotion,
     error,
     toggleListening,
     sendText,
-    clearHistory,
     sendWsPayload,
   } = useAgentAgent({ wsUrl: WS_AGENT_URL });
 
@@ -407,6 +361,7 @@ export default function AvatarAgentClient({
     if (typeof window === 'undefined') return;
     let hideTimer: number | undefined;
     const onSecondaryVoice = (e: Event): void => {
+      if (isElevenLabsTtsProvider()) return;
       const msg =
         (e as CustomEvent<{ message?: string }>).detail?.message ??
         'Using secondary voice engine...';
@@ -456,11 +411,14 @@ export default function AvatarAgentClient({
     if (!isProcessing) processingTypingRef.current = false;
   }, [isProcessing, hasStarted]);
 
-  // 3. سجل المحادثة
+  // 3. سجل المحادثة (صوتي: فقط عند وصول النص من الخادم — بدون تكرار مع الإرسال اليدوي)
   useEffect(() => {
-    if (lastTranscript) {
-      setHistory(h => [...h.slice(-15), { role: 'user', text: lastTranscript }]);
-    }
+    if (!lastTranscript.trim()) return;
+    setHistory((h) => {
+      const last = h[h.length - 1];
+      if (last?.role === 'user' && last.text === lastTranscript) return h;
+      return [...h.slice(-15), { role: 'user', text: lastTranscript.trim() }];
+    });
   }, [lastTranscript]);
 
   useEffect(() => {
@@ -515,12 +473,16 @@ export default function AvatarAgentClient({
       window.setTimeout(() => {
         void unifiedGestureEngine.play('Thinking', { priority: PRIORITY.NORMAL });
       }, 500);
-      setHistory((h) => [...h.slice(-15), { role: 'user', text: t }]);
+      setHistory((h) => {
+        const last = h[h.length - 1];
+        if (last?.role === 'user' && last.text === t) return h;
+        return [...h.slice(-15), { role: 'user', text: t }];
+      });
     },
     [sendText],
   );
 
-  const currentEmo = EMOTION_DISPLAY[emotion] || EMOTION_DISPLAY.neutral;
+  const sessionLocked = !hasStarted;
 
   /* overflow-x فقط داخل العمود؛ للصفحة الكامحة الأفاتار يُحمَّل عبر BodyPortal فيتجاوز أي قصّ */
   const shellClass =
@@ -558,8 +520,11 @@ export default function AvatarAgentClient({
           <div className="bg-[#121225] border border-violet-500/20 rounded-3xl p-12 max-w-lg text-center shadow-[0_0_50px_rgba(139,92,246,0.15)]">
             <div className="text-8xl mb-6 drop-shadow-2xl animate-bounce">🧑‍🏫</div>
             <h1 className="text-4xl font-black text-white mb-4 tracking-tight">كوجني: المعلم الذكي</h1>
-            <p className="text-gray-400 mb-10 text-lg leading-relaxed">
+            <p className="text-gray-400 mb-4 text-lg leading-relaxed">
               جاهز لرحلة تعلم BTEC فريدة؟ اضغط أدناه لتفعيل الصوت والبدء.
+            </p>
+            <p className="text-gray-500 mb-10 text-sm leading-relaxed">
+              بعد البدء تظهر نافذة المحادثة أسفل يمين الشاشة — يمكنك الكتابة أو استخدام الميكروفون.
             </p>
             <div className="flex flex-col gap-3 w-full">
               <button
@@ -584,28 +549,6 @@ export default function AvatarAgentClient({
             </div>
           </div>
         </div>
-        </BodyPortal>
-      )}
-
-      {/* Mic فوق نافذة البدء — نفس سلوك الشريط السفلي؛ يبقى ظاهراً قبل hasStarted */}
-      {COGNI_MIC_UI_ENABLED && !hasStarted && (
-        <BodyPortal>
-          <div
-            className="pointer-events-auto fixed bottom-8 left-1/2 flex -translate-x-1/2 justify-center"
-            style={{ zIndex: Z_LAYERS.MODAL_TOAST }}
-          >
-            <button
-              type="button"
-              onClick={() => void toggleListening()}
-              title={isListening ? 'إيقاف الاستماع' : 'تحدث بالميكروفون'}
-              aria-label={isListening ? 'إيقاف الاستماع' : 'تشغيل الميكروفون'}
-              className={`rounded-2xl p-4 text-white shadow-lg transition-all active:scale-90 ${
-                isListening ? 'animate-pulse bg-red-600' : 'bg-cyan-600 hover:bg-cyan-500'
-              }`}
-            >
-              {isListening ? '⛔' : '🎤'}
-            </button>
-          </div>
         </BodyPortal>
       )}
 
@@ -789,160 +732,208 @@ export default function AvatarAgentClient({
             </AvatarBodyPortal>
           )}
 
+      <BodyPortal>
           <div
-            className="pointer-events-none absolute top-8 left-8 flex items-center gap-4 rounded-2xl border border-cyan-500/20 bg-black/40 p-3 shadow-lg backdrop-blur-md"
-            style={{ zIndex: Z_LAYERS.HUD_CHROME }}
-          >
-            <div className="relative">
-              <div className="text-3xl">{currentEmo.icon}</div>
-              {isProcessing && <div className="absolute -top-1 -right-1 w-3 h-3 bg-blue-500 rounded-full animate-ping" />}
-            </div>
-            <div>
-              <div className="text-[10px] text-cyan-400 font-bold uppercase tracking-widest">Cogni Brain</div>
-              <div className={`text-sm font-medium ${currentEmo.colour}`}>{emotion}</div>
-            </div>
-          </div>
-
-          <button 
-            onClick={() => setShowHistory(!showHistory)}
-            className="absolute top-1/2 right-0 -translate-y-1/2 rounded-l-xl bg-violet-600 p-2 text-white shadow-2xl transition-colors hover:bg-violet-500"
-            style={{ zIndex: Z_LAYERS.HUD_CHROME }}
-          >
-            {showHistory ? '◀' : '📜'}
-          </button>
-
-          {showHistory && (
-            <div
-              className="absolute top-20 right-0 bottom-40 flex w-80 flex-col border-l border-white/5 bg-[#0a0a12]/80 backdrop-blur-2xl animate-in slide-in-from-right duration-300"
-              style={{ zIndex: Z_LAYERS.HUD_CHROME }}
+              className={`pointer-events-auto fixed flex flex-col overflow-hidden rounded-2xl border border-white/12 bg-[#0a0a14]/95 shadow-[0_20px_60px_rgba(0,0,0,0.55)] backdrop-blur-xl ${
+                embedVariant === 'dashboard'
+                  ? 'bottom-3 right-3 max-h-[min(68vh,34rem)] w-[min(22rem,calc(100vw-1.5rem))]'
+                  : 'bottom-5 right-5 max-h-[min(72vh,38rem)] w-[min(26rem,calc(100vw-2.5rem))]'
+              } ${sessionLocked ? 'opacity-50' : ''}`}
+              style={{ zIndex: Z_LAYERS.CHAT_CARD }}
+              aria-label="Chat"
             >
-              <div className="p-4 border-b border-white/5 text-gray-400 text-xs font-bold uppercase">سجل الجلسة الحالية</div>
-              <div ref={historyRef} className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-hide">
+              <div className="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 px-3 py-2.5">
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+                  <span
+                    className={`h-2 w-2 shrink-0 rounded-full ${isConnected ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.7)]' : 'bg-red-500'}`}
+                    title={isConnected ? 'متصل' : 'غير متصل'}
+                  />
+                  <span className="truncate text-sm font-semibold text-white/95">المحادثة</span>
+                  <span className="text-[10px] font-medium text-gray-400 ltr">
+                    {isConnected ? 'Connected' : 'Offline'}
+                  </span>
+                  {isProcessing && (
+                    <span className="text-[10px] font-medium text-cyan-300/90" aria-live="polite">
+                      جاري الرد…
+                    </span>
+                  )}
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    className="rounded-lg px-2 py-1 text-[11px] text-gray-400 hover:bg-white/10 hover:text-white"
+                    onClick={() => setExtrasOpen((v) => !v)}
+                    aria-expanded={extrasOpen}
+                  >
+                    {extrasOpen ? 'إغلاق الإضافات' : 'المزيد'}
+                  </button>
+                </div>
+              </div>
+
+              {error && (
+                <div
+                  className="shrink-0 border-b border-rose-500/25 bg-rose-950/45 px-3 py-1.5 text-[11px] text-rose-100/95"
+                  role="alert"
+                >
+                  {error}
+                </div>
+              )}
+
+              {!sessionLocked && (
+                <div
+                  className="flex shrink-0 items-center gap-2 border-b border-white/10 px-3 py-2"
+                  role="status"
+                  aria-live="polite"
+                >
+                  {sttUiPhase === 'converting' ? (
+                    <span className="inline-flex items-center rounded-full bg-orange-600/40 px-3 py-1 text-[11px] font-semibold text-orange-50 ring-1 ring-orange-400/35">
+                      Converting to text…
+                    </span>
+                  ) : isListening ? (
+                    <span className="inline-flex items-center rounded-full bg-red-600/45 px-3 py-1 text-[11px] font-semibold text-red-50 ring-1 ring-red-400/40">
+                      Listening…
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center rounded-full bg-slate-600/40 px-3 py-1 text-[11px] font-semibold text-slate-100 ring-1 ring-slate-400/25">
+                      Idle
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {extrasOpen && (
+                <div className="shrink-0 space-y-2 border-b border-white/10 bg-black/25 px-3 py-2 text-right">
+                  <div className="flex flex-wrap justify-end gap-1.5">
+                    {me && (
+                      <button
+                        type="button"
+                        onClick={startPractice}
+                        disabled={!isConnected || isProcessing}
+                        className="rounded-full border border-amber-400/35 bg-amber-600/85 px-3 py-1 text-[10px] font-bold text-white disabled:opacity-30"
+                        title="سؤال تدريبي يتناسب مع مستواك"
+                      >
+                        تدريب
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setBtecTrainOpen(true)}
+                      disabled={!isConnected || isProcessing}
+                      className="rounded-full border border-violet-400/35 bg-violet-700/85 px-3 py-1 text-[10px] font-bold text-white disabled:opacity-30"
+                      title="أسئلة من كتب BTEC مع تقييم P/M/D"
+                    >
+                      تدريب BTEC
+                    </button>
+                  </div>
+                  <CameraPerception
+                    enabled={camOptIn && isConnected}
+                    onSample={(p) =>
+                      sendWsPayload({
+                        type: 'camera_frame',
+                        emotion: p.emotion,
+                        attention: p.attention,
+                        engagement: p.engagement,
+                        ts: p.ts,
+                      })
+                    }
+                  />
+                  <ResponseFeedback
+                    enabled={!!me}
+                    onFeedback={onFeedback}
+                    lastUserText={lastForFeedback.user}
+                    lastAssistantText={lastForFeedback.assistant}
+                  />
+                  <button
+                    type="button"
+                    className="text-[10px] text-gray-500 hover:text-violet-300"
+                    onClick={() => setShowTools((v) => !v)}
+                  >
+                    {showTools ? 'إخفاء أدوات التفاعل' : 'أدوات تفاعل'}
+                  </button>
+                  {showTools && (
+                    <ToolSandbox
+                      sendTool={(payload) =>
+                        sendWsPayload({ type: 'tool_interaction', payload })
+                      }
+                    />
+                  )}
+                  <div className="flex flex-wrap justify-end gap-1.5 pt-1">
+                    {['PESTLE', 'SWOT', 'BTEC P1'].map((tag) => (
+                      <button
+                        key={tag}
+                        type="button"
+                        onClick={() => chatInputRef.current?.setValue(`اشرح لي ${tag}`)}
+                        className="text-[10px] text-gray-500 hover:text-white"
+                      >
+                        #{tag}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div
+                ref={historyRef}
+                className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3 scrollbar-hide"
+              >
+                {history.length === 0 && (
+                  <p className="px-1 text-center text-[12px] leading-relaxed text-gray-500">
+                    {sessionLocked
+                      ? 'اضغط «ابدأ الآن» أعلاه لتفعيل المحادثة والميكروفون.'
+                      : 'Speak, or type here — messages appear in this thread.'}
+                  </p>
+                )}
                 {history.map((h, i) => (
-                  <div key={i} className={`flex ${h.role === 'user' ? 'justify-start' : 'justify-end'}`}>
-                    <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm ${
-                      h.role === 'user' ? 'bg-blue-600/20 text-blue-100 border border-blue-500/10' : 'bg-violet-600/20 text-violet-100 border border-violet-500/10'
-                    }`}>
+                  <div
+                    key={`${h.role}-${i}-${h.text.slice(0, 24)}`}
+                    className={`flex ${h.role === 'user' ? 'justify-start' : 'justify-end'}`}
+                  >
+                    <div
+                      className={`max-w-[92%] rounded-2xl px-3.5 py-2.5 text-[13px] leading-relaxed ${
+                        h.role === 'user'
+                          ? 'border border-sky-500/15 bg-sky-600/18 text-sky-50'
+                          : 'border border-violet-500/15 bg-violet-600/18 text-violet-50'
+                      }`}
+                    >
                       {h.text}
                     </div>
                   </div>
                 ))}
               </div>
-            </div>
-          )}
 
-          <div
-            className="pointer-events-auto absolute inset-x-0 bottom-0 bg-gradient-to-t from-black via-black/90 to-transparent p-8"
-            style={{ zIndex: Z_LAYERS.HUD_CHROME }}
-          >
-            <div className="max-w-4xl mx-auto space-y-6">
-              
-              <div className="flex gap-2 justify-center flex-wrap items-center">
-                {me && (
-                  <button
-                    type="button"
-                    onClick={startPractice}
-                    disabled={!isConnected || isProcessing}
-                    className="px-4 py-1.5 bg-amber-600/90 hover:bg-amber-500 disabled:opacity-30 border border-amber-400/30 rounded-full text-white text-[11px] font-bold"
-                    title="سؤال تدريبي يتناسب مع مستواك"
-                  >
-                    تدريب
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setBtecTrainOpen(true)}
-                  disabled={!isConnected || isProcessing}
-                  className="px-4 py-1.5 bg-violet-700/90 hover:bg-violet-600 disabled:opacity-30 border border-violet-400/30 rounded-full text-white text-[11px] font-bold"
-                  title="أسئلة من كتب BTEC (Chroma) مع تقييم P/M/D"
-                >
-                  تدريب BTEC
-                </button>
-              </div>
-
-              <CameraPerception
-                enabled={camOptIn && isConnected}
-                onSample={(p) =>
-                  sendWsPayload({
-                    type: 'camera_frame',
-                    emotion: p.emotion,
-                    attention: p.attention,
-                    engagement: p.engagement,
-                    ts: p.ts,
-                  })
-                }
-              />
-
-              <ResponseFeedback
-                enabled={!!me}
-                onFeedback={onFeedback}
-                lastUserText={lastForFeedback.user}
-                lastAssistantText={lastForFeedback.assistant}
-              />
-
-              <div className="flex justify-center">
-                <button
-                  type="button"
-                  className="text-[11px] text-gray-500 hover:text-violet-300"
-                  onClick={() => setShowTools((v) => !v)}
-                >
-                  {showTools ? 'إخفاء الأدوات' : 'أدوات تفاعل'}
-                </button>
-              </div>
-              {showTools && (
-                <ToolSandbox
-                  sendTool={(payload) =>
-                    sendWsPayload({ type: 'tool_interaction', payload })
-                  }
-                />
-              )}
-
-              <div
-                className="relative isolate flex flex-wrap gap-4 items-center justify-center pointer-events-auto"
-                style={{ zIndex: Z_LAYERS.HUD_CHROME }}
-              >
+              <div className="shrink-0 border-t border-white/10 bg-black/20 px-3 py-3">
                 <ChatInput
                   ref={chatInputRef}
                   onSend={submitMessage}
-                  disabled={!isConnected || isProcessing}
+                  disabled={sessionLocked || !isConnected || isProcessing}
+                  showWebSpeech={false}
+                  placeholder="Speak, or type here..."
+                  className="!max-w-none w-full flex-wrap gap-2"
+                  trailingSlot={
+                    COGNI_MIC_UI_ENABLED ? (
+                      <button
+                        type="button"
+                        disabled={sessionLocked}
+                        onClick={() => void toggleListening()}
+                        title={isListening ? 'إيقاف الاستماع' : 'تحدث بالميكروفون'}
+                        aria-label={isListening ? 'إيقاف الاستماع' : 'تشغيل الميكروفون'}
+                        aria-pressed={isListening}
+                        className={`flex h-14 min-w-[3.5rem] shrink-0 items-center justify-center rounded-2xl text-xl text-white shadow-lg transition-all active:scale-90 disabled:cursor-not-allowed disabled:opacity-40 ${
+                          sttUiPhase === 'converting'
+                            ? 'animate-pulse bg-orange-500 ring-2 ring-orange-300/50'
+                            : isListening
+                              ? 'animate-pulse bg-red-600'
+                              : 'bg-slate-600 hover:bg-cyan-600'
+                        }`}
+                      >
+                        {sttUiPhase === 'converting' ? '⏳' : isListening ? '⏹' : '🎤'}
+                      </button>
+                    ) : null
+                  }
                 />
-                {COGNI_MIC_UI_ENABLED && (
-                  <button
-                    type="button"
-                    onClick={toggleListening}
-                    title={isListening ? 'إيقاف الاستماع' : 'تحدث بالميكروفون'}
-                    aria-label={isListening ? 'إيقاف الاستماع' : 'تشغيل الميكروفون'}
-                    className={`p-4 rounded-2xl text-white shadow-lg transition-all active:scale-90 ${
-                      isListening ? 'bg-red-600 animate-pulse' : 'bg-cyan-600 hover:bg-cyan-500'
-                    }`}
-                  >
-                    {isListening ? '⛔' : '🎤'}
-                  </button>
-                )}
-              </div>
-
-              <div className="flex justify-between items-center px-2">
-                <div className="flex gap-4 text-[10px] font-bold uppercase tracking-widest">
-                  <span className={isConnected ? 'text-emerald-500' : 'text-red-500'}>
-                    ● {isConnected ? 'Network Online' : 'Network Offline'}
-                  </span>
-                  <span className="text-gray-500">● Docker: Eduverse_Backend</span>
-                </div>
-                <div className="flex gap-2">
-                  {['PESTLE', 'SWOT', 'BTEC P1'].map((tag) => (
-                    <button
-                      key={tag}
-                      type="button"
-                      onClick={() => chatInputRef.current?.setValue(`اشرح لي ${tag}`)}
-                      className="text-[10px] text-gray-500 hover:text-white transition-colors"
-                    >
-                      #{tag}
-                    </button>
-                  ))}
-                </div>
               </div>
             </div>
-          </div>
+      </BodyPortal>
       </>
     </main>
     </>

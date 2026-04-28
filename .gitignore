@@ -5,6 +5,7 @@ node_modules
 credentials.json
 !.env.example
 backend/.env
+backend/.env2
 *.log
 .DS_Store
 Thumbs.db
@@ -31,6 +32,7 @@ backend/data/btec-bus/*.docx
 backend/data/chroma_cogni/
 **/chroma.sqlite3
 tts.wav
+frontend/test-results/
 
 # Local / vendor bundles (do not ship in repo)
 HabibiJordan/

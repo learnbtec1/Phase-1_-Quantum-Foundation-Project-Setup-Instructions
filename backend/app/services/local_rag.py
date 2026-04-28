@@ -35,6 +35,12 @@ from typing import List, Optional
 
 logger = logging.getLogger("eduverse.local_rag")
 
+# Phase 21 — boost chunks clearly tied to the mounted BTEC corpus path (Docker: /app/btec_corpus).
+try:
+    _BTEC_CORPUS_SCORE_BOOST = float(os.getenv("BTEC_CORPUS_RAG_SCORE_BOOST", "1.32"))
+except ValueError:
+    _BTEC_CORPUS_SCORE_BOOST = 1.32
+
 # ── Configuration (read from env, with safe defaults) ────────────────────────
 _DEFAULT_RAG_DIR = r"E:\BTEC"
 
@@ -79,6 +85,8 @@ class RagChunk:
     source: str          # filename (no path)
     page:   int = 0      # 1-based page / chunk index
     score:  float = 0.0  # TF-IDF relevance score
+    #: True when indexed file path is under the mounted BTEC corpus (e.g. btec_corpus / btec-bus).
+    from_btec_corpus: bool = False
 
 
 @dataclass
@@ -140,7 +148,13 @@ def _extract_text(path: Path) -> str:
     return ""
 
 
-def _chunk_text(text: str, source: str, chunk_size: int = CHUNK_SIZE) -> List[RagChunk]:
+def _chunk_text(
+    text: str,
+    source: str,
+    chunk_size: int = CHUNK_SIZE,
+    *,
+    from_btec_corpus: bool = False,
+) -> List[RagChunk]:
     """Split text into overlapping chunks (25% overlap for context continuity)."""
     # Normalise whitespace
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
@@ -155,7 +169,14 @@ def _chunk_text(text: str, source: str, chunk_size: int = CHUNK_SIZE) -> List[Ra
     while idx < len(text):
         snippet = text[idx: idx + chunk_size]
         if snippet.strip():
-            chunks.append(RagChunk(text=snippet.strip(), source=source, page=page))
+            chunks.append(
+                RagChunk(
+                    text=snippet.strip(),
+                    source=source,
+                    page=page,
+                    from_btec_corpus=from_btec_corpus,
+                )
+            )
         idx  += step
         page += 1
 
@@ -233,10 +254,23 @@ def _build_or_refresh() -> Optional[_DocIndex]:
         return None
 
     all_chunks: List[RagChunk] = []
+    rag_root_lower = RAG_DIR.as_posix().lower()
     for fpath in files:
         text = _extract_text(fpath)
         if text:
-            chunks = _chunk_text(text, source=fpath.name, chunk_size=CHUNK_SIZE)
+            fp_low = fpath.as_posix().lower()
+            under_btec = (
+                "btec_corpus" in fp_low
+                or "btec-bus" in fp_low
+                or "btec_bus" in fp_low
+                or rag_root_lower.rstrip("/").endswith("btec_corpus")
+            )
+            chunks = _chunk_text(
+                text,
+                source=fpath.name,
+                chunk_size=CHUNK_SIZE,
+                from_btec_corpus=under_btec,
+            )
             all_chunks.extend(chunks)
             logger.debug("[RAG] Indexed %d chunks from %s", len(chunks), fpath.name)
 
@@ -315,6 +349,8 @@ async def retrieve_local_context(
     scored: List[tuple[float, int]] = []
     for i, (chunk, tf) in enumerate(zip(index.chunks, index.tf)):
         s = _score_chunk(query_tokens, tf, index.idf)
+        if getattr(chunk, "from_btec_corpus", False):
+            s *= _BTEC_CORPUS_SCORE_BOOST
         # Atlas priority: boost score for chunks from COGNI_KNOWLEDGE_ATLAS.md
         if chunk.source == ATLAS_FILENAME:
             s *= ATLAS_BOOST

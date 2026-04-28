@@ -4,16 +4,15 @@ Main FastAPI app for EDUVERSE.
 """
 
 import sys
+
+# ChromaDB needs SQLite >= 3.35; use bundled lib from pysqlite3-binary before any chromadb import.
+try:
+    __import__("pysqlite3")
+    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+except ImportError:
+    pass
+
 import os
-
-# Chroma / SQLite: must run before any chromadb import (lazy imports in services still see patched sqlite3).
-_backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if _backend_dir not in sys.path:
-    sys.path.insert(0, _backend_dir)
-from sqlite_chroma_patch import apply_sqlite_chroma_patch
-
-apply_sqlite_chroma_patch()
-
 import asyncio
 import logging
 import time as _time
@@ -97,7 +96,9 @@ from app.core.rate_limit import ApiRateLimitMiddleware
 from app.services.tts_service import (
     EdgeTTSService,
     _EDGE_TTS_AVAILABLE,
+    log_critical_if_elevenlabs_misconfigured,
     synthesize_edge_tts_async,
+    synthesize_elevenlabs_async,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,16 +107,36 @@ logger = logging.getLogger(__name__)
 # Updated every _TTS_PING_EVERY_SEC by the background task started in lifespan.
 # The /api/health endpoint reads from this dict instead of rechecking live on
 # every call.
-_tts_health: dict = {"ok": None, "latency_ms": None, "ts": 0}
+_tts_health: dict = {"ok": None, "latency_ms": None, "ts": 0, "provider": None}
 _TTS_PING_EVERY_SEC = 300   # 5 minutes
 
 
+def _effective_tts_provider() -> str:
+    return (os.getenv("TTS_PROVIDER") or settings.TTS_PROVIDER or "edge").lower().strip()
+
+
 async def _tts_ping_loop() -> None:
-    """Background task: short Edge TTS synthesis every 5 minutes for /api/health."""
+    """Background task: TTS reachability ping for /api/health (ElevenLabs or Edge per TTS_PROVIDER)."""
     await asyncio.sleep(8)   # slight startup delay — let the app warm up first
     while True:
         try:
-            if _EDGE_TTS_AVAILABLE:
+            prov = _effective_tts_provider()
+            _tts_health["provider"] = prov
+            if prov == "elevenlabs":
+                t0 = _time.monotonic()
+                mp3 = await asyncio.wait_for(
+                    synthesize_elevenlabs_async("ok"),
+                    timeout=90.0,
+                )
+                latency_ms = int((_time.monotonic() - t0) * 1000)
+                ok = bool(mp3 and len(mp3) >= 32)
+                _tts_health.update({
+                    "ok": ok,
+                    "latency_ms": latency_ms,
+                    "ts": int(_time.time() * 1000),
+                })
+                logger.info("ElevenLabs TTS ping OK — latency=%d ms", latency_ms)
+            elif _EDGE_TTS_AVAILABLE:
                 t0 = _time.monotonic()
                 mp3 = await asyncio.wait_for(
                     synthesize_edge_tts_async("اختبار"),
@@ -127,14 +148,14 @@ async def _tts_ping_loop() -> None:
                     "latency_ms": latency_ms,
                     "ts":         int(_time.time() * 1000),
                 })
-                logger.info("TTS ping OK — latency=%d ms", latency_ms)
+                logger.info("Edge TTS ping OK — latency=%d ms", latency_ms)
             else:
                 _tts_health.update({"ok": False, "latency_ms": None,
                                     "ts": int(_time.time() * 1000)})
         except Exception as exc:
             _tts_health.update({"ok": False, "latency_ms": None,
                                  "ts": int(_time.time() * 1000)})
-            logger.warning("TTS ping failed: %s", exc)
+            logger.warning("TTS ping failed (%s): %s", _tts_health.get("provider"), exc)
         await asyncio.sleep(_TTS_PING_EVERY_SEC)
 
 
@@ -144,7 +165,19 @@ async def lifespan(app_instance):
     import asyncio
     loop = asyncio.get_running_loop()
 
-    logger.info("TTS Provider: MICROSOFT EDGE TTS (edge-tts)")
+    _tts_prov = _effective_tts_provider()
+    _el_key = bool((os.getenv("ELEVENLABS_API_KEY") or settings.ELEVENLABS_API_KEY or "").strip())
+    _el_vid = bool((os.getenv("ELEVENLABS_VOICE_ID") or settings.ELEVENLABS_VOICE_ID or "").strip())
+    logger.info(
+        "[TTS-STARTUP] Provider: %s | ELEVENLABS_API_KEY set: %s | ELEVENLABS_VOICE_ID set: %s",
+        _tts_prov,
+        _el_key,
+        _el_vid,
+    )
+    try:
+        log_critical_if_elevenlabs_misconfigured()
+    except Exception as _el_guard_exc:
+        logger.warning("ElevenLabs startup guard failed (non-fatal): %s", _el_guard_exc)
 
     # 0) Re-patch logging handlers that uvicorn registered AFTER our module-top
     #    patch ran.  This prevents cp1252 UnicodeEncodeError in Windows consoles.
@@ -325,16 +358,22 @@ app.include_router(saml_auth_router, prefix="/api/v1")
 async def api_health():
     """Standard /api/health endpoint consumed by Next.js health route.
 
-    ``audio`` reflects Edge TTS readiness: live ping from the background task
-    every ~5 minutes, or until then whether ``edge-tts`` is installed
-    (``_EDGE_TTS_AVAILABLE``). No Google Cloud credentials are involved.
+    ``audio`` reflects TTS readiness for the configured ``TTS_PROVIDER``:
+    ElevenLabs live ping when ``elevenlabs``, otherwise Edge TTS (``edge-tts``)
+    when installed. Until the first ping, falls back to credential / import checks.
 
     Production (ENVIRONMENT=production): minimal JSON ``{\"ok\": true}`` only.
     """
     if settings.is_production:
         return {"ok": True}
 
-    credentials_ok = _EDGE_TTS_AVAILABLE
+    _tts_prov_h = _effective_tts_provider()
+    if _tts_prov_h == "elevenlabs":
+        _k = (os.getenv("ELEVENLABS_API_KEY") or settings.ELEVENLABS_API_KEY or "").strip()
+        _v = (os.getenv("ELEVENLABS_VOICE_ID") or settings.ELEVENLABS_VOICE_ID or "").strip()
+        credentials_ok = bool(_k and _v)
+    else:
+        credentials_ok = _EDGE_TTS_AVAILABLE
     # Use live ping result once available, otherwise fall back to credential check
     ping_result = _tts_health.get("ok")
     audio = ping_result if ping_result is not None else credentials_ok
@@ -359,6 +398,7 @@ async def api_health():
         "ok":            True,
         "env":           bool(os.getenv("OPENAI_API_KEY") or settings.OPENAI_API_KEY),
         "audio":         audio,
+        "tts_provider":  _tts_prov_h,
         "reach":         True,
         "redis":         redis_ok,
         "last_tts_ms":   _tts_health.get("latency_ms"),

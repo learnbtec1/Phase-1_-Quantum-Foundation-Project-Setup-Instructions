@@ -18,10 +18,15 @@ export interface UseVADOptions {
   onSpeechEnd?: (audio: Blob) => void;
   /** Called the instant voice activity is first detected in a segment. */
   onSpeechStart?: () => void;
-  /** RMS threshold (0–1). Lower = more sensitive. Default 0.03 */
+  /** RMS threshold (0–1). Higher = needs louder voice; reduces breath/keyboard false triggers. Default 0.045 */
   silenceThreshold?: number;
-  /** Ms of silence after speech before segment end. Default 700 */
+  /** Ms of silence after last loud frame before segment end. Larger = patient with pauses. Default 1300 */
   silenceGapMs?: number;
+  /**
+   * Minimum span (ms) from first above-threshold frame to last loud frame in the segment.
+   * Shorter = spike/noise (clicks, breath) — segment is discarded and not sent to STT. Default 280. Set 0 to disable.
+   */
+  minSpeechDurationMs?: number;
   /** Language hint for Web Speech fallback. Default 'ar-SA' */
   lang?: string;
 }
@@ -100,8 +105,9 @@ async function buildWavBlob(chunks: Blob[], sampleRate: number): Promise<Blob | 
 export function useVAD({
   onSpeechEnd,
   onSpeechStart,
-  silenceThreshold = 0.03,
-  silenceGapMs = 700,
+  silenceThreshold = 0.045,
+  silenceGapMs = 1300,
+  minSpeechDurationMs = 280,
   lang = 'ar-SA',
 }: UseVADOptions = {}): UseVADReturn {
   const [isRecording, setIsRecording] = useState(false);
@@ -130,6 +136,10 @@ export function useVAD({
   // hadSpeechThisSegmentRef: distinguishes "only saved the silent header chunk"
   // from "actually recorded speech" so onstop can skip no-speech segments.
   const hadSpeechThisSegmentRef = useRef(false);
+  /** Time of first above-threshold sample in current segment (performance.now). */
+  const vocalStartMsRef = useRef(0);
+  /** Time of most recent above-threshold sample (for min speech span). */
+  const lastLoudAtMsRef = useRef(0);
   /** Push-to-talk — isolated from amplitude-VAD pipeline */
   const manualActiveRef = useRef(false);
   const manualCancelRef = useRef(false);
@@ -191,6 +201,8 @@ export function useVAD({
     // Without this, a stop→start cycle re-introduces the audio_too_short bug.
     firstChunkSavedRef.current = false;
     hadSpeechThisSegmentRef.current = false;
+    vocalStartMsRef.current = 0;
+    lastLoudAtMsRef.current = 0;
     chunksRef.current = [];
     window.dispatchEvent(new CustomEvent('voice:mic:stopped'));
   }, []);
@@ -214,6 +226,8 @@ export function useVAD({
     // error recovery, or direct hook invocation in tests).
     firstChunkSavedRef.current      = false;
     hadSpeechThisSegmentRef.current = false;
+    vocalStartMsRef.current         = 0;
+    lastLoudAtMsRef.current         = 0;
     chunksRef.current               = [];
     speechStartedRef.current        = false;
     console.log('[useVAD] Segment state reset — starting fresh session');
@@ -271,6 +285,8 @@ export function useVAD({
           firstChunkSavedRef.current      = false;
           hadSpeechThisSegmentRef.current = false;
           speechStartedRef.current        = false;
+          vocalStartMsRef.current         = 0;
+          lastLoudAtMsRef.current         = 0;
           window.dispatchEvent(new CustomEvent('voice:mic:stopped'));
         }, { once: true });
       }
@@ -299,6 +315,8 @@ export function useVAD({
 
           const hadSpeech = hadSpeechThisSegmentRef.current;
           hadSpeechThisSegmentRef.current = false;
+          vocalStartMsRef.current = 0;
+          lastLoudAtMsRef.current = 0;
           const savedChunks = [...chunksRef.current];
           chunksRef.current = [];
           speechStartedRef.current = false;
@@ -383,12 +401,17 @@ export function useVAD({
         rms = Math.sqrt(rms / dataArr.length);
 
         if (rms > silenceThreshold) {
+          const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
           // Log once per speech segment — only when transitioning from silence to speech
           if (!speechStartedRef.current) {
             console.log(`[useVAD] Speech Detected — Recording... (rms=${rms.toFixed(4)}, threshold=${silenceThreshold})`);
             hadSpeechThisSegmentRef.current = true;
+            vocalStartMsRef.current = nowMs;
+            lastLoudAtMsRef.current = nowMs;
             console.log('🎤 [VAD] Speech started - capturing audio...');
             onSpeechStart?.();
+          } else {
+            lastLoudAtMsRef.current = nowMs;
           }
           speechStartedRef.current = true;
           if (silenceTimerRef.current) {
@@ -399,6 +422,26 @@ export function useVAD({
           silenceTimerRef.current = setTimeout(() => {
             silenceTimerRef.current = null;
             if (!activeRef.current) return;
+
+            const minMs = Math.max(0, minSpeechDurationMs);
+            if (minMs > 0 && vocalStartMsRef.current > 0) {
+              const activeSpeechMs = lastLoudAtMsRef.current - vocalStartMsRef.current;
+              if (activeSpeechMs < minMs) {
+                console.log(
+                  `[VAD] Rejecting short noise spike — activeSpeechMs=${Math.round(activeSpeechMs)} < minSpeechDurationMs=${minMs} (rms threshold=${silenceThreshold})`,
+                );
+                speechStartedRef.current = false;
+                hadSpeechThisSegmentRef.current = false;
+                vocalStartMsRef.current = 0;
+                lastLoudAtMsRef.current = 0;
+                const recDrop = recorderRef.current;
+                if (recDrop && recDrop.state === 'recording') {
+                  recDrop.stop();
+                }
+                return;
+              }
+            }
+
             console.log(`[VAD] Silence Detected — ending segment (gap=${silenceGapMs}ms) → stop → onstop → WAV`);
             window.dispatchEvent(new CustomEvent('cogni:user:silent'));
             const rec = recorderRef.current;
@@ -449,7 +492,15 @@ export function useVAD({
       console.error('[useVAD] Unexpected mic error:', e?.name, e?.message);
       throw err;
     }
-  }, [isSupported, isRecording, onSpeechEnd, onSpeechStart, silenceThreshold, silenceGapMs]);
+  }, [
+    isSupported,
+    isRecording,
+    onSpeechEnd,
+    onSpeechStart,
+    silenceThreshold,
+    silenceGapMs,
+    minSpeechDurationMs,
+  ]);
 
   const stopManualAndSend = useCallback(() => {
     manualCancelRef.current = false;

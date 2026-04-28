@@ -28,6 +28,7 @@ import {
 } from '@/lib/avatar/motionAuthority';
 import { getIdleSilenceProbability, getSpontaneousIdleGapMul } from '@/ai/avatar/avatarPersonality';
 import { automaticGestureInjectorsDisabled } from '@/lib/avatar/automaticGestureInjectors';
+import { AVATAR_BEHAVIOR_SINGLE_CONTROLLER } from '@/config/avatar';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -306,6 +307,7 @@ function pickBehaviour(thinking: boolean): Behaviour {
 }
 
 function scheduleNext(cfg: SpontaneousBehaviorConfig): void {
+  if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) return;
   if (!_running) return;
   const gapMul = getSpontaneousIdleGapMul();
   const delay =
@@ -387,6 +389,7 @@ function scheduleNext(cfg: SpontaneousBehaviorConfig): void {
 
 /** Start the spontaneous behaviour engine. Idempotent. */
 export function startSpontaneousBehavior(cfg: SpontaneousBehaviorConfig): void {
+  if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) return;
   if (automaticGestureInjectorsDisabled()) return;
   if (_running) return;
   _running = true;

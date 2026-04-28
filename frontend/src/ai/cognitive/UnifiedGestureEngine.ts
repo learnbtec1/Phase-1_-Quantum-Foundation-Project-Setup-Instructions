@@ -76,6 +76,7 @@ import {
   bumpIntentFromGesturePlayName,
   tryMotionIntentOnlyFromPlayName,
 } from '@/lib/avatar/motionIntentContinuity';
+import { isVrmaPlaybackGloballyDisabled } from '@/lib/avatar/vrmaPlaybackPolicy';
 
 // ─── Dev helpers ─────────────────────────────────────────────────────────────
 
@@ -407,6 +408,11 @@ export class UnifiedGestureEngine {
         motionDebug('INTENT ONLY (no VRMA queue):', normalised);
         return Promise.resolve();
       }
+    }
+
+    if (isVrmaPlaybackGloballyDisabled()) {
+      motionDebug('VRMA POLICY:', 'global-bypass', normalised);
+      return Promise.resolve();
     }
 
     const responseClass: ReplyBehaviorClass =
@@ -876,6 +882,10 @@ export class UnifiedGestureEngine {
   }
 
   #dispatchVrma(stemIn: string, durationMs: number, priority: PriorityValue, intensity?: number, mood?: string): void {
+    if (isVrmaPlaybackGloballyDisabled()) {
+      motionDebug('VRMA POLICY:', 'dispatch-bypass', stemIn);
+      return;
+    }
     const stem = sanitizeVrmaStem(stemIn);
     const canonical = VRMA_TO_CANONICAL[stem] ?? 'idle';
     const url = this.resolveVrmaUrl(stem);

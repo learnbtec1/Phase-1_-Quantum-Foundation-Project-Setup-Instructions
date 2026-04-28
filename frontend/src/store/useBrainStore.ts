@@ -10,6 +10,24 @@
  *   • Emotional memory (trajectory entries for EmotionalMemoryManager)
  *   • Long-term memory (user interests, important moments)
  *
+ * **Memory naming (do not confuse with `behavior/BehaviorMemory.ts`):**
+ * - **`emotionalMemory` + `longTermMemory`** here — Phase-4 *cognitive* memory in Zustand;
+ *   EmotionalMemoryManager reads/writes these for trajectory, prompts, and promotions.
+ * - **`BehaviorMemory`** (separate file) — ~8s *motion-intent* anti-repeat buffer for Level 6 only;
+ *   unrelated to `longTermMemory` / user interests.
+ *
+ * **State transitions — `processFrame` → `tickIntentBrain` (order matters):**
+ * 1. **`processFrame(frame)`** (typically from `useAgentAgent` when a `speech` / AI reply frame arrives):
+ *    maps `frame.emotion` → `emotionLabel` + PAD, sets `lastFrame`, clears `thinking`, optional cognitive_* → orchestrator.
+ *    Does **not** set `interactionIntent` or `currentAction` (avoids double-firing with AgentDirector).
+ * 2. **`tickIntentBrain(nowMs)`** (scheduled from {@link AgentDirector}, not on every React frame):
+ *    reads **current** `talking` / `thinking` / `physical.isListening` / `lastFrame` / PAD / speech hints, runs
+ *    `resolveIntent` → `smoothInteractionIntentWithMemory`, then writes `interactionIntent`, `intentBrain`,
+ *    `cognitiveAvatarBrain`, energy, blend fields.
+ * 3. **Consumers** (e.g. {@link LipSyncManager}): read `useBrainStore.getState()` inside `useFrame` for
+ *    `interactionIntent` and related fields to stay aligned with lip/cognitive mouth overlay — they do **not** call
+ *    `tickIntentBrain` themselves.
+ *
  * Uses Zustand's subscribeWithSelector middleware so AgentDirector can
  * subscribe to individual state slices:
  *   useBrainStore.subscribe(s => s.emotionLabel, (next, prev) => { ... })
@@ -27,6 +45,16 @@ import type {
   LongTermMemory,
 } from '@/types/ai';
 import type { InteractionIntent } from '@/ai/avatar/avatarIntent';
+
+/** Single-controller snapshot for embodiment (intent → VRMSkeletonManager). */
+export type AvatarBehaviorOutput = {
+  intent: string;
+  emotion: string;
+  energy: number;
+  gesture: string | null;
+  pose: string | null;
+  gaze: string | null;
+};
 import {
   buildPersonalityHint,
   computeIntentEnergy,
@@ -143,14 +171,19 @@ export interface BrainState {
   /** ملخص التأمل بعد الجلسة */
   lastSessionReflection:    string | null;
 
-  // Memory
+  // Memory (cognitive / user model — distinct from `behavior/BehaviorMemory.ts` motion anti-repeat)
   conversationHistory: ConversationTurn[];
+  /** Rolling affect trajectory; EmotionalMemoryManager aggregates & may promote to `longTermMemory`. */
   emotionalMemory:    EmotionalMemoryEntry[];
+  /** Durable-ish user model: interests + important moments (not the 8s BehaviorMemory window). */
   longTermMemory:     LongTermMemory;
 
   /** Phase 3 strict behavior contract (last applied payload). */
   behaviorContractPayload: BrainStatePayload | null;
   behaviorMotionBlend: MotionBlendResult | null;
+
+  /** Single source for skeleton layer when {@link AVATAR_BEHAVIOR_SINGLE_CONTROLLER} is on — updated in {@link tickIntentBrain}. */
+  avatarBehavior: AvatarBehaviorOutput;
   setBehaviorContractPayload: (p: BrainStatePayload | null) => void;
   setBehaviorMotionBlend: (m: MotionBlendResult | null) => void;
 
@@ -409,6 +442,14 @@ const INITIAL: Omit<BrainState,
   longTermMemory:           { userInterests: [], importantMoments: [] },
   behaviorContractPayload:  null,
   behaviorMotionBlend:      null,
+  avatarBehavior: {
+    intent:   'idle',
+    emotion:  'neutral',
+    energy:   0.5,
+    gesture:  null,
+    pose:     null,
+    gaze:     'neutral',
+  },
 };
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -541,6 +582,14 @@ export const useBrainStore = create<BrainState>()(
           speechStyle,
         },
         cognitiveAvatarBrain,
+        avatarBehavior: {
+          intent: next,
+          emotion: s.emotionLabel ?? 'neutral',
+          energy,
+          gesture: next === 'explaining' || next === 'emphasizing' ? 'talk' : null,
+          pose: next === 'thinking' ? 'thinking' : null,
+          gaze: next === 'listening' ? 'focus' : 'neutral',
+        },
       });
       return { changed, intent: next };
     },
@@ -707,6 +756,14 @@ export const useBrainStore = create<BrainState>()(
         userSpeechRhythm: 'neutral',
         behaviorContractPayload: null,
         behaviorMotionBlend: null,
+        avatarBehavior: {
+          intent: 'idle',
+          emotion: 'neutral',
+          energy: 0.5,
+          gesture: null,
+          pose: null,
+          gaze: 'neutral',
+        },
       });
     },
 
@@ -743,6 +800,14 @@ export const useBrainStore = create<BrainState>()(
         userSpeechRhythm:       'neutral',
         behaviorContractPayload: null,
         behaviorMotionBlend:    null,
+        avatarBehavior: {
+          intent: 'idle',
+          emotion: 'neutral',
+          energy: 0.5,
+          gesture: null,
+          pose: null,
+          gaze: 'neutral',
+        },
       });
     },
   })),

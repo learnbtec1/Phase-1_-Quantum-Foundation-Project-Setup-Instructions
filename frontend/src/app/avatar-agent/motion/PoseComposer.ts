@@ -18,6 +18,14 @@ export type BonePoseKey =
   | 'rla'
   | 'lh'
   | 'rh'
+  | 'leftUpperLeg'
+  | 'rightUpperLeg'
+  | 'leftLowerLeg'
+  | 'rightLowerLeg'
+  | 'leftFoot'
+  | 'rightFoot'
+  | 'leftToes'
+  | 'rightToes'
   | 'rIndexProximal'
   | 'rMiddleProximal'
   | 'rRingProximal'
@@ -27,7 +35,37 @@ export type BonePoseKey =
   | 'lMiddleProximal'
   | 'lRingProximal'
   | 'lLittleProximal'
-  | 'lThumbProximal';
+  | 'lThumbProximal'
+  | 'leftThumbMetacarpal'
+  | 'leftThumbProximal'
+  | 'leftThumbDistal'
+  | 'leftIndexProximal'
+  | 'leftIndexIntermediate'
+  | 'leftIndexDistal'
+  | 'leftMiddleProximal'
+  | 'leftMiddleIntermediate'
+  | 'leftMiddleDistal'
+  | 'leftRingProximal'
+  | 'leftRingIntermediate'
+  | 'leftRingDistal'
+  | 'leftLittleProximal'
+  | 'leftLittleIntermediate'
+  | 'leftLittleDistal'
+  | 'rightThumbMetacarpal'
+  | 'rightThumbProximal'
+  | 'rightThumbDistal'
+  | 'rightIndexProximal'
+  | 'rightIndexIntermediate'
+  | 'rightIndexDistal'
+  | 'rightMiddleProximal'
+  | 'rightMiddleIntermediate'
+  | 'rightMiddleDistal'
+  | 'rightRingProximal'
+  | 'rightRingIntermediate'
+  | 'rightRingDistal'
+  | 'rightLittleProximal'
+  | 'rightLittleIntermediate'
+  | 'rightLittleDistal';
 
 export type BonePoseMap = Map<string, THREE.Quaternion>;
 
@@ -48,12 +86,16 @@ export type PoseBlendWeights = {
   vrma: number;
 };
 
+/** Per-bone overrides for `blendPoseLayers` (e.g. kinematic lock: crush idle/vrma/collision on that joint). */
+export type PerBonePoseBlendWeights = Partial<PoseBlendWeights>;
+
 const _Q = new THREE.Quaternion();
 const _Q2 = new THREE.Quaternion();
 
 /**
- * Priority stack (low → high): IDLE → GENERATIVE → GESTURE → COLLISION → VRMA.
- * Each step: `out.slerp(layerTarget, weight)` with weight in [0,1].
+ * Blend stack order (each step slerps by weight): IDLE → GENERATIVE → GESTURE → COLLISION → VRMA.
+ * Generative authority: `boneWeightOverrides` can zero idle/gesture/collision/vrma on a joint so the
+ * commanded pose wins (see `kinematicStandards.ts` + VRMSkeletonManager generative lock).
  */
 export function blendPoseLayers(params: {
   bind: Map<string, THREE.Quaternion>;
@@ -63,8 +105,10 @@ export function blendPoseLayers(params: {
   collision: BonePoseMap;
   vrma: BonePoseMap;
   weights: PoseBlendWeights;
+  /** Optional per-bone weights (e.g. suppress idle/VRMA on `rua` while generative holds). */
+  boneWeightOverrides?: Map<string, PerBonePoseBlendWeights>;
 }): BonePoseMap {
-  const { bind, idle, generative, gesture, collision, vrma, weights } = params;
+  const { bind, idle, generative, gesture, collision, vrma, weights, boneWeightOverrides } = params;
   const keys = new Set<string>();
   [idle, generative, gesture, collision, vrma].forEach((m) => {
     for (const k of m.keys()) keys.add(k);
@@ -72,11 +116,17 @@ export function blendPoseLayers(params: {
   for (const k of bind.keys()) keys.add(k);
 
   const out: BonePoseMap = new Map();
-  const { idle: wI, generative: wG, gesture: wGe, collision: wC, vrma: wV } = weights;
+  const { idle: wI0, generative: wG0, gesture: wGe0, collision: wC0, vrma: wV0 } = weights;
 
   for (const key of keys) {
     const b = bind.get(key);
     if (!b) continue;
+    const ov = boneWeightOverrides?.get(key);
+    let wI = ov?.idle !== undefined ? ov.idle : wI0;
+    let wG = ov?.generative !== undefined ? ov.generative : wG0;
+    let wGe = ov?.gesture !== undefined ? ov.gesture : wGe0;
+    let wC = ov?.collision !== undefined ? ov.collision : wC0;
+    let wV = ov?.vrma !== undefined ? ov.vrma : wV0;
     _Q.copy(b);
     const qI = idle.get(key);
     if (qI && wI > 1e-6) _Q.slerp(qI, Math.min(1, wI));
@@ -101,6 +151,18 @@ export const ARM_BONE_MAP: Readonly<Record<string, string>> = {
   rua: 'rightUpperArm',
   lla: 'leftLowerArm',
   rla: 'rightLowerArm',
+  lh: 'leftHand',
+  rh: 'rightHand',
+  lThumbProximal: 'leftThumbProximal',
+  lIndexProximal: 'leftIndexProximal',
+  lMiddleProximal: 'leftMiddleProximal',
+  lRingProximal: 'leftRingProximal',
+  lLittleProximal: 'leftLittleProximal',
+  rThumbProximal: 'rightThumbProximal',
+  rIndexProximal: 'rightIndexProximal',
+  rMiddleProximal: 'rightMiddleProximal',
+  rRingProximal: 'rightRingProximal',
+  rLittleProximal: 'rightLittleProximal',
 };
 
 let __applyFinalPoseBoneLogNextAt = 0;
@@ -119,9 +181,11 @@ export function applyFinalPoseToVrm(params: {
   smoothLambda?: number;
   /** Max rotation toward target per frame (rad) — anti-teleport. */
   maxRotationPerFrameRad?: number;
+  /** Pose keys that copy target quaternion exactly (no slerp) — kinematic hold. */
+  kinematicSnapKeys?: ReadonlySet<string>;
   delta: number;
 }): void {
-  const { finalPose, boneRefs, delta, humanoid } = params;
+  const { finalPose, boneRefs, delta, humanoid, kinematicSnapKeys } = params;
   logFinalPoseApplyProbe(finalPose, delta);
   const motionPoseDebug =
     typeof process !== 'undefined' &&
@@ -165,6 +229,14 @@ export function applyFinalPoseToVrm(params: {
     }
     _Q2.copy(qT);
     const qCur = obj.quaternion;
+    const snap =
+      kinematicSnapKeys?.has(key) ||
+      kinematicSnapKeys?.has(mappedKey);
+    if (snap) {
+      qCur.copy(_Q2);
+      qCur.normalize();
+      continue;
+    }
     const dot = THREE.MathUtils.clamp(Math.abs(qCur.dot(_Q2)), 0, 1);
     const omega = 2 * Math.acos(dot);
     let t = Math.min(1, Math.max(0, alpha));
@@ -230,16 +302,34 @@ export const VRM_HUMANOID_TO_POSE_KEY: Readonly<Record<string, string>> = {
   rightToes: 'rightToes',
   leftThumbProximal: 'lThumbProximal',
   leftThumbMetacarpal: 'lThumbProximal',
+  leftThumbDistal: 'leftThumbDistal',
   leftIndexProximal: 'lIndexProximal',
+  leftIndexIntermediate: 'leftIndexIntermediate',
+  leftIndexDistal: 'leftIndexDistal',
   leftMiddleProximal: 'lMiddleProximal',
+  leftMiddleIntermediate: 'leftMiddleIntermediate',
+  leftMiddleDistal: 'leftMiddleDistal',
   leftRingProximal: 'lRingProximal',
+  leftRingIntermediate: 'leftRingIntermediate',
+  leftRingDistal: 'leftRingDistal',
   leftLittleProximal: 'lLittleProximal',
+  leftLittleIntermediate: 'leftLittleIntermediate',
+  leftLittleDistal: 'leftLittleDistal',
   rightThumbProximal: 'rThumbProximal',
   rightThumbMetacarpal: 'rThumbProximal',
+  rightThumbDistal: 'rightThumbDistal',
   rightIndexProximal: 'rIndexProximal',
+  rightIndexIntermediate: 'rightIndexIntermediate',
+  rightIndexDistal: 'rightIndexDistal',
   rightMiddleProximal: 'rMiddleProximal',
+  rightMiddleIntermediate: 'rightMiddleIntermediate',
+  rightMiddleDistal: 'rightMiddleDistal',
   rightRingProximal: 'rRingProximal',
+  rightRingIntermediate: 'rightRingIntermediate',
+  rightRingDistal: 'rightRingDistal',
   rightLittleProximal: 'rLittleProximal',
+  rightLittleIntermediate: 'rightLittleIntermediate',
+  rightLittleDistal: 'rightLittleDistal',
 };
 
 const HUMANOID_NAMES = Object.keys(VRM_HUMANOID_TO_POSE_KEY) as string[];

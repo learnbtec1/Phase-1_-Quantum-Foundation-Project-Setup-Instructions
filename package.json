@@ -8,6 +8,12 @@
     "dev:frontend": "cd frontend && npm run dev",
     "build:frontend": "cd frontend && npm run build",
     "start:frontend": "cd frontend && npm run start",
+    "test:ws-url": "cd frontend && npm run test:ws-url",
+    "test:brain": "cd frontend && npm run test:brain",
+    "test:unit": "cd frontend && npm run test:unit",
+    "test:integration": "cd frontend && npm run test:integration",
+    "test:ci": "cd frontend && npm run test:ci",
+    "test:e2e": "cd frontend && npm run test:e2e",
     "dev:root-legacy": "next dev",
     "build:root-legacy": "next build",
     "start:root-legacy": "next start"

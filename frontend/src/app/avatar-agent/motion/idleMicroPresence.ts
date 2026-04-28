@@ -11,6 +11,7 @@ import { getBehaviorMotionState } from '@/lib/behavior/behaviorMotionBrain';
 import { recordActivity } from '@/lib/avatar/motionDiagnostics';
 import { isBodyDrivenByVRMA } from '@/lib/avatar/vrmaBodyDrive';
 import type { BonePoseMap } from './PoseComposer';
+import { isPoseKeyProcedurallySuppressed } from './proceduralSuppressionContext';
 import { applyIntentGestureClipToPose, stepIntentGesturePlayer } from './gesturePlayer';
 import { nowMs as masterClockNowMs } from '@/lib/avatar/masterClock';
 
@@ -36,6 +37,7 @@ let pulseIndex = 0;
 let lastRecordAt = 0;
 
 function mulBoneDeltaEuler(finalPose: BonePoseMap, key: string, rx: number, ry: number, rz: number): void {
+  if (isPoseKeyProcedurallySuppressed(key)) return;
   const q = finalPose.get(key);
   if (!q) return;
   _e.set(rx, ry, rz, 'YXZ');

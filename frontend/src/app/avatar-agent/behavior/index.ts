@@ -25,6 +25,7 @@ export { BehaviorBrain, type BehaviorBrainEvent } from './BehaviorBrain';
 export type { BehaviorIntent, BehaviorEmotion, BehaviorState } from './BehaviorBrain';
 export { BehaviorArbitrator, type ArbitrateInput, type ArbitrateResult } from './BehaviorArbitrator';
 export { approvedIntentToMotionPlan } from './BehaviorToMotionMapper';
+/** ~8s motion anti-repeat (Level 6). Not `useBrainStore.longTermMemory` — see file docblock. */
 export { BehaviorMemory, type BehaviorMemoryEntry } from './BehaviorMemory';
 export { driftEmotion, type EmotionState } from './EmotionDrift';
 export {

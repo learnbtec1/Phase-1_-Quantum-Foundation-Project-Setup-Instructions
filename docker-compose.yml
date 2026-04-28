@@ -1,3 +1,5 @@
+# PHASE 14 — Core data plane (db/redis) and backend use restart: always so the stack
+# recovers after daemon or node reboot. Backend waits for healthy db + redis before start.
 services:
   redis:
     image: redis:7-alpine
@@ -7,7 +9,7 @@ services:
     volumes:
       - redis_data:/data
     command: ["redis-server", "--appendonly", "yes"]
-    restart: unless-stopped
+    restart: always
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -26,7 +28,7 @@ services:
       - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
-    restart: unless-stopped
+    restart: always
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB -h 127.0.0.1"]
       interval: 10s
@@ -37,42 +39,42 @@ services:
   backend:
     build: ./backend
     container_name: eduverse_backend
-    env_file:
-      - .env
+    # Shared memory for faster-whisper / onnxruntime (avoids mmap issues under load).
+    shm_size: "1g"
+    # PHASE 18 — inject voice + JWT explicitly (compose interpolation reads project `.env`; no env_file on backend).
     environment:
-      HOST: 0.0.0.0
-      PORT: 8000
-      ANONYMIZED_TELEMETRY: "False"
-
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-eduverse}:${POSTGRES_PASSWORD:-eduverse}@db:5432/${POSTGRES_DB:-eduverse}
-      REDIS_URL: redis://redis:6379/0
-
-      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
-
-      PYTHONIOENCODING: "utf-8"
-      PYTHONUTF8: "1"
-      LANG: "C.UTF-8"
-      LC_ALL: "C.UTF-8"
-
-      SSL_CERT_FILE: "/etc/ssl/certs/ca-certificates.crt"
-      SSL_CERT_DIR: "/etc/ssl/certs"
-
-      TTS_ARABIC_VOICE: "ar-JO-TaimNeural"
-      COGNI_ARABIC_TTS_VOICE_LOCKED: "ar-JO-TaimNeural"
-
-      TTS_AZURE_ONLY: "false"
-      TTS_DISABLE_NON_AZURE_FALLBACK: "true"
-      TTS_PROVIDER: "edge"
-      EDGE_TTS_VOICE: "ar-JO-TaimNeural"
-
-      COGNI_WS_ALLOW_ANONYMOUS: "true"
-      # Docker demo: TTS + optional WS without real login (pair with frontend COGNI_BFF_DEV_BYPASS_AUTH).
-      COGNI_DEV_BYPASS_AUTH: "true"
-
-      LOCAL_RAG_ENABLED: "true"
-      LOCAL_RAG_DIR: "/app/btec_corpus"
-
-      USE_DB: "true"
+      - HOST=0.0.0.0
+      - PORT=8000
+      - ANONYMIZED_TELEMETRY=False
+      - DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER:-eduverse}:${POSTGRES_PASSWORD:-eduverse}@db:5432/${POSTGRES_DB:-eduverse}
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - JWT_ALGORITHM=HS256
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      # LLM + embeddings: set in project `.env` (same file compose reads for interpolation).
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - PYTHONIOENCODING=utf-8
+      - PYTHONUTF8=1
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+      - SSL_CERT_DIR=/etc/ssl/certs
+      - TTS_ARABIC_VOICE=ar-JO-TaimNeural
+      - COGNI_ARABIC_TTS_VOICE_LOCKED=ar-JO-TaimNeural
+      - TTS_AZURE_ONLY=false
+      - TTS_DISABLE_NON_AZURE_FALLBACK=true
+      - TTS_PROVIDER=elevenlabs
+      - EDGE_TTS_VOICE=ar-JO-TaimNeural
+      # ElevenLabs server-side TTS (optional if Edge-only). Empty string is allowed for local Edge dev.
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID:-}
+      - COGNI_WS_ALLOW_ANONYMOUS=true
+      - COGNI_DEV_BYPASS_AUTH=true
+      - LOCAL_RAG_ENABLED=true
+      - LOCAL_RAG_DIR=/app/btec_corpus
+      - USE_DB=true
+      - WHISPER_MODEL_PRIORITY=tiny,base,small
+      - HF_HOME=/root/.cache/huggingface
 
     # Publish API + WebSocket to host (browser uses 127.0.0.1:8000, not Docker service name).
     ports:
@@ -89,7 +91,7 @@ services:
       redis:
         condition: service_healthy
 
-    restart: unless-stopped
+    restart: always
 
     # slim image had no curl; CMD form avoids shell quoting issues. Whisper pre-warm can delay bind.
     healthcheck:
@@ -104,6 +106,33 @@ services:
       timeout: 10s
       retries: 8
       start_period: 120s
+
+  # Standalone kinematic WebSocket (avatar_brain.py). Inside container listens on 8001; host maps 8011→8001 (8001 is often taken on Windows/WSL).
+  # Browser: ws://127.0.0.1:8011 — not ws://avatar_brain (that name is only container-to-container).
+  avatar_brain:
+    build: ./backend
+    container_name: eduverse_avatar_brain
+    working_dir: /app
+    environment:
+      AVATAR_BRAIN_HOST: "0.0.0.0"
+      AVATAR_BRAIN_PORT: "8001"
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "8011:8001"
+    command: ["python", "avatar_brain.py"]
+    restart: always
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os,socket; p=int(os.environ.get('AVATAR_BRAIN_PORT','8001')); s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1',p)); s.close()",
+        ]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   frontend:
     build:
@@ -123,9 +152,10 @@ services:
       WATCHPACK_POLLING: "true"
       NEXT_TELEMETRY_DISABLED: "1"
 
-      # Browser on host: use 127.0.0.1 (avoids localhost → IPv6 ::1 vs IPv4-only bind).
+      # Browser on host: 127.0.0.1 reaches published port 8000. Override with NEXT_PUBLIC_WS_URL if needed.
       NEXT_PUBLIC_API_URL: http://127.0.0.1:8000
-      NEXT_PUBLIC_AGENT_WS: ws://127.0.0.1:8000/ws/agent
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://127.0.0.1:8000/ws/agent}
+      NEXT_PUBLIC_AGENT_WS: ${NEXT_PUBLIC_AGENT_WS:-ws://127.0.0.1:8000/ws/agent}
 
       # Guest WS + TTS without browser JWT (must match backend COGNI_DEV_BYPASS_AUTH + COGNI_WS_ALLOW_ANONYMOUS).
       NEXT_PUBLIC_COGNI_WS_ALLOW_ANONYMOUS: "true"
@@ -145,6 +175,15 @@ services:
       NEXT_PUBLIC_MIME_MODE: "false"
       NEXT_PUBLIC_AVATAR_VRM_URL: "/models/195_Uta01/cogni.vrm"
       NEXT_PUBLIC_ACTIVE_ENV: ${NEXT_PUBLIC_ACTIVE_ENV:-OFFICE}
+
+      # Browser on host: published avatar_brain port (compose maps host 8011 → container 8001). SSR does not open this socket.
+      NEXT_PUBLIC_GENERATIVE_GESTURE_WS: ${NEXT_PUBLIC_GENERATIVE_GESTURE_WS:-ws://127.0.0.1:8011}
+
+      # Align client BFF with backend primary TTS (rebuild frontend image if you change this).
+      NEXT_PUBLIC_TTS_PROVIDER: ${NEXT_PUBLIC_TTS_PROVIDER:-elevenlabs}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      ELEVENLABS_VOICE_ID: ${ELEVENLABS_VOICE_ID:-}
+      ELEVENLABS_MODEL_ID: ${ELEVENLABS_MODEL_ID:-}
 
     ports:
       - "3000:3000"
@@ -166,8 +205,9 @@ services:
     profiles: ["chroma"]
     image: chromadb/chroma:latest
     container_name: eduverse_chromadb
+    # Host 8010: optional Chroma; avatar_brain kinematic WS uses host 8011 in compose.
     ports:
-      - "8001:8000"
+      - "8010:8000"
     volumes:
       - chromadb_data:/chroma/chroma
     environment:

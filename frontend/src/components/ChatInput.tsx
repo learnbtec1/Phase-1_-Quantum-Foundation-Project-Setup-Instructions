@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
+import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef, type ReactNode } from 'react';
 import { usePerceptionStore } from '@/store/usePerceptionStore';
 import { recordTypingActivity } from '@/lib/behavior/anticipationLayer';
 import {
@@ -15,6 +15,8 @@ export type ChatInputProps = {
   /** When false, hides Web Speech button (Chrome / Edge). */
   showWebSpeech?: boolean;
   className?: string;
+  /** Extra controls after the send button (e.g. session VAD microphone). */
+  trailingSlot?: ReactNode;
 };
 
 export type ChatInputHandle = {
@@ -54,6 +56,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     placeholder = 'تحدث أو اكتب سؤالك لكوجني هنا…',
     showWebSpeech = true,
     className = '',
+    trailingSlot,
   },
   ref,
 ) {
@@ -160,6 +163,8 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
       >
         🚀
       </button>
+
+      {trailingSlot}
 
       {showWebSpeech && webSpeechSupported && (
         <button

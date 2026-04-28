@@ -24,6 +24,7 @@ import { getPerceptionReactionDelayMul } from '@/store/usePerceptionStore';
 import {
   applyBrainPayloadConscious,
 } from '@/lib/avatar/consciousStateManager';
+import { isVrmaPlaybackGloballyDisabled } from '@/lib/avatar/vrmaPlaybackPolicy';
 
 export type { BrainStatePayload, AvatarFsmState };
 export { GestureMap, CONTRACT_LOGICAL_ID_TO_VRMA_STEM };
@@ -70,6 +71,7 @@ function dispatchVrmaPlay(args: {
   cognitiveLoad: number;
 }): void {
   if (typeof window === 'undefined') return;
+  if (isVrmaPlaybackGloballyDisabled()) return;
   const stem = sanitizeVrmaStem(args.stem);
   const url = sanitizeVrmaAssetUrl(vrmaUrl(stem));
   window.dispatchEvent(

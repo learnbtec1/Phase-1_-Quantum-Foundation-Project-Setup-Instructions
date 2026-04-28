@@ -1,0 +1,30 @@
+# Placeholder deploy workflow — wire your provider (Vercel, Azure Static Web Apps, Container Apps, etc.).
+# This job does NOT run automatically on every push; enable when secrets and hosting are configured.
+#
+# Recommended pattern: use GitHub Environments with required reviewers for production, and require
+# status checks: "Frontend unit tests", "E2E", "Backend tests", or the combined "CI complete" workflow
+# (see ci-complete.yml) on the default branch.
+name: Deploy (manual / optional)
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target (e.g. staging)'
+        required: true
+        default: staging
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy placeholder
+        run: |
+          echo "Configure this job with your deployment CLI or action."
+          echo "Example: vercel deploy --prod --token=\${{ secrets.VERCEL_TOKEN }}"
+          echo "All test workflows (frontend-unit, e2e, backend-tests) should be green before deploying."

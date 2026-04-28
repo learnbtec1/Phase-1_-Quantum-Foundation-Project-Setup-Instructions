@@ -1,5 +1,10 @@
 'use client';
 
+/**
+ * Facial layer: **blink** + expression blends run every frame here (useFrame), independent of TTS.
+ * Torso **breathing** continuity lives in `presenceLayer` + `VRMSkeletonManager` (also decoupled from speech).
+ */
+
 import React, { type MutableRefObject, type RefObject, useEffect, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
@@ -189,7 +194,11 @@ export type AnimationControllerProps = {
 /**
  * الوعي الإجرائي: رمش طبيعي، تتبع نظرة مع نبضات صغيرة (saccade-like)،
  * و lookAt للعينين + مشاعر happy/surprised حسب الكلام.
- * لا يستدعي vrm.update — يحدّث refs الرقبة والتعبيرات فقط.
+ *
+ * Phase 20 — R3F `useFrame` is the render-loop (RAF) driver: blink + gaze run every frame,
+ * independent of TTS. When optional CameraPerception is off, saccades are faster/larger so
+ * the eyes don’t lock on one point. When VRMA blocks full lookAt, we still jitter the target
+ * slightly so the gaze rig stays alive.
  */
 export function AnimationController({
   vrm,
@@ -367,6 +376,9 @@ export function AnimationController({
     const t = sessionElapsedSec();
     const nowMs = masterClockNowMs();
     const em = vrm.expressionManager;
+    const perceptionCamLive =
+      typeof window !== 'undefined' &&
+      (window as Window & { __cogniPerceptionCameraLive?: boolean }).__cogniPerceptionCameraLive === true;
 
     // One-time expression audit (dev only) — reveals which VRM alias names work
     runExprAudit(em);
@@ -496,11 +508,11 @@ export function AnimationController({
     const thinkCtx =
       interactionIntent === 'thinking' || isThinkingBrainRef.current ? 1 : 0;
     if (thinkCtx > 0) {
-      const off = Math.sin(t * 0.35 + eyeBobPhaseARef.current) * 0.048 * curiosity;
-      const pitchW = Math.cos(t * 0.27 + eyeBobPhaseBRef.current) * 0.024 * curiosity;
+      const off = Math.sin(t * 0.35 + eyeBobPhaseARef.current) * 0.03 * curiosity;
+      const pitchW = Math.cos(t * 0.27 + eyeBobPhaseBRef.current) * 0.015 * curiosity;
       const dampThink = thinkCtx * (1 - stabilizeMix * 0.45);
-      desireYaw += off * dampThink * 0.52;
-      desirePitch += pitchW * dampThink * 0.52;
+      desireYaw += off * dampThink * 0.45;
+      desirePitch += pitchW * dampThink * 0.45;
     }
     const thinkIntentionActive =
       (interactionIntent === 'thinking' || isThinkingBrainRef.current) && !phaseTalking;
@@ -576,10 +588,13 @@ export function AnimationController({
     }
 
     if (stabilizeMix < 0.82 && nowMs > saccadeNextPickRef.current) {
-      // Sparse micro-saccades (low frequency, small amplitude)
-      saccadeYawOffRef.current = (Math.random() - 0.5) * 0.1;
-      saccadePitchOffRef.current = (Math.random() - 0.5) * 0.07;
-      saccadeNextPickRef.current = nowMs + 1200 + Math.random() * 2400;
+      // Sparse micro-saccades — faster & slightly wider when user perception camera is off (no face-track target).
+      const ampMul = perceptionCamLive ? 1 : 1.38;
+      const gapMin = perceptionCamLive ? 1200 : 650;
+      const gapVar = perceptionCamLive ? 2400 : 1100;
+      saccadeYawOffRef.current = (Math.random() - 0.5) * 0.1 * ampMul;
+      saccadePitchOffRef.current = (Math.random() - 0.5) * 0.07 * ampMul;
+      saccadeNextPickRef.current = nowMs + gapMin + Math.random() * gapVar;
     }
     const saccadeDamp = Math.min(1, safeDelta * 5) * stabilizeMix;
     saccadeYawOffRef.current = THREE.MathUtils.lerp(saccadeYawOffRef.current, 0, saccadeDamp);
@@ -859,6 +874,13 @@ export function AnimationController({
     if (!vrmaBlocksLookAt && lookAt?.lookAt && group) {
       lookAt.autoUpdate = false;
       lookAt.lookAt(eyeAccumRef.current);
+    } else if (vrmaBlocksLookAt && lookAt?.lookAt && group) {
+      // VRMA owns head — still nudge eye target so pupils aren’t frozen in world space.
+      lookAt.autoUpdate = false;
+      _eyeWorldScratch.copy(eyeAccumRef.current);
+      _eyeWorldScratch.x += Math.sin(t * 2.05 + eyeBobPhaseARef.current) * 0.019;
+      _eyeWorldScratch.y += Math.cos(t * 1.68 + eyeBobPhaseBRef.current) * 0.015;
+      lookAt.lookAt(_eyeWorldScratch);
     }
   }, -2);
 

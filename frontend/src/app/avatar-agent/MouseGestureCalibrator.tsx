@@ -2,7 +2,7 @@
 
 /**
  * أداة تطوير: معايرة إزاحات الأذرع بالماوس (TransformControls = سحب دوران).
- * تظهر فقط في development — انظر AvatarCanvas.
+ * يُفعَّل عبر `showGestureCalibrationUi()` / `NEXT_PUBLIC_SHOW_GESTURE_CALIB` — انظر AvatarCanvas.
  */
 
 import React, {
@@ -26,6 +26,7 @@ import {
   type ArmEulerOffset,
   type ArmGestureId,
 } from './armGestureReference';
+import { showGestureCalibrationUi } from '@/config/avatar';
 
 type BoneCtrl = 'rua' | 'lua' | 'rh' | 'lh';
 
@@ -339,7 +340,7 @@ export function MouseGestureCalibrator({ vrm }: MouseGestureCalibratorProps) {
     console.log(`[MouseGestureCalibrator] أُعيدت إزاحة «${gesture}» للافتراضي من ARM_OFFSETS`);
   }, [committed, gesture]);
 
-  if (process.env.NODE_ENV !== 'development' || !vrm?.humanoid) return null;
+  if (!showGestureCalibrationUi() || !vrm?.humanoid) return null;
 
   return (
     <div

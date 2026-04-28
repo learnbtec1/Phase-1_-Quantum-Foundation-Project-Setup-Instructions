@@ -279,6 +279,16 @@ export function getAdaptationHints(): EmotionalAdaptationHints {
     clarityBias = Math.min(1, clarityBias + 0.22 + confused * 0.15);
   }
 
+  const frustrated = Math.max(
+    getLabelSalience('frustrated'),
+    getLabelSalience('angry') * 0.65,
+  );
+  if (frustrated > 0.08) {
+    voiceRateMul *= 0.92 - Math.min(0.06, frustrated * 0.06);
+    warmthBias = Math.min(1, warmthBias + 0.18 + frustrated * 0.14);
+    clarityBias = Math.min(1, clarityBias + 0.08 + frustrated * 0.1);
+  }
+
   if (rel === 'frequent') {
     warmthBias = Math.min(1, warmthBias + 0.18);
     clarityBias = Math.max(0.2, clarityBias - 0.08);

@@ -19,10 +19,11 @@ import type { TeachingStrategy } from '@/ai/teaching/TeachingStrategyEngine';
 import { checkGestureCooldown, recordGestureLog, getLastGestureLog } from '@/ai/memory/store';
 import { dispatchAvatar }                    from '@/utils/events/normalizeAvatarEvents';
 import { resetSpeechIntentHints, setSpeechIntentHintsFromText } from '@/lib/avatar/speechIntentHints';
-import { speakWithTTS, stopTTSGlobally, resolveSpeakRate } from '@/ai/io/tts';
+import { speakWithTTS, stopTTSGlobally, resolveSpeakRate, emitTtsFailureEmbodiment } from '@/ai/io/tts';
 import { COGNI_PERSONA, AVATAR_PERSONALITY } from '@/config/personality';
-import { LEVEL6_UNIFIED_BEHAVIOR } from '@/config/avatar';
+import { LEVEL6_UNIFIED_BEHAVIOR, AVATAR_BEHAVIOR_SINGLE_CONTROLLER } from '@/config/avatar';
 import { emotionalMemoryManager }            from '@/ai/avatar/EmotionalMemoryManager';
+import { getAdaptationHints, getLabelSalience } from '@/lib/avatar/emotionalMemory';
 import {
   microReactionDelay,
   humanDelay,
@@ -77,6 +78,15 @@ function devLog(...args: unknown[]): void {
   }
 }
 
+/** Phase 21 — prior session / LTM: soften body language when student was frustrated. */
+function mentorFrustrationCarryover(): boolean {
+  if (typeof window === 'undefined') return false;
+  const s = (window as unknown as { __cogniLastSession?: { lastMood?: string } }).__cogniLastSession;
+  const lm = String(s?.lastMood ?? '').toLowerCase();
+  if (/frustrat|محبط|ضايج|مزعوج|متضايق/.test(lm)) return true;
+  return getLabelSalience('frustrated') > 0.085 || getLabelSalience('angry') > 0.1;
+}
+
 function emitBehaviorText(text: string, context: 'conversation' | 'system' = 'conversation'): void {
   if (typeof window === 'undefined' || !text.trim()) return;
   window.dispatchEvent(
@@ -86,6 +96,9 @@ function emitBehaviorText(text: string, context: 'conversation' | 'system' = 'co
 
 function emit(name: string, detail: Record<string, unknown>): void {
   if (typeof window === 'undefined') return;
+  if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER && name === 'avatar:gesture') {
+    return;
+  }
   if (LEVEL6_UNIFIED_BEHAVIOR) {
     if (name === 'avatar:gesture' || name === 'avatar:emotion') return;
     if (name === 'avatar:speak:start') {
@@ -113,6 +126,7 @@ function emit(name: string, detail: Record<string, unknown>): void {
  * see `NEXT_PUBLIC_LEVEL6_UNIFIED_BEHAVIOR` in avatar.ts).
  */
 function directorGesturePlay(name: string, opts?: Record<string, unknown>): void {
+  if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) return;
   if (LEVEL6_UNIFIED_BEHAVIOR) return;
   void unifiedGestureEngine.play(
     name,
@@ -172,6 +186,8 @@ export class AgentDirector {
   private _lastEmotion:        EmotionLabel | '' = '';
   /** Debounced intent recompute (emotion + speech → presentation). */
   private _intentDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Phase 20 — after 2s of `thinking` still true, nudge posture / VRMA so the avatar reads “alive”. */
+  private _thinkingWaitTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── Lifecycle ───────────────────────────────────────────────────────────────
 
@@ -259,6 +275,9 @@ export class AgentDirector {
       const onContagion = (e: Event) => {
         const d = (e as CustomEvent).detail as { emotion?: string; intensity?: number };
         if (!d?.emotion) return;
+        if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) {
+          return;
+        }
         if (LEVEL6_UNIFIED_BEHAVIOR) {
           emitBehaviorText(`Student affect: ${d.emotion}`, 'system');
           return;
@@ -274,7 +293,27 @@ export class AgentDirector {
 
     const scheduleIntent = () => this._scheduleInteractionIntentUpdate();
     this._unsubs.push(useBrainStore.subscribe(s => s.talking, scheduleIntent));
-    this._unsubs.push(useBrainStore.subscribe(s => s.thinking, scheduleIntent));
+    this._unsubs.push(
+      useBrainStore.subscribe(s => s.thinking, thinking => {
+        scheduleIntent();
+        if (this._thinkingWaitTimer) {
+          clearTimeout(this._thinkingWaitTimer);
+          this._thinkingWaitTimer = null;
+        }
+        if (!thinking) return;
+        // `Thinking` VRMA is fired from useAgentAgent on `llm_thinking` / `thinking` WS frames — here we only add a long-wait “still processing” pulse (decoupled from TTS).
+        this._thinkingWaitTimer = setTimeout(() => {
+          this._thinkingWaitTimer = null;
+          if (!this._running || !useBrainStore.getState().thinking) return;
+          if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER || LEVEL6_UNIFIED_BEHAVIOR) return;
+          directorGesturePlay('Listening', { priority: PRIORITY.LOW, responseClass: 'thinking_wait' });
+          emit('avatar:headpose', { yaw: 0.02, pitch: -0.009, durationMs: 950 });
+          window.dispatchEvent(
+            new CustomEvent('avatar:gaze', { detail: { yaw: -0.035, pitch: 0.028, durationMs: 1500 } }),
+          );
+        }, 2000);
+      }),
+    );
     this._unsubs.push(useBrainStore.subscribe(s => s.isUserSpeaking, scheduleIntent));
     this._unsubs.push(useBrainStore.subscribe(s => s.physical.isListening, scheduleIntent));
     this._unsubs.push(useBrainStore.subscribe(s => s.emotionLabel, scheduleIntent));
@@ -297,6 +336,10 @@ export class AgentDirector {
     if (this._intentDebounceTimer !== null) {
       clearTimeout(this._intentDebounceTimer);
       this._intentDebounceTimer = null;
+    }
+    if (this._thinkingWaitTimer !== null) {
+      clearTimeout(this._thinkingWaitTimer);
+      this._thinkingWaitTimer = null;
     }
     console.log('[AgentDirector] STOPPED — All systems cleared');
   }
@@ -323,6 +366,9 @@ export class AgentDirector {
    */
   private _emitIntentPresentationCue(intent: InteractionIntent): void {
     if (typeof window === 'undefined') return;
+    if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) {
+      return;
+    }
     if (LEVEL6_UNIFIED_BEHAVIOR) {
       emitBehaviorText(`[intent:${intent}]`, 'system');
       return;
@@ -360,6 +406,9 @@ export class AgentDirector {
 
   private _reactToEmotion(emotion: EmotionLabel): void {
     this._lastEmotion = emotion;
+    if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) {
+      return;
+    }
     if (LEVEL6_UNIFIED_BEHAVIOR) {
       emitBehaviorText(`[emotion:${emotion}]`, 'system');
       return;
@@ -382,6 +431,9 @@ export class AgentDirector {
   }
 
   private _reactToPAD(pad: PADVector): void {
+    if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) {
+      return;
+    }
     const traj = emotionalMemoryManager.getTrajectory();
     const emoCtx: EmotionalContextBrief = {
       trend: traj.trend,
@@ -443,6 +495,9 @@ export class AgentDirector {
   }
 
   private _reactToFrame(frame: AgentFrame): void {
+    if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) {
+      return;
+    }
     const rhythm = useBrainStore.getState().userSpeechRhythm;
     const rhythmMul = rhythm === 'fast' ? 0.9 : rhythm === 'slow' ? 1.08 : 1;
     const delay =
@@ -534,7 +589,7 @@ export class AgentDirector {
     this._later(300, () => {
       emit('avatar:emotion', { emotion: 'concerned', strength: 0.6 });
       directorGesturePlay('Thinking', { priority: PRIORITY.NORMAL });
-      emit('avatar:headpose', { yaw: 0.05, pitch: -0.04, duration: 1800 });
+      emit('avatar:headpose', { yaw: 0.04, pitch: -0.026, duration: 1800 });
     });
   }
 
@@ -633,6 +688,9 @@ export class AgentDirector {
 
   /** كسر الجمود: حركات عشوائية بسيطة عند الصمت الطويل (idempotent — لا تتراكم) */
   private _handleNeutralEmotion(): void {
+    if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) {
+      return;
+    }
     if (this._neutralBreakTimerId !== null) return; // already scheduled
     const delay = getRandomDelay(5000, 8000);
     this._neutralBreakTimerId = setTimeout(() => {
@@ -683,19 +741,26 @@ export class AgentDirector {
       excited: 0.95, happy: 0.78, encouraging: 0.8, thinking: 0.5, neutral: 0.45,
     };
     const raw = map[e] ?? 0.55;
-    return Math.min(0.9, raw * COGNI_TIMING.baselineGestureIntensity);
+    let out = Math.min(0.9, raw * COGNI_TIMING.baselineGestureIntensity);
+    if (mentorFrustrationCarryover()) {
+      out *= 0.74;
+    }
+    return out;
   }
 
   private _applyHeadPose(e: EmotionLabel): void {
-    const poses: any = { 
-      thinking: { yaw: -0.09, pitch: 0, duration: 3200 }, 
-      attentive: { yaw: 0, pitch: -0.04, duration: 3000 }, 
-      concerned: { yaw: 0, pitch: 0.07, duration: 3200 } 
+    const poses: Record<string, { yaw: number; pitch: number; duration: number }> = {
+      thinking: { yaw: -0.045, pitch: 0, duration: 3200 },
+      attentive: { yaw: 0, pitch: -0.04, duration: 3000 },
+      concerned: { yaw: 0, pitch: 0.07, duration: 3200 },
     };
     if (poses[e]) emit('avatar:headpose', poses[e]);
   }
 
   private _fireGesture(g: string, o: any): void {
+    if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) {
+      return;
+    }
     if (LEVEL6_UNIFIED_BEHAVIOR) return;
     // Standing-first: emit full gesture tokens. AvatarCanvas maps seated-safe motion only when UI sit is active.
     // FIX: personality-consistent gestures — high friendliness softens point unless user profile prefers technical pointing
@@ -715,6 +780,9 @@ export class AgentDirector {
     }
     if (traj.trend === 'falling_negative' || traj.trend === 'stable_negative') {
       intensity *= 0.9;
+    }
+    if (mentorFrustrationCarryover()) {
+      intensity *= 0.74;
     }
     intensity = Math.min(0.94, intensity);
 
@@ -790,7 +858,12 @@ export class AgentDirector {
 
   // ── TTS Scheduling ──────────────────────────────────────────────────────────
 
-  async scheduleTTS(text: string, emotion: EmotionLabel, delay = 0): Promise<void> {
+  async scheduleTTS(
+    text: string,
+    emotion: EmotionLabel,
+    delay = 0,
+    ttsOpts?: { forceEdgeBff?: boolean },
+  ): Promise<void> {
     if (!text?.trim()) return;
     const trimmed = text.trim();
     const now = masterClockNowMs();
@@ -807,16 +880,27 @@ export class AgentDirector {
     await new Promise<void>(res => {
       this._later(delay, async () => {
         stopTTSGlobally();
-        emitAgentMessage(trimmed, emotion);
+        const hints = getAdaptationHints();
+        let speakEmotion: EmotionLabel = emotion;
+        let rate =
+          resolveSpeakRate(emotion, COGNI_VOICE.rate) * hints.voiceRateMul;
+        if (mentorFrustrationCarryover()) {
+          rate = Math.max(0.78, rate * 0.93);
+          if (speakEmotion === 'neutral' || speakEmotion === 'thinking' || speakEmotion === 'attentive') {
+            speakEmotion = 'empathetic';
+          }
+        }
+        emitAgentMessage(trimmed, speakEmotion);
         if (LEVEL6_UNIFIED_BEHAVIOR) emitBehaviorText(trimmed, 'conversation');
 
         useBrainStore.getState().setTalking(true);
         try {
           const audio = await speakWithTTS(text, {
-            emotion,
-            rate: resolveSpeakRate(emotion, COGNI_VOICE.rate),
+            emotion: speakEmotion,
+            rate,
             ...(COGNI_VOICE.pitchScale > 1.01 ? { pitch: '+2Hz' as const } : {}),
             arVoice: 'male',
+            forceEdgeBff: ttsOpts?.forceEdgeBff,
             onStart: () => {
               emit('avatar:speak:start', {});
             },
@@ -830,6 +914,8 @@ export class AgentDirector {
           if (!audio) {
             useBrainStore.getState().setTalking(false);
             resetSpeechIntentHints();
+            emitTtsFailureEmbodiment('director_schedule_tts_null');
+            emit('avatar:speak:end', {});
             // eslint-disable-next-line no-console
             console.warn(
               '[AgentDirector] speakWithTTS failed — TTS API error, empty visemes/audio, or playback blocked (see [speakWithTTS] logs)',

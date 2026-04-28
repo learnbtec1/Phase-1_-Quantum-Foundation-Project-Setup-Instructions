@@ -9,6 +9,8 @@ import type { EmbodimentState, EmotionHint } from '@/lib/avatar/embodimentState'
 import { getCognitiveOrchestratorLLMOutput } from '@/lib/ai/cognitiveOrchestrator';
 import { isBodyDrivenByVRMA } from '@/lib/avatar/vrmaBodyDrive';
 import type { BonePoseMap } from './PoseComposer';
+import { isPoseKeyProcedurallySuppressed } from './proceduralSuppressionContext';
+import { isVrmaPlaybackGloballyDisabled } from '@/lib/avatar/vrmaPlaybackPolicy';
 import { applyIntentGestureClipToPose, stepIntentGesturePlayer } from './gesturePlayer';
 
 const _e = new THREE.Euler(0, 0, 0, 'YXZ');
@@ -56,6 +58,7 @@ let eyeCamYawSm = 0;
 let eyeCamPitchSm = 0;
 
 function mulBoneDeltaEuler(finalPose: BonePoseMap, key: string, rx: number, ry: number, rz: number): void {
+  if (isPoseKeyProcedurallySuppressed(key)) return;
   const q = finalPose.get(key);
   if (!q) return;
   _e.set(rx, ry, rz, 'YXZ');
@@ -66,10 +69,9 @@ function mulBoneDeltaEuler(finalPose: BonePoseMap, key: string, rx: number, ry: 
 
 function mulFirstPresent(finalPose: BonePoseMap, keys: readonly string[], rx: number, ry: number, rz: number): void {
   for (const key of keys) {
-    if (finalPose.has(key)) {
-      mulBoneDeltaEuler(finalPose, key, rx, ry, rz);
-      return;
-    }
+    if (!finalPose.has(key) || isPoseKeyProcedurallySuppressed(key)) continue;
+    mulBoneDeltaEuler(finalPose, key, rx, ry, rz);
+    return;
   }
 }
 
@@ -290,6 +292,26 @@ function applyBehaviorOverlay(
 
 let idleBehaviorAccumSec = 0;
 
+/** Maestro trace: log when embodiment intent/mode changes meaningfully. */
+let lastIntentMotorLogSig = '';
+
+function logIntentMotorStateIfChanged(emb: EmbodimentState): void {
+  const intent = emb.intent.activeIntent;
+  const intensity = Math.min(1, Math.max(0, emb.intent.intensity));
+  const active = !!intent && intensity >= 0.04;
+  const state = emb.speech.active ? 'SPEAKING' : emb.behaviorMode;
+  const sig = active ? `${state}|${intent}|${intensity.toFixed(3)}` : 'IDLE|__|0.000';
+  if (sig === lastIntentMotorLogSig) return;
+  lastIntentMotorLogSig = sig;
+  if (!active) {
+    // eslint-disable-next-line no-console -- intentional intent motor diagnostics
+    console.log('[INTENT MOTOR] State: IDLE | Intensity: 0.000');
+  } else {
+    // eslint-disable-next-line no-console -- intentional intent motor diagnostics
+    console.log(`[INTENT MOTOR] State: ${state} | Intensity: ${intensity.toFixed(3)}`);
+  }
+}
+
 function behaviorDisengageT(emb: EmbodimentState, dt: number): number {
   if (emb.behaviorMode === 'IDLE') idleBehaviorAccumSec += dt;
   else idleBehaviorAccumSec = 0;
@@ -351,12 +373,14 @@ export function applyIntentMotor(
   const dt = Math.min(Math.max(delta, 0), 0.08);
   motorPhaseSec += dt;
 
+  logIntentMotorStateIfChanged(emb);
+
   const intent = emb.intent.activeIntent;
   const w = Math.min(1, Math.max(0, emb.intent.intensity));
   if (!intent || w < 0.04) return;
 
   if (!isBodyDrivenByVRMA(opts)) return;
-  if (opts.gestureLayerW > 0.42) return;
+  if (opts.gestureLayerW > 0.42 && !isVrmaPlaybackGloballyDisabled()) return;
 
   const emotionMul = emotionProfile(resolveEmotionLabel(emb));
   const ctxT = contextToneMultipliers(emb);
@@ -559,9 +583,9 @@ export function applyIntentMotor(
     const nodPhrase = speak ? Math.sin(beat * 0.88) * 0.0012 * e * s * spikeIm * listMul : 0;
     const nod =
       nodBase + nodPhrase + question * 0.0015 * s * (speak ? 0.2 + 0.8 * phraseGate : 1) * listMul + agreeRhythm;
-    const leanFwd = 0.00085 * s * spikeIm * (0.7 + 0.3 * w);
-    const nodNeck = (nod * 0.48 + leanFwd * 0.55) * emotionMul.head;
-    const nodHead = (nod * 0.62 + affirmMicro + leanFwd) * emotionMul.head;
+    const leanBack = -0.00105 * s * spikeIm * (0.7 + 0.3 * w);
+    const nodNeck = (nod * 0.48 + leanBack * 0.55) * emotionMul.head;
+    const nodHead = (nod * 0.62 + affirmMicro + leanBack) * emotionMul.head;
     mulBoneDeltaEuler(finalPose, 'neck', 0, nodNeck, 0);
     mulBoneDeltaEuler(finalPose, 'head', microVar * emotionMul.head, nodHead, 0);
 
@@ -574,8 +598,8 @@ export function applyIntentMotor(
       Math.sin(tScaled * 0.35) * 0.0011 * s * genMul * (1 + emphasis * 0.2 * (speak ? phraseGate : 0.4)) * focusArm * listMul * emotionMul.arms;
     mulBoneDeltaEuler(finalPose, 'leftShoulder', 0, 0, micro);
     mulBoneDeltaEuler(finalPose, 'rightShoulder', 0, 0, -micro);
-    mulBoneDeltaEuler(finalPose, 'spine', leanFwd * 0.9 * emotionMul.spine, 0, 0);
-    mulBoneDeltaEuler(finalPose, 'chest', leanFwd * 0.75 * emotionMul.spine, 0, 0);
+    mulBoneDeltaEuler(finalPose, 'spine', leanBack * 0.9 * emotionMul.spine, 0, 0);
+    mulBoneDeltaEuler(finalPose, 'chest', leanBack * 0.75 * emotionMul.spine, 0, 0);
     applySemanticEmbodimentDeltas(finalPose, emb, tScaled, s, speak, phraseGate);
     applyBehaviorOverlay(finalPose, bi, s, eye);
     stepIntentGesturePlayer({

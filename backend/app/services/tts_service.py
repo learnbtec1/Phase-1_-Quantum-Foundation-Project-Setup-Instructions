@@ -10,6 +10,7 @@ Install:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re as _re
@@ -18,6 +19,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from xml.sax.saxutils import escape as _xml_sax_escape
 
+# Import once at load: drives Edge fallback in tts_timing / agent_ws when EL fails or TTS_PROVIDER=edge.
 try:
     import edge_tts  # noqa: F401
 
@@ -31,7 +33,95 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_ARABIC_SCRIPT_RE = _re.compile(r"[\u0600-\u06FF]")
+
+def _elevenlabs_error_message_from_body(status: int, raw: str) -> str:
+    """Parse ElevenLabs JSON error body into a single line for logs (detail.message, detail, or raw)."""
+    if not (raw or "").strip():
+        return f"HTTP {status} (empty body)"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return (raw or "")[:1200]
+    detail = data.get("detail")
+    if isinstance(detail, dict):
+        msg = detail.get("message") or detail.get("error") or detail.get("status")
+        if msg:
+            return str(msg)
+        return json.dumps(detail, ensure_ascii=False)[:1200]
+    if isinstance(detail, list) and detail:
+        first = detail[0]
+        if isinstance(first, dict) and first.get("msg"):
+            return str(first.get("msg"))
+        return str(detail)[:1200]
+    if detail is not None:
+        return str(detail)[:1200]
+    for key in ("message", "error", "error_message"):
+        if data.get(key):
+            return str(data[key])[:1200]
+    return (raw or "")[:1200]
+
+
+def log_critical_if_elevenlabs_misconfigured() -> None:
+    """
+    Phase 23 — one-shot startup check: when ElevenLabs is the configured provider,
+    missing key/voice must surface as CRITICAL in logs (Docker-friendly).
+    """
+    try:
+        from app.core.config import settings as _s
+
+        prov = (os.getenv("TTS_PROVIDER") or getattr(_s, "TTS_PROVIDER", "") or "").strip().lower()
+    except Exception:
+        prov = (os.getenv("TTS_PROVIDER") or "").strip().lower()
+    if prov != "elevenlabs":
+        return
+    if not _elevenlabs_api_key():
+        logger.critical(
+            "[ELEVENLABS] TTS_PROVIDER=elevenlabs but ELEVENLABS_API_KEY is empty at runtime — "
+            "TTS will fail. Set ELEVENLABS_API_KEY in the environment (e.g. docker-compose `.env`).",
+        )
+    if not _elevenlabs_voice_id():
+        logger.critical(
+            "[ELEVENLABS] TTS_PROVIDER=elevenlabs but ELEVENLABS_VOICE_ID is empty at runtime — "
+            "TTS will fail. Set ELEVENLABS_VOICE_ID (ElevenLabs voice id).",
+        )
+
+
+def _elevenlabs_api_key() -> str:
+    """Prefer process env (Docker / shell); fall back to pydantic Settings (.env via load_dotenv)."""
+    v = (os.getenv("ELEVENLABS_API_KEY") or "").strip()
+    if v:
+        return v
+    try:
+        from app.core.config import settings
+
+        return (settings.ELEVENLABS_API_KEY or "").strip()
+    except Exception:
+        return ""
+
+
+def _elevenlabs_voice_id() -> str:
+    """Same resolution order as API key."""
+    v = (os.getenv("ELEVENLABS_VOICE_ID") or "").strip()
+    if v:
+        return v
+    try:
+        from app.core.config import settings
+
+        return (settings.ELEVENLABS_VOICE_ID or "").strip()
+    except Exception:
+        return ""
+
+
+def _elevenlabs_stdout_error_body(status: int, raw: str) -> None:
+    """Emit full ElevenLabs error JSON to STDOUT for docker logs / operators."""
+    text = (raw or "").strip()
+    out = text
+    if text:
+        try:
+            out = json.dumps(json.loads(text), ensure_ascii=False, indent=2)
+        except json.JSONDecodeError:
+            pass
+    print(f"[ElevenLabs ERROR] HTTP {status}\n{out}", flush=True)
 
 
 async def synthesize_elevenlabs_async(text: str) -> bytes:
@@ -41,31 +131,74 @@ async def synthesize_elevenlabs_async(text: str) -> bytes:
     """
     import httpx
 
-    api_key = (os.getenv("ELEVENLABS_API_KEY") or "").strip()
-    voice_id = (os.getenv("ELEVENLABS_VOICE_ID") or "").strip()
+    if not (os.getenv("ELEVENLABS_API_KEY") or "").strip():
+        print("ELEVENLABS_API_KEY=MISSING_KEY", flush=True)
+    api_key = _elevenlabs_api_key()
+    voice_id = _elevenlabs_voice_id()
     if not api_key or not voice_id:
+        missing: List[str] = []
+        if not api_key:
+            missing.append("ELEVENLABS_API_KEY")
+        if not voice_id:
+            missing.append("ELEVENLABS_VOICE_ID")
         raise RuntimeError(
-            "ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID must be set when using ElevenLabs TTS"
+            "ElevenLabs env not set — missing: "
+            + ", ".join(missing)
+            + " (required when TTS_PROVIDER=elevenlabs)",
         )
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    # Phase 22 — `/stream` + minimal headers (avoid conflicting UA / extra headers vs binary MP3 response).
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
     params = {"output_format": "mp3_44100_128"}
     body: Dict[str, Any] = {
         "text": text,
         "model_id": "eleven_multilingual_v2",
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
     }
-    if _ARABIC_SCRIPT_RE.search(text):
-        body["language_code"] = "ar"
     timeout = float(os.getenv("ELEVENLABS_TTS_TIMEOUT_SEC", "120"))
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(
-            url,
-            params=params,
-            json=body,
-            headers={"xi-api-key": api_key},
+    el_headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": api_key,
+    }
+    log_payload = {
+        "model_id": body["model_id"],
+        "voice_settings": body["voice_settings"],
+        "text_preview": ((text or "")[:200] + "…") if len(text or "") > 200 else (text or ""),
+        "text_len": len(text or ""),
+    }
+    logger.info("ElevenLabs TTS JSON payload (pre-request): %s", json.dumps(log_payload, ensure_ascii=False))
+    logger.info(
+        "ElevenLabs TTS request | stream | voice_id_prefix=%s | text_len=%d",
+        voice_id[:12] + ("…" if len(voice_id) > 12 else ""),
+        len(text or ""),
+    )
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(
+                url,
+                params=params,
+                json=body,
+                headers=el_headers,
+            )
+    except httpx.RequestError as exc:
+        logger.critical("ElevenLabs TTS transport failure | err=%s", exc, exc_info=True)
+        print(f"[ElevenLabs ERROR] transport {type(exc).__name__}: {exc}", flush=True)
+        raise RuntimeError(f"ElevenLabs request failed: {exc}") from exc
+
+    if r.status_code != 200:
+        raw = r.text or ""
+        print(f"DEBUG_ELEVENLABS: {raw}", flush=True)
+        _elevenlabs_stdout_error_body(r.status_code, raw)
+        extracted = _elevenlabs_error_message_from_body(r.status_code, raw)
+        logger.critical(
+            "ElevenLabs TTS rejected | status=%s | voice_id=%s | api_message=%s | raw_body=%s",
+            r.status_code,
+            voice_id,
+            extracted,
+            (raw[:2000] if raw else ""),
         )
-    if r.status_code >= 400:
         raise RuntimeError(
-            f"ElevenLabs HTTP {r.status_code}: {(r.text or '')[:800]}",
+            f"ElevenLabs HTTP {r.status_code}: {extracted}",
         )
     data = r.content
     if not data or len(data) < 32:
@@ -317,8 +450,31 @@ async def synthesize_edge_tts_async(text: str, voice: Optional[str] = None) -> b
     fd, path = tempfile.mkstemp(suffix=".mp3", prefix="cogni_edge_")
     os.close(fd)
     try:
-        communicate = _edge.Communicate(t, v)
-        await communicate.save(path)
+        _proxy = (os.getenv("EDGE_TTS_PROXY") or "").strip() or None
+        communicate = _edge.Communicate(t, v, proxy=_proxy)
+        try:
+            await communicate.save(path)
+        except Exception as exc:
+            detail = str(exc)
+            logger.error(
+                "[EdgeTTS] Communicate.save failed | voice=%s | proxy=%s | err=%s",
+                v,
+                "set" if _proxy else "none",
+                detail[:800],
+            )
+            low = detail.lower()
+            if (
+                "403" in detail
+                or "invalid response status" in low
+                or "wsserverhandshake" in type(exc).__name__.lower()
+            ):
+                raise RuntimeError(
+                    "[edge_forbidden] Microsoft Edge TTS rejected the WebSocket handshake (often HTTP 403). "
+                    "Cloud/datacenter IPs are frequently blocked — set TTS_PROVIDER=elevenlabs with valid keys, "
+                    "or route Edge through EDGE_TTS_PROXY. Detail: "
+                    + detail[:400]
+                ) from exc
+            raise RuntimeError(f"[edge_error] Edge TTS failed: {detail[:500]}") from exc
         with open(path, "rb") as f:
             raw = f.read()
         if not raw:
@@ -353,20 +509,48 @@ async def generate_cogni_voice(
     if not base.lower().endswith(".mp3"):
         base = f"{base}.mp3"
     output_path = os.path.join(tempfile.gettempdir(), base)
-    communicate = _edge.Communicate(t, voice)
+    _proxy = (os.getenv("EDGE_TTS_PROXY") or "").strip() or None
+    communicate = _edge.Communicate(t, voice, proxy=_proxy)
     await communicate.save(output_path)
     return output_path
 
 
-def stub_viseme_timeline_for_text(text: str) -> List[Dict[str, Any]]:
-    """Synthetic viseme markers for clients that require a non-empty timeline."""
-    n = len((text or "").strip())
-    dur_ms = min(180_000, max(800, n * 45 + 600))
+def estimate_mp3_duration_ms(mp3_bytes: bytes) -> int:
+    """Rough audio length from MP3 payload size (~128 kbps effective; clamped)."""
+    if not mp3_bytes or len(mp3_bytes) < 32:
+        return 800
+    n = len(mp3_bytes)
+    est = int(n * 1000 / 16000)
+    return min(180_000, max(400, est))
+
+
+def stub_viseme_timeline_for_text(
+    text: str,
+    duration_ms: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Synthetic viseme markers for clients that require a non-empty timeline.
+
+    Uses ``offset_ms`` + ``viseme_id`` so the BFF/client parser never confuses ms with seconds.
+    When ``duration_ms`` is set (e.g. from MP3 byte size), the stub matches clip length better.
+    """
+    nchars = len((text or "").strip())
+    text_guess_ms = min(180_000, max(800, nchars * 45 + 600))
+    if duration_ms is not None:
+        measured = min(180_000, max(400, int(duration_ms)))
+        # Prefer measured MP3 length; keep a floor so ultra-fast encodes still get a usable cue count.
+        dur_ms = max(measured, min(text_guess_ms, int(measured * 1.25)))
+    else:
+        dur_ms = text_guess_ms
     out: List[Dict[str, Any]] = []
     t = 0
+    step_ms = 140
+    # Rotate Azure-style viseme ids so the mouth visibly moves (not frozen on one shape).
+    ids = (4, 6, 8, 12, 15, 7, 5, 9, 11, 13)
+    i = 0
     while t < dur_ms:
-        out.append({"t": t, "id": 4})
-        t += 140
+        out.append({"offset_ms": t, "viseme_id": ids[i % len(ids)]})
+        t += step_ms
+        i += 1
     return out
 
 

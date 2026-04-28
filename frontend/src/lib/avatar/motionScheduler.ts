@@ -11,6 +11,8 @@ import { PRIORITY } from '@/constants/gestures';
 import { getEmbodimentState } from '@/lib/avatar/embodimentState';
 import { getMotionControllerState, isVrmaBaselineLayerActive } from '@/lib/avatar/motionAuthority';
 import { getBehaviorMotionState } from '@/lib/behavior/behaviorMotionBrain';
+import { useBrainStore } from '@/store/useBrainStore';
+import { isVrmaPlaybackGloballyDisabled } from '@/lib/avatar/vrmaPlaybackPolicy';
 
 type UnifiedMod = typeof import('@/ai/cognitive/UnifiedGestureEngine');
 let engineModPromise: Promise<UnifiedMod> | null = null;
@@ -82,6 +84,10 @@ async function schedulerTick(): Promise<void> {
   }
 
   if (mode === 'THINKING') {
+    // WS `llm_thinking` already queues Thinking VRMA (HIGH) — ambient LOW re-play stacks clips / neck.
+    if (useBrainStore.getState().thinking) {
+      return;
+    }
     lastSchedulerPlayAt = now;
     void unifiedGestureEngine.play('thinking', {
       priority: PRIORITY.LOW,
@@ -104,6 +110,10 @@ async function schedulerTick(): Promise<void> {
 /** Idempotent — starts one 100–200ms loop for ambient motion scheduling. */
 export function startMotionScheduler(): void {
   if (typeof window === 'undefined' || started) return;
+  if (isVrmaPlaybackGloballyDisabled()) {
+    started = true;
+    return;
+  }
   started = true;
   intervalId = window.setInterval(() => {
     void schedulerTick();

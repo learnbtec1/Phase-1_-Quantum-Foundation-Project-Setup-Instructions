@@ -124,6 +124,23 @@ export function pickVrmUrl(): string {
 
 // ── Feature flags ─────────────────────────────────────────────────────────────
 
+/**
+ * Full-body + mouse gesture calibration UIs — **disabled for product UI** (sliders/panels confuse learners).
+ * Env flags are ignored; re-enable only by editing this function during local gesture tuning.
+ */
+export function showGestureCalibrationUi(): boolean {
+  return false;
+}
+
+/**
+ * Office scene JSON editor (translate/rotate panel). Default off — `NEXT_PUBLIC_SHOW_OFFICE_SCENE_EDITOR=true` to enable.
+ */
+export function showOfficeSceneEditorUi(): boolean {
+  if (typeof process === 'undefined') return false;
+  const v = (process.env.NEXT_PUBLIC_SHOW_OFFICE_SCENE_EDITOR ?? '').trim().toLowerCase();
+  return v === 'true' || v === '1';
+}
+
 /** Inverse kinematics for arm pointing. Default OFF — heavy, requires three-ik. */
 export const USE_IK =
   typeof process !== 'undefined' &&
@@ -146,6 +163,16 @@ export const LEVEL6_UNIFIED_BEHAVIOR =
   typeof process !== 'undefined' &&
   (process.env.NEXT_PUBLIC_LEVEL6_UNIFIED_BEHAVIOR === 'true' ||
     process.env.NEXT_PUBLIC_LEVEL6_UNIFIED_BEHAVIOR === '1');
+
+/**
+ * Single motion authority: `useBrainStore.avatarBehavior` + {@link VRMSkeletonManager} drive body;
+ * {@link AgentDirector} stops competing gestures / VRMA from director; `behaviorMotionBrain` / spontaneous idle are bypassed.
+ * Opt out: `NEXT_PUBLIC_AVATAR_BEHAVIOR_SINGLE_CONTROLLER=false`.
+ */
+export const AVATAR_BEHAVIOR_SINGLE_CONTROLLER =
+  typeof process !== 'undefined' &&
+  process.env.NEXT_PUBLIC_AVATAR_BEHAVIOR_SINGLE_CONTROLLER !== 'false' &&
+  process.env.NEXT_PUBLIC_AVATAR_BEHAVIOR_SINGLE_CONTROLLER !== '0';
 
 /**
  * Default looping VRMA after VRM load (`avatar:vrma:play` from `VRMAPlayer`).
@@ -339,8 +366,8 @@ export const WS_PROTOCOL_VERSION = 1.1;
 /** Ms of user silence before avatar dispatches a minor idle gesture. */
 export const PROACTIVE_GESTURE_MS = 20_000;
 
-/** Ms of user silence before avatar sends a proactive question via WS. */
-export const PROACTIVE_QUESTION_MS = 30_000;
+/** Ms of user silence before avatar sends a proactive mentor check-in via WS (Phase 21). */
+export const PROACTIVE_QUESTION_MS = 20_000;
 
 // ── Locomotion (Checkpoint #40 — AvatarCanvas `onWalk` + §8 + clap separation) ─
 export const WALK_SPEED_MPS = 1.2;

@@ -4,6 +4,15 @@ Tutor Chat API — الإصدار المطور لدعم الحواس الكام�
  تعديل الدكتور حمزة - مارس 2026.
 """
 from __future__ import annotations
+
+import sys
+
+try:
+    __import__("pysqlite3")
+    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+except ImportError:
+    pass
+
 import asyncio
 import json
 import os
@@ -28,6 +37,7 @@ from app.services.btec_chroma_rag import (
     retrieve_btec_chroma_block,
 )
 from app.services.local_rag import format_rag_context, retrieve_local_context
+from app.services.brain_logic import append_teacher_brain_to_system_prompt
 
 logger = logging.getLogger("cogni.tutor")
 
@@ -1324,6 +1334,9 @@ async def _get_cogni_response(message: str, context: dict) -> str:
             '- `behavior.microExpressions`: [ { "type", "startOffsetMs", "durationMs", "intensity"?: 0..1 } ]\n'
             '- `behavior.phaseHints`: { "thinkingLeadInMs": number }\n'
         )
+
+    # Phase 21 — Socratic mentor stance + BTEC grounding mandate (always on for tutor path)
+    system_content = append_teacher_brain_to_system_prompt(system_content)
 
     messages = [{"role": "system", "content": system_content}]
     

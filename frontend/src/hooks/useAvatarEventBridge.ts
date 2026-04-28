@@ -18,6 +18,7 @@ import {
 import { dispatchAvatar } from '@/utils/events/normalizeAvatarEvents';
 import type { VisemeCue } from '@/app/avatar-agent/LipSyncManager';
 import { resetSpeechIntentHints, setSpeechIntentHintsFromText } from '@/lib/avatar/speechIntentHints';
+import { buildDefaultWsAgentUrl } from '@/lib/wsAgentUrl';
 // ─── Incoming message types (عقد JSON من الخادم أو اختبار) ───────────────────
 
 export type AgentSpeakMessage = {
@@ -85,11 +86,6 @@ export type UseAvatarEventBridgeResult = {
   socketReadyState: number | null;
   reconnect: () => void;
 };
-
-const DEFAULT_WS =
-  typeof process !== 'undefined'
-    ? process.env.NEXT_PUBLIC_AGENT_WS ?? process.env.NEXT_PUBLIC_WS_URL ?? ''
-    : '';
 
 const LETTER_TO_AZURE: Record<string, number> = {
   sil: 0,
@@ -160,7 +156,7 @@ type GestureQueueItem = { durationMs: number; detail: Record<string, unknown> };
 export function useAvatarEventBridge({
   enabled = true,
   connectWebSocket = false,
-  wsUrl = DEFAULT_WS,
+  wsUrl = buildDefaultWsAgentUrl(),
   isTalkingRef,
   visemeCueQueueRef,
   audioElementRef,

@@ -48,6 +48,8 @@ import { BehaviorBrainHost } from './behavior';
 import { MotionTraceOverlay } from './MotionTraceOverlay';
 import { useAvatarEventBridge } from '@/hooks/useAvatarEventBridge';
 import { initGestureNormalizer } from '@/lib/gestureNormalizer';
+import { GestureCalibrator } from './GestureCalibrator';
+import { MouseGestureCalibrator } from './MouseGestureCalibrator';
 import {
   INTERNAL_THOUGHT_END_EVENT,
   INTERNAL_THOUGHT_MOTOR_EVENT,
@@ -68,6 +70,8 @@ import {
   getRoomGroupPosition,
   getWorldFloorY,
   OFFICE_BACKGROUND_MESH_NAME,
+  showGestureCalibrationUi,
+  showOfficeSceneEditorUi,
 } from '@/config/avatar';
 import defaultOfficeScene from '@/config/office_scene.default.json';
 import {
@@ -1139,8 +1143,14 @@ export default function AvatarCanvas({
     <div ref={r3fEventSourceRef} className="relative w-full h-full bg-[#0a0a12]">
       <MotionTraceOverlay />
       <ObservabilityOverlay />
+      {showGestureCalibrationUi() && (
+        <>
+          <GestureCalibrator />
+          {vrm ? <MouseGestureCalibrator vrm={vrm} /> : null}
+        </>
+      )}
       <BehaviorBrainHost motorSpeedMulRef={motorSpeedMulRef} isTalkingRef={isTalkingRef} />
-      {showOfficeEnvironment && (
+      {showOfficeEnvironment && showOfficeSceneEditorUi() && (
         <>
           <input
             ref={sceneFileInputRef}

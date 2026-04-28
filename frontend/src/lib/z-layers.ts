@@ -10,6 +10,11 @@ export const Z_LAYERS = {
   AVATAR_PORTAL: 10_000,
   /** HUD chrome (toolbars, emotion strip, history toggle) */
   HUD_CHROME: 11_050,
+  /**
+   * Floating chat + mic — MUST be above {@link AVATAR_PORTAL} (10_000). Parent `main` uses
+   * `isolate z-50`, which traps `fixed` children below the body-mounted avatar portal otherwise.
+   */
+  CHAT_CARD: 11_090,
   /** Permission / secondary notices just above HUD */
   PERMISSION_STRIP: 11_080,
   /** Modal backdrops + session gates */

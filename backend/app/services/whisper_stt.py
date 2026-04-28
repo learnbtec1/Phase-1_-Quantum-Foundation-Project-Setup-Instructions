@@ -15,7 +15,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 from typing import Optional
@@ -65,6 +67,11 @@ except Exception:
     STT_MIME_OK = ["audio/webm", "audio/ogg", "audio/wav", "audio/mp4"]
 
 logger = logging.getLogger(__name__)
+
+# Neutral Arabic primer — avoid BTEC keywords (Pass/Merit/Distinction) here: they biased
+# faster-whisper toward hallucinating rubric phrases on weak VAD / noise-only audio.
+_WHISPER_INITIAL_PROMPT_DEFAULT = "حوار تعليمي بالعربية بين طالب ومعلم."
+_WHISPER_INITIAL_PROMPT = (os.getenv("WHISPER_INITIAL_PROMPT") or "").strip() or _WHISPER_INITIAL_PROMPT_DEFAULT
 
 # When local Whisper is unavailable or all STT paths fail, this user message is
 # sent through the same LLM pipeline as typed text so the client can verify E2E.
@@ -145,25 +152,52 @@ def _is_hallucination(text: str) -> bool:
     return False
 
 
+def _whisper_model_candidates() -> tuple[str, ...]:
+    """
+    Order controlled by WHISPER_MODEL_PRIORITY (comma-separated), e.g. tiny,base,small.
+    Default: small,base,tiny — Docker/demo often sets tiny,base,small for RAM/speed.
+    """
+    raw = (os.getenv("WHISPER_MODEL_PRIORITY") or "").strip()
+    if raw:
+        parts = tuple(x.strip() for x in raw.split(",") if x.strip())
+        if parts:
+            return parts
+    return ("small", "base", "tiny")
+
+
 def _init_whisper() -> bool:
     """
     Lazy-initialize the faster-whisper model.
-    Tries 'small' first (best Arabic quality), falls back to 'base' then 'tiny'.
+    Tries sizes from WHISPER_MODEL_PRIORITY (default small→base→tiny).
     Returns True once a model is loaded.
     """
     global _whisper_available, _processor, _loaded_model_size
     if _whisper_available:
         return True
 
-    for model_size in ("small", "base", "tiny"):
+    download_root = (os.getenv("WHISPER_DOWNLOAD_ROOT") or "").strip() or None
+    device = (os.getenv("WHISPER_DEVICE") or "cpu").strip() or "cpu"
+    compute_type = (os.getenv("WHISPER_COMPUTE_TYPE") or "int8").strip() or "int8"
+
+    for model_size in _whisper_model_candidates():
         try:
             from faster_whisper import WhisperModel
-            _processor = WhisperModel(model_size, device="cpu", compute_type="int8")
+
+            kwargs: dict = {
+                "device": device,
+                "compute_type": compute_type,
+            }
+            if download_root:
+                kwargs["download_root"] = download_root
+            _processor = WhisperModel(model_size, **kwargs)
             _whisper_available = True
             _loaded_model_size = model_size
             logger.info(
-                "faster-whisper loaded: model=%s device=cpu compute_type=int8",
+                "faster-whisper loaded: model=%s device=%s compute_type=%s download_root=%s",
                 model_size,
+                device,
+                compute_type,
+                download_root or "(default cache)",
             )
             return True
         except ImportError:
@@ -177,7 +211,8 @@ def _init_whisper() -> bool:
 
     logger.critical(
         "Could not load any Whisper model. "
-        "STT will be unavailable until faster-whisper is correctly installed."
+        "STT will be unavailable until faster-whisper is correctly installed "
+        "and WHISPER_MODEL_PRIORITY models can download/load (check disk, RAM, shm)."
     )
     return False
 
@@ -215,6 +250,93 @@ def _extract_pcm_via_av(audio_bytes: bytes) -> tuple[bytes, int]:
         raise ValueError("av: no audio frames decoded")
 
     return b"".join(chunks), 16000
+
+
+def _guess_media_suffix(audio_bytes: bytes) -> str:
+    """Pick a temp-file suffix so ffmpeg can probe the container."""
+    if len(audio_bytes) >= 12 and audio_bytes[:4] == b"RIFF" and audio_bytes[8:12] == b"WAVE":
+        return ".wav"
+    if len(audio_bytes) >= 4 and audio_bytes[:4] == b"\x1a\x45\xdf\xa3":  # EBML / WebM
+        return ".webm"
+    if len(audio_bytes) >= 4 and audio_bytes[:4] == b"OggS":
+        return ".ogg"
+    if len(audio_bytes) >= 8 and audio_bytes[4:8] == b"ftyp":
+        return ".mp4"
+    return ".bin"
+
+
+def _normalize_audio_via_ffmpeg(audio_bytes: bytes, label: str) -> Optional[bytes]:
+    """Resample to 16 kHz mono s16le WAV via ffmpeg (matches Whisper training).
+
+    Browsers often emit WAV headers at 48 kHz (or odd containers); passing float32
+    arrays at the wrong rate into faster-whisper breaks VAD/no_speech detection.
+    """
+    if not audio_bytes:
+        return None
+    if not shutil.which("ffmpeg"):
+        logger.warning("%s [STT_FFMPEG] ffmpeg not found in PATH — using PCM extract + numpy resample", label)
+        return None
+
+    in_path = out_path = ""
+    try:
+        fd_in, in_path = tempfile.mkstemp(suffix=_guess_media_suffix(audio_bytes))
+        fd_out, out_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd_out)
+        with os.fdopen(fd_in, "wb") as f_in:
+            f_in.write(audio_bytes)
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            in_path,
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            out_path,
+        ]
+        # Exact command for ops/debug (single line, copy-pasteable).
+        logger.info('%s [STT_FFMPEG] cmd="%s"', label, " ".join(cmd))
+
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or b"").decode("utf-8", errors="replace")[:800]
+            logger.warning("%s [STT_FFMPEG] exit=%s stderr=%s", label, proc.returncode, err)
+            return None
+
+        with open(out_path, "rb") as f_out:
+            out_b = f_out.read()
+        if len(out_b) < 1000:
+            logger.warning("%s [STT_FFMPEG] output too small bytes=%d", label, len(out_b))
+            return None
+        logger.info(
+            "%s [STT_FFMPEG] ok out_bytes=%d in_bytes=%d",
+            label,
+            len(out_b),
+            len(audio_bytes),
+        )
+        return out_b
+    except Exception as exc:
+        logger.warning("%s [STT_FFMPEG] failed: %s", label, _safe_log(exc))
+        return None
+    finally:
+        for p in (in_path, out_path):
+            if p:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
 
 def _extract_pcm(audio_bytes: bytes) -> tuple[bytes, int]:
@@ -292,6 +414,11 @@ async def transcribe_audio(
     try:
         import numpy as np
 
+        normalized = _normalize_audio_via_ffmpeg(audio_bytes, label)
+        if normalized:
+            audio_bytes = normalized
+            mime_type = "audio/wav"
+
         pcm_bytes, detected_sr = _extract_pcm(audio_bytes)
         if len(pcm_bytes) < 3200:  # < 100 ms of audio at 16 kHz → skip (avoids noise/click false positives)
             logger.info("%s [STT_ERROR] audio_too_short bytes=%d", label, len(pcm_bytes))
@@ -307,6 +434,21 @@ async def transcribe_audio(
             np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
         )
 
+        # If ffmpeg was skipped (not installed) or PCM is still not 16 kHz, resample for Whisper.
+        if detected_sr and detected_sr != 16000 and len(audio_array) > 1:
+            logger.info(
+                "%s [STT_RESAMPLE] numpy linear %d Hz -> 16000 Hz samples=%d",
+                label,
+                detected_sr,
+                len(audio_array),
+            )
+            duration_s = len(audio_array) / float(detected_sr)
+            new_len = max(1, int(duration_s * 16000))
+            x_old = np.linspace(0.0, duration_s, num=len(audio_array), endpoint=False, dtype=np.float64)
+            x_new = np.linspace(0.0, duration_s, num=new_len, endpoint=False, dtype=np.float64)
+            audio_array = np.interp(x_new, x_old, audio_array.astype(np.float64)).astype(np.float32)
+            detected_sr = 16000
+
         # Duration sanity check — Whisper needs at least 0.4 s (STT_MIN_MS)
         duration_ms = int(len(audio_array) / max(detected_sr, 1) * 1000)
         if duration_ms < STT_MIN_MS:
@@ -318,23 +460,30 @@ async def transcribe_audio(
             global _processor
             # faster-whisper API
             try:
-                segments, info = _processor.transcribe(
-                    audio_array,
+                # Frontend already runs VAD; a second VAD here often strips real speech → no_speech_detected.
+                # Resampled audio is 16 kHz mono — no_speech_threshold relaxed; log_prob disabled where supported.
+                _tw_kw = dict(
                     language="ar",
                     beam_size=5,
                     best_of=5,
-                    # Suppress hallucinations on noise/silence:
-                    no_speech_threshold=0.6,
+                    no_speech_threshold=0.4,
                     condition_on_previous_text=False,
-                    # VAD filter removes non-speech frames before Whisper processing
-                    # — dramatically reduces hallucinations on silence/background noise.
-                    vad_filter=True,
-                    # Greedy decoding: faster + more deterministic for academic Arabic.
+                    vad_filter=False,
                     temperature=0.0,
-                    # Academic Arabic BTEC context: improves vocabulary accuracy
-                    # and prevents confusion between similar-sounding terms.
-                    initial_prompt="هذا حوار أكاديمي باللغة العربية الفصحى حول BTEC ومعايير Pass وMerit وDistinction وتحليل PESTLE وSWOT واستراتيجية الأعمال.",
+                    initial_prompt=_WHISPER_INITIAL_PROMPT,
                 )
+                try:
+                    segments, info = _processor.transcribe(
+                        audio_array,
+                        log_prob_threshold=None,
+                        **_tw_kw,
+                    )
+                except TypeError:
+                    segments, info = _processor.transcribe(
+                        audio_array,
+                        log_prob_threshold=-1.0,
+                        **_tw_kw,
+                    )
                 result = " ".join(s.text.strip() for s in segments if s.text.strip())
                 # Use ascii=True-style repr to avoid UnicodeEncodeError when logging
                 # Arabic text through a cp1252 Windows console handler.
@@ -354,6 +503,13 @@ async def transcribe_audio(
         loop = asyncio.get_event_loop()
         raw_text: str = await loop.run_in_executor(None, _run_transcription)
         text = (raw_text or "").strip()
+        logger.debug(
+            "%s [STT_TRANSCRIPT] after_model stripped_len=%d hallucination=%s text=%s",
+            label,
+            len(text),
+            _is_hallucination(text),
+            _safe_log(text, 240),
+        )
 
         if _is_hallucination(text):
             logger.info("%s [STT_ERROR] hallucination_filtered text=%s", label, _safe_log(text))

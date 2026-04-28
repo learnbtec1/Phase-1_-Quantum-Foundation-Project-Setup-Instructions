@@ -1,8 +1,14 @@
 /**
  * Intent continuity — internal motion intent driven by behavior brain + gesture cues.
  * Presence layer reads this; VRMA / UnifiedGestureEngine stay unchanged (accent + layers).
+ *
+ * Phase 21 — mentor check-in: after prolonged user silence, `useAgentAgent` may call
+ * {@link fireMentorSilenceCheckInMotion} (Encouraging / Agreeing VRMA) alongside the WS check-in prompt.
  */
+import { AVATAR_BEHAVIOR_SINGLE_CONTROLLER, PROACTIVE_QUESTION_MS } from '@/config/avatar';
+import { PRIORITY } from '@/constants/gestures';
 import { getBehaviorMotionState, type BehaviorMotionMode } from '@/lib/behavior/behaviorMotionBrain';
+import { isVrmaPlaybackGloballyDisabled } from '@/lib/avatar/vrmaPlaybackPolicy';
 
 export type MotionIntentKind = 'explaining' | 'listening' | 'thinking' | null;
 
@@ -67,6 +73,7 @@ export function setMotionIntent(intent: MotionIntentKind, intensity?: number): v
 
 /** Called every frame from VRMSkeletonManager — brain is primary when mode is non-IDLE. */
 export function updateIntentFromBehaviorBrain(delta: number): void {
+  if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) return;
   const bs = getBehaviorMotionState();
   const mode = bs.mode;
   const targetIntent = mapBrainModeToIntent(mode);
@@ -192,4 +199,33 @@ export function getIntentPresenceModFromSnapshot(snapshot: Readonly<MotionIntent
 /** Used by presenceLayer — cheap snapshot from current intent + intensity. */
 export function getIntentPresenceMod(): IntentPresenceMod {
   return getIntentPresenceModFromSnapshot(intentState);
+}
+
+/** Silence threshold (ms) before proactive mentor check-in — single source: `avatar.ts`. */
+export const MENTOR_CHECK_IN_SILENCE_MS = PROACTIVE_QUESTION_MS;
+
+/**
+ * Light encouraging VRMA when the mentor check-in fires (does not speak; speech is WS-driven).
+ * Best-effort: uses `window.__cogniGestureEngine` when present, else dispatches `avatar:vrma:play`.
+ */
+export function fireMentorSilenceCheckInMotion(): void {
+  if (typeof window === 'undefined' || AVATAR_BEHAVIOR_SINGLE_CONTROLLER) return;
+  if (isVrmaPlaybackGloballyDisabled()) return;
+  type Eng = { play: (n: string, o?: Record<string, unknown>) => Promise<void> };
+  const eng = (window as Window & { __cogniGestureEngine?: Eng }).__cogniGestureEngine;
+  if (eng?.play) {
+    void eng.play('Agreeing', {
+      priority: PRIORITY.BACKGROUND,
+      intensity: 0.58,
+      durationMs: 2200,
+      humanTiming: false,
+      behaviorBrain: false,
+    });
+    return;
+  }
+  window.dispatchEvent(
+    new CustomEvent('avatar:vrma:play', {
+      detail: { name: 'Agreeing', durationMs: 2200, intensity: 0.55 },
+    }),
+  );
 }

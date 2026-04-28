@@ -6,6 +6,7 @@
 
 import * as THREE from 'three';
 import type { BonePoseMap } from './PoseComposer';
+import { isPoseKeyProcedurallySuppressed } from './proceduralSuppressionContext';
 import { GestureLibrary, type GestureClipDef } from './gestureLibrary';
 import { getCinematicGestureWeightFactor } from '@/ai/avatar/avatarPersonality';
 import { getSpeechEmotionSnapshot } from '@/ai/voice/speechEmotionBridge';
@@ -71,10 +72,9 @@ function mulFirstPresent(
   rz: number,
 ): void {
   for (const key of keys) {
-    if (finalPose.has(key)) {
-      mulBoneDeltaEuler(finalPose, key, rx, ry, rz);
-      return;
-    }
+    if (!finalPose.has(key) || isPoseKeyProcedurallySuppressed(key)) continue;
+    mulBoneDeltaEuler(finalPose, key, rx, ry, rz);
+    return;
   }
 }
 

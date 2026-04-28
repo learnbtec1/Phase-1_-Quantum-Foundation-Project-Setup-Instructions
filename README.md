@@ -210,7 +210,7 @@ npm run dev
 
 ## 🐳 تشغيل المشروع باستخدام Docker (الإنتاج / سطح المكتب)
 
-المستودع يتضمن [`docker-compose.yml`](docker-compose.yml) في الجذر: **Redis** (`redis`)، **Postgres** (`db`)، **FastAPI** (`backend`)، **Next.js** (`frontend`). ChromaDB للفهرسة متّصل افتراضياً بمسار داخل حاوية الـ backend (`/app/data/chroma_cogni`). خدمة **ChromaDB منفصلة** اختيارية تحت profile اسمه `chroma` (منفذ المضيف `8001`).
+المستودع يتضمن [`docker-compose.yml`](docker-compose.yml) في الجذر: **Redis** (`redis`)، **Postgres** (`db`)، **FastAPI** (`backend`)، **Next.js** (`frontend`). ChromaDB للفهرسة متّصل افتراضياً بمسار داخل حاوية الـ backend (`/app/data/chroma_cogni`). خدمة **ChromaDB منفصلة** اختيارية تحت profile اسمه `chroma` (منفذ المضيف `8010` → 8000 داخل الحاوية). خدمة **avatar_brain** تُنشر على المضيف `8011` (→ 8001 داخل الحاوية) لـ WebSocket الحركة لتفادي تعارض المنفذ `8001`.
 
 ### خطوات سريعة
 

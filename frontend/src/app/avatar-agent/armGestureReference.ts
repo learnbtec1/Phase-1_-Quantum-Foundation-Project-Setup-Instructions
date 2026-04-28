@@ -1,25 +1,34 @@
 /**
  * armGestureReference.ts — VRM 1.0 Arm Pose Reference (cogni.vrm)
  *
+ * Full-body procedural layer uses the same local YXZ convention; universal
+ * commands live in `semanticCommand.ts` + `generativeBoneNormalize.ts`.
+ *
  * ╔══════════════════════════════════════════════════════════════════════╗
- * ║  ✅ VERIFIED AXIS MAP — cogni.vrm (VRM 1.0) — confirmed 2026-04-11  ║
- * ║  slerpArmEuler: SK_E.set(ex, ey, ez, 'YXZ')                        ║
- * ║                                                                      ║
- * ║  RIGHT upper arm:                                                    ║
- * ║    ruaY +  = FORWARD  (toward avatar front)                         ║
- * ║    ruaY −  = BACKWARD                                                ║
- * ║    ruaZ +  = DOWN     (hang at side)                                 ║
- * ║    ruaZ −  = UP       (raise above shoulder)                         ║
- * ║    ruaX ±  = ROLL/TWIST (around arm length axis)                    ║
- * ║                                                                      ║
- * ║  LEFT upper arm  (Y mirrored from right):                            ║
- * ║    luaY −  = FORWARD  (toward avatar front)                         ║
- * ║    luaY +  = BACKWARD                                                ║
- * ║    luaZ −  = DOWN     (hang at side)                                 ║
- * ║    luaZ +  = UP       (raise above shoulder)                         ║
- * ║    luaX ±  = ROLL/TWIST                                              ║
- * ╚══════════════════════════════════════════════════════════════════════╝
+ * ║  SOURCE OF TRUTH — normalized rightUpperArm local Euler YXZ (empirical) ║
+ * ║  slerpArmEuler: SK_E.set(ex, ey, ez, 'YXZ')                             ║
+ * ║                                                                         ║
+ * ║  RIGHT upper arm (rua):                                                ║
+ * ║    PRIMARY forward reach = −ruaX (dominant channel; do not use Y)        ║
+ * ║    Forward  = −X  (more negative X → reach toward avatar front)        ║
+ * ║    Backward = +X                                                       ║
+ * ║    Up       = −Z  (more negative Z → raise)                             ║
+ * ║    Down     = +Z                                                       ║
+ * ║    Y        = lateral / secondary swing (not used for primary reach)   ║
+ * ║                                                                         ║
+ * ║  LEFT upper arm (lua) — mirror in X for forward:                        ║
+ * ║    Forward  = +X                                                       ║
+ * ║    Backward = −X                                                       ║
+ * ║    Up / Down on Z mirrored vs hang pose (idle luaZ negative)           ║
+ * ╚══════════════════════════════════════════════════════════════════════════╝
  */
+
+/** −1: forward reach increases along negative local X (right arm). */
+export const RUA_FORWARD_SIGN = -1 as const;
+/** −1: upward motion increases along negative local Z (right arm). */
+export const RUA_UP_SIGN = -1 as const;
+/** +1: left arm forward is positive X (mirror of right). */
+export const LUA_FORWARD_SIGN = 1 as const;
 
 export type ArmGestureId =
   | 'explain'
@@ -42,21 +51,17 @@ export type ArmEulerOffset = {
 
 /**
  * ARM_IDLE — natural resting position for cogni.vrm (VRM 1.0).
- *
- * Arms hang naturally at sides (T-pose → +1.4 rad downward).
- * All Y = 0 (no forward/backward swing).
- * This is the base from which all gesture OFFSETS are added.
+ * Forward/back primary channels start at X=0; hang is Z (right +Z down, left −Z down).
  */
 export const ARM_IDLE: ArmEulerOffset = {
-  ruaX:  0.0,  ruaY:  0.0,  ruaZ: +1.4,   // right: hanging naturally
-  luaX:  0.0,  luaY:  0.0,  luaZ: -1.4,   // left:  hanging naturally (mirrored)
-  rlaX:  0.08, rlaZ:  0.0,                 // forearms: slight natural bend
+  ruaX:  0.0,  ruaY:  0.0,  ruaZ: +1.4,
+  luaX:  0.0,  luaY:  0.0,  luaZ: -1.4,
+  rlaX:  0.08, rlaZ:  0.0,
   llaX:  0.08, llaZ:  0.0,
   rhX:   0.0,  rhY:   0.0,  rhZ:   0.0,
   lhX:   0.0,  lhY:   0.0,  lhZ:   0.0,
 };
 
-// ─── ZERO OFFSET TEMPLATE ────────────────────────────────────────────────────
 const ZERO: ArmEulerOffset = {
   ruaX: 0, ruaY: 0, ruaZ: 0,
   luaX: 0, luaY: 0, luaZ: 0,
@@ -68,19 +73,21 @@ const ZERO: ArmEulerOffset = {
 
 /**
  * ARM_OFFSETS — deltas added to ARM_IDLE per gesture.
+ * Right-arm reach uses negative ruaX; left-arm reach uses positive luaX.
  */
+// [STRICT] DO NOT MODIFY AXIS MAPPING. UP=Z, FORWARD=X, ROTATION=Y. Approved by Maestro.
 export const ARM_OFFSETS: Record<ArmGestureId, ArmEulerOffset> = {
   wave: {
     ...ZERO,
-    ruaX: -1.13,
-    ruaY: 0.22,
+    ruaX: -1.35,
+    ruaY: 0,
     ruaZ: -0.89,
     rlaX: 2.12,
     rlaZ: -2.2,
     rhY: 0.0982,
     rhZ: -0.06496,
-    luaX: 0.95,
-    luaY: -0.12,
+    luaX: 1.07,
+    luaY: 0,
     luaZ: 1.12,
     llaX: 0.47,
     llaZ: -0.16,
@@ -90,59 +97,56 @@ export const ARM_OFFSETS: Record<ArmGestureId, ArmEulerOffset> = {
   },
   point: {
     ...ZERO,
-    ruaY: +1.5,   // full forward extension
+    ruaX: -1.5,
   },
   think: {
     ...ZERO,
-    ruaY: +0.5,   // forward (clear vs idle)
-    ruaZ: -0.4,   // slight raise — was −0.3; stronger delta for visible procedural think
+    ruaX: -0.5,
+    ruaZ: -0.4,
   },
   explain: {
     ...ZERO,
-    ruaY: +0.8,   // right arm forward
-    luaY: -0.8,   // left arm forward (mirrored: -Y)
+    ruaX: -0.8,
+    luaX: +0.8,
   },
   clap: {
     ...ZERO,
-    ruaY: +1.2,   // right toward center
-    luaY: -1.2,   // left toward center
+    ruaX: -1.2,
+    luaX: +1.2,
   },
   agree: {
     ...ZERO,
-    ruaY: +0.2,   // slight forward nod (no neckY to avoid type errors)
+    ruaX: -0.2,
   },
-  /** تشخيص: ثني كوع واضح + لف ساعد — للتحقق من تطبيق rlaZ/rlaX عبر السلسلة الإجرائية */
   test_elbow: {
     ...ZERO,
     ruaZ: -0.7,
-    ruaY: 0.5,
+    ruaX: -0.5,
     rlaZ: -1.8,
     rlaX: 0.5,
     rhY: 0.2,
   },
 };
 
-/** Which local Euler channel receives procedural oscillation (YXZ / slerpArmEuler). */
 export type GestureOscillationBone = 'rhZ' | 'rhY' | 'ruaZ' | 'luaZ';
 
-/** Parametric sine oscillation layered on top of static gesture targets (see VRMSkeletonManager). */
 export type GestureOscillationConfig = {
   bone: GestureOscillationBone;
-  /** Peak deviation from the static target (radians). */
   amplitude: number;
-  /** Full cycles per second (Hz). */
   frequency: number;
 };
 
-/**
- * Per-gesture wrist/arm oscillation (optional). Static `ARM_OFFSETS` stay unchanged;
- * VRMSkeletonManager adds `sin(t * 2πf) * amplitude` to the listed bone while the gesture runs.
- */
 export const GESTURE_OSCILLATIONS: Partial<Record<ArmGestureId, GestureOscillationConfig>> = {
   wave: {
     bone: 'rhZ',
     amplitude: 0.35,
     frequency: 2.5,
+  },
+  /** Subtle local-Z “breathing” on upper arm so chin pose never reads frozen (Golden map: UP/DOWN = Z). */
+  think: {
+    bone: 'ruaZ',
+    amplitude: 0.055,
+    frequency: 0.72,
   },
 };
 

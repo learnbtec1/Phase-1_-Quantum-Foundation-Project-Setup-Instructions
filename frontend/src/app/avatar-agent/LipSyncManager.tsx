@@ -1,5 +1,11 @@
 'use client';
 
+/**
+ * Lip-sync and viseme application on the VRM. Reads **read-only** snapshots from
+ * {@link useBrainStore#getState} (e.g. `interactionIntent`) each frame for cognitive mouth / sync context;
+ * intent updates are driven elsewhere by `processFrame` + `tickIntentBrain` (see useBrainStore module doc).
+ */
+
 import React, {
   type MutableRefObject,
   type RefObject,
@@ -12,6 +18,7 @@ import type { VRM } from '@pixiv/three-vrm';
 import { avatarDebug, DEBUG_AVATAR } from '@/app/avatar-agent/debugAvatar';
 import { waitAudioReady as waitForAudioReady } from '@/lib/audio/waitAudioReady';
 import { useBrainStore } from '@/store/useBrainStore';
+import { AVATAR_BEHAVIOR_SINGLE_CONTROLLER } from '@/config/avatar';
 import {
   blendVisemeWithExpression,
   getCognitiveMouthOverlay,
@@ -28,19 +35,153 @@ import { nowMs as masterClockNowMs, sessionElapsedSec } from '@/lib/avatar/maste
 import {
   getActiveAudioElement,
   getPlaybackTimeSec,
+  getUtteranceGeneration,
   getVisemeCues,
   resetDriftOffset,
 } from '@/lib/avatar/audioTimeline';
 
 const TAB_SAFE_MAX_DELTA = 0.1;
 
-/** HAVE_CURRENT_DATA — enough data to read currentTime reliably for sync */
+/** Prefer HAVE_CURRENT_DATA; when a viseme timeline exists and playback has started, HAVE_METADATA is enough — avoids frozen mouth while the element ramps. */
 const AUDIO_READY_MIN = 2;
+const AUDIO_READY_FALLBACK = 1;
 
 /**
- * Azure viseme id → VRM mouth morph weights.
- * Index = Azure viseme ID (0–21).
+ * Lip-sync / face sync (ms): prefer NEXT_PUBLIC_FACE_* when set, else NEXT_PUBLIC_TTS_* (same playhead).
+ * Positive offset delays lip vs audio (e.g. 80–120). Pre-attack advances cue lookup (~50 ms).
  */
+function readEnvOffsetMsPreferFace(): number {
+  if (typeof process === 'undefined') return 0;
+  const face = process.env.NEXT_PUBLIC_FACE_SYNC_OFFSET_MS;
+  if (face !== undefined && face !== '') {
+    const n = Number(face);
+    if (Number.isFinite(n)) return n;
+  }
+  const tts = process.env.NEXT_PUBLIC_TTS_SYNC_OFFSET_MS;
+  if (tts !== undefined && tts !== '') {
+    const n = Number(tts);
+    if (Number.isFinite(n)) return n;
+  }
+  return 0;
+}
+
+/**
+ * Pre-attack (ms): advance viseme lookup vs `audio.currentTime` so the mouth leads
+ * the acoustic peak slightly (~50 ms default). Env overrides; set to 0 to disable.
+ */
+function readPreattackMsPreferFace(): number {
+  const DEFAULT_MS = 50;
+  if (typeof process === 'undefined') return DEFAULT_MS;
+  const face = process.env.NEXT_PUBLIC_FACE_PREATTACK_MS;
+  if (face !== undefined && face !== '') {
+    const n = Number(face);
+    if (Number.isFinite(n) && n >= 0) return Math.min(150, n);
+  }
+  const tts = process.env.NEXT_PUBLIC_TTS_MOUTH_PREATTACK_MS;
+  if (tts !== undefined && tts !== '') {
+    const n = Number(tts);
+    if (Number.isFinite(n) && n >= 0) return Math.min(150, n);
+  }
+  return DEFAULT_MS;
+}
+
+/**
+ * Optional output/device latency (ms): positive = sound reaches the ear later than
+ * `currentTime` suggests — subtract from playhead so lips stay aligned with what is heard.
+ */
+function readOutputLatencyMsPreferFace(): number {
+  if (typeof process === 'undefined') return 0;
+  const face = process.env.NEXT_PUBLIC_FACE_OUTPUT_LATENCY_MS;
+  if (face !== undefined && face !== '') {
+    const n = Number(face);
+    if (Number.isFinite(n) && n >= 0) return Math.min(220, n);
+  }
+  const lip = process.env.NEXT_PUBLIC_LIP_AUDIO_OUTPUT_LATENCY_MS;
+  if (lip !== undefined && lip !== '') {
+    const n = Number(lip);
+    if (Number.isFinite(n) && n >= 0) return Math.min(220, n);
+  }
+  return 0;
+}
+
+const TTS_SYNC_OFFSET_SEC = readEnvOffsetMsPreferFace() / 1000;
+const TTS_PREATTACK_SEC = readPreattackMsPreferFace() / 1000;
+const TTS_OUTPUT_LATENCY_SEC = readOutputLatencyMsPreferFace() / 1000;
+
+/** RMS → viseme strength (power damping); tune with lip level in browser. */
+const LIP_RMS_SILENCE = 0.0026;
+const LIP_RMS_SENS = 5.6;
+
+/**
+ * Azure viseme id → VRM mouth morph weights (index 0–21).
+ * Frequency bands (analyser) modulate narrow vs rounded blend shapes below.
+ */
+/** Sibilants / high-frequency energy → narrow (spread front, teeth) */
+const SHAPE_NARROW: MouthShape = {
+  aa: 0.2,
+  ih: 0.55,
+  ee: 0.62,
+  oh: 0.08,
+  ou: 0.05,
+};
+
+/** Vowel back / low-frequency emphasis → rounded (O / U) */
+const SHAPE_ROUNDED: MouthShape = {
+  aa: 0.28,
+  ih: 0.12,
+  oh: 0.58,
+  ou: 0.55,
+  ee: 0.1,
+};
+
+function lerpMouth(a: MouthShape, b: MouthShape, t: number): MouthShape {
+  const u = THREE.MathUtils.clamp(t, 0, 1);
+  return {
+    aa: THREE.MathUtils.lerp(a.aa, b.aa, u),
+    ih: THREE.MathUtils.lerp(a.ih, b.ih, u),
+    oh: THREE.MathUtils.lerp(a.oh, b.oh, u),
+    ou: THREE.MathUtils.lerp(a.ou, b.ou, u),
+    ee: THREE.MathUtils.lerp(a.ee, b.ee, u),
+  };
+}
+
+function scaleMouth(m: MouthShape, s: number): MouthShape {
+  return {
+    aa: m.aa * s,
+    ih: m.ih * s,
+    oh: m.oh * s,
+    ou: m.ou * s,
+    ee: m.ee * s,
+  };
+}
+
+/**
+ * Map high vs low band energy to [0,1] where 1 ≈ narrow (S/T/Z), 0 ≈ rounded (O/U).
+ */
+function narrowWeightFromBandEnergies(high: number, low: number): number {
+  const sum = high + low + 1e-5;
+  const ratio = high / sum;
+  return THREE.MathUtils.clamp((ratio - 0.42) * 2.2 + 0.5, 0, 1);
+}
+
+function sumByteFrequencyBand(
+  buf: Uint8Array,
+  hzPerBin: number,
+  hzLo: number,
+  hzHi: number,
+): { sum: number; count: number } {
+  const n = buf.length;
+  const i0 = Math.max(0, Math.min(n - 1, Math.floor(hzLo / hzPerBin)));
+  const i1 = Math.max(0, Math.min(n - 1, Math.ceil(hzHi / hzPerBin)));
+  let sum = 0;
+  let count = 0;
+  for (let i = i0; i <= i1; i++) {
+    sum += buf[i];
+    count += 1;
+  }
+  return { sum, count: Math.max(1, count) };
+}
+
 const AZURE_VISEME_TO_BLEND: ReadonlyArray<Partial<{ aa: number; ih: number; oh: number; ou: number; ee: number }>> = [
   {},
   { aa: 0.55, oh: 0.15 },
@@ -109,6 +250,39 @@ function setMouthKeys(
   }
 }
 
+/** VRM / Vroid-style jaw opening — driven by viseme jaw + live audio RMS for believable speech. */
+const MOUTH_OPEN_ALIASES = [
+  'mouthOpen',
+  'mouth',
+  'MouthOpen',
+  'jawOpen',
+  'JawOpen',
+] as const;
+
+function applyRmsToMouthOpen(
+  em: NonNullable<VRM['expressionManager']>,
+  lipRms: number,
+  jawVisemeProxy: number,
+  blend: number,
+): void {
+  const rmsTerm = THREE.MathUtils.clamp(lipRms * 12.5, 0, 0.92);
+  const jawTerm = THREE.MathUtils.clamp(jawVisemeProxy * 0.55, 0, 0.88);
+  const tgt = THREE.MathUtils.clamp(jawTerm * 0.5 + rmsTerm * 0.55, 0, 0.96);
+  for (const name of MOUTH_OPEN_ALIASES) {
+    const cur = exprGet(em, name);
+    exprSet(em, name, THREE.MathUtils.lerp(cur, tgt, blend));
+  }
+}
+
+function decayMouthOpen(em: NonNullable<VRM['expressionManager']>, spd: number): void {
+  for (const name of MOUTH_OPEN_ALIASES) {
+    const cur = exprGet(em, name);
+    if (cur > 0.002) {
+      exprSet(em, name, THREE.MathUtils.lerp(cur, 0, spd));
+    }
+  }
+}
+
 export type VisemeCue = { t: number; id: number };
 
 export type LipSyncManagerProps = {
@@ -134,6 +308,9 @@ export default function LipSyncManager({
   const prevTalkingRef = useRef(false);
   const mouthCooldownUntilRef = useRef(0);
   const smoothRef = useRef({ ...ZERO_MOUTH });
+  const freqByteBufRef = useRef<Uint8Array | null>(null);
+  /** Smoothed 0 = rounded (O/U), 1 = narrow (S/T/Z); lerped each frame to avoid choppy jumps */
+  const smoothNarrowWeightRef = useRef(0.5);
   const visemeUnitCheckedRef = useRef(false);
   const visemeIsMs = useRef(false);
 
@@ -141,8 +318,10 @@ export default function LipSyncManager({
   const lastActiveCueTRef = useRef(0);
   const lastDebugLogAtRef = useRef(0);
   const lastLipDriftConsoleAtRef = useRef(0);
+  const lastFaceSyncLogAtRef = useRef(0);
   const speechEmphasisRef = useRef(0);
   const lipObsFrameRef = useRef(0);
+  const utteranceGenTrackedRef = useRef(-1);
 
   useEffect(() => {
     installUserGestureAudioUnlock();
@@ -193,6 +372,7 @@ export default function LipSyncManager({
       resetDriftOffset();
       lastVisemeIdRef.current = -2;
       visemeUnitCheckedRef.current = false;
+      smoothNarrowWeightRef.current = 0.5;
     };
 
     window.addEventListener('avatar:speak:start', onSpeakStart);
@@ -215,6 +395,13 @@ export default function LipSyncManager({
   useFrame((_, delta) => {
     const em = vrm?.expressionManager;
     if (!em) return;
+
+    const ug = getUtteranceGeneration();
+    if (ug !== utteranceGenTrackedRef.current) {
+      utteranceGenTrackedRef.current = ug;
+      visemeUnitCheckedRef.current = false;
+      visemeIsMs.current = false;
+    }
 
     const talking = isTalkingRef.current;
     const tc = getVisemeCues();
@@ -262,7 +449,13 @@ export default function LipSyncManager({
       sm.oh = THREE.MathUtils.lerp(sm.oh, 0, spd);
       sm.ou = THREE.MathUtils.lerp(sm.ou, 0, spd);
       sm.ee = THREE.MathUtils.lerp(sm.ee, 0, spd);
+      smoothNarrowWeightRef.current = THREE.MathUtils.lerp(
+        smoothNarrowWeightRef.current,
+        0.5,
+        Math.min(1, safeDelta * 14),
+      );
       setMouthKeys(em, sm.aa, sm.ih, sm.oh, sm.ou, sm.ee, 1);
+      decayMouthOpen(em, Math.min(1, safeDelta * 16));
       return;
     }
     prevTalkingRef.current = true;
@@ -271,6 +464,9 @@ export default function LipSyncManager({
     const queue = tc.length > 0 ? tc : visemeCueQueueRef.current;
     const analyser = analyserRef?.current ?? null;
 
+    let lipRms = 0;
+    let ampMul = 0;
+    let freqBlend: MouthShape | null = null;
     if (analyser) {
       const n = analyser.fftSize;
       let td = timeDomainBufRef.current;
@@ -284,7 +480,34 @@ export default function LipSyncManager({
       let sum = 0;
       for (let i = 0; i < n; i++) sum += td[i] * td[i];
       const rms = Math.sqrt(sum / n);
+      lipRms = rms;
       patchSpeechEmotionEnergy(Math.min(1, rms * 4.5));
+
+      const sr = analyser.context.sampleRate;
+      const hzPerBin = sr / analyser.fftSize;
+      const fc = analyser.frequencyBinCount;
+      if (!freqByteBufRef.current || freqByteBufRef.current.length !== fc) {
+        freqByteBufRef.current = new Uint8Array(fc);
+      }
+      analyser.getByteFrequencyData(
+        freqByteBufRef.current as unknown as Uint8Array<ArrayBuffer>,
+      );
+      const fbuf = freqByteBufRef.current;
+      const lowBand = sumByteFrequencyBand(fbuf, hzPerBin, 160, 2400);
+      const highBand = sumByteFrequencyBand(fbuf, hzPerBin, 3600, 14000);
+      const lowNorm = lowBand.sum / lowBand.count / 255;
+      const highNorm = highBand.sum / highBand.count / 255;
+      const targetNW = narrowWeightFromBandEnergies(highNorm, lowNorm);
+      smoothNarrowWeightRef.current = THREE.MathUtils.lerp(
+        smoothNarrowWeightRef.current,
+        targetNW,
+        Math.min(1, safeDelta * 17),
+      );
+      ampMul = Math.min(1, lipRms * 5.2);
+      freqBlend = scaleMouth(
+        lerpMouth(SHAPE_ROUNDED, SHAPE_NARROW, smoothNarrowWeightRef.current),
+        ampMul,
+      );
     }
 
     if (queue.length > 0 && !visemeUnitCheckedRef.current) {
@@ -305,9 +528,10 @@ export default function LipSyncManager({
       !!audio &&
       !Number.isNaN(audio.currentTime) &&
       audio.currentTime >= 0 &&
-      audio.readyState >= AUDIO_READY_MIN;
+      (audio.readyState >= AUDIO_READY_MIN ||
+        (queue.length > 0 && !audio.paused && audio.readyState >= AUDIO_READY_FALLBACK));
 
-    /** Lip sync playhead = `audio.currentTime` only (no artificial anticipation offset). */
+    /** Lip sync playhead = audio time + sync offset + optional pre-attack (cue lookup). */
     const VISEME_ANTICIPATION_SEC = 0;
 
     let tgtAa = 0;
@@ -318,9 +542,17 @@ export default function LipSyncManager({
 
     let tSec = 0;
     if (audioReady) {
-      tSec = timelineAudio
-        ? Math.max(0, getPlaybackTimeSec() - VISEME_ANTICIPATION_SEC)
-        : Math.max(0, audio!.currentTime - VISEME_ANTICIPATION_SEC);
+      const decodeSec = timelineAudio
+        ? getPlaybackTimeSec()
+        : audio!.currentTime;
+      tSec = Math.max(
+        0,
+        decodeSec -
+          VISEME_ANTICIPATION_SEC +
+          TTS_SYNC_OFFSET_SEC +
+          TTS_PREATTACK_SEC -
+          TTS_OUTPUT_LATENCY_SEC,
+      );
     }
 
     /** Viseme timeline is authoritative: no analyser / fake mouth before audio is ready. */
@@ -382,7 +614,7 @@ export default function LipSyncManager({
               const span = nextT - curT;
               let u = (tSec - curT) / span;
               u = u * u * (3 - 2 * u);
-              const uBlend = u * 0.38;
+              const uBlend = u * 0.42;
               const nid = Math.max(0, Math.min(AZURE_VISEME_TO_BLEND.length - 1, nextC.id));
               const nr = AZURE_VISEME_TO_BLEND[nid];
               if (nr) {
@@ -395,7 +627,7 @@ export default function LipSyncManager({
             }
           }
 
-          const COART_WINDOW = 0.08;
+          const COART_WINDOW = 0.11;
           if (nextVisemeId >= 0 && nextVisemeT < Infinity) {
             const gap = nextVisemeT - tSec;
             if (gap < COART_WINDOW && gap >= 0) {
@@ -403,7 +635,7 @@ export default function LipSyncManager({
               const nextId = Math.max(0, Math.min(AZURE_VISEME_TO_BLEND.length - 1, nextVisemeId));
               const next = AZURE_VISEME_TO_BLEND[nextId];
               if (next) {
-                const k = coartBlend * 0.42;
+                const k = coartBlend * 0.46;
                 tgtAa = THREE.MathUtils.lerp(tgtAa, next.aa ?? 0, k);
                 tgtIh = THREE.MathUtils.lerp(tgtIh, next.ih ?? 0, k);
                 tgtOh = THREE.MathUtils.lerp(tgtOh, next.oh ?? 0, k);
@@ -424,12 +656,61 @@ export default function LipSyncManager({
       tgtEe = 0;
     }
 
+    /** Power-damped visemes: near-silent frames → closed mouth even if timeline has a cue. */
+    if (analyser && queue.length > 0 && audioReady) {
+      let visemePower =
+        lipRms < LIP_RMS_SILENCE ? 0 : Math.min(1, lipRms * LIP_RMS_SENS);
+      if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) {
+        const abIntent = useBrainStore.getState().avatarBehavior.intent;
+        const speakingLike = abIntent === 'explaining' || abIntent === 'emphasizing';
+        visemePower *= speakingLike ? 1 : 0.3;
+      }
+      tgtAa *= visemePower;
+      tgtIh *= visemePower;
+      tgtOh *= visemePower;
+      tgtOu *= visemePower;
+      tgtEe *= visemePower;
+    }
+
+    /** Blend viseme-driven mouth with frequency-weighted narrow/rounded shape (smooth lerp, no single-axis jaw). */
+    if (freqBlend && audioReady) {
+      const maxCueT =
+        queue.length > 0 ? queue.reduce((m, c) => Math.max(m, cueTSec(c)), 0) : 0;
+      const tailPastCue = queue.length > 0 && tSec > maxCueT + 0.04;
+      let accent: number;
+      if (queue.length === 0) {
+        accent = lipRms > 0.002 ? 1 : 0;
+      } else if (tailPastCue) {
+        accent = lipRms > 0.001 ? 0.9 : 0.2;
+      } else {
+        accent = 0.11 + 0.29 * ampMul;
+      }
+      if (accent > 0) {
+        const vis: MouthShape = {
+          aa: tgtAa,
+          ih: tgtIh,
+          oh: tgtOh,
+          ou: tgtOu,
+          ee: tgtEe,
+        };
+        const merged = lerpMouth(vis, freqBlend, accent);
+        tgtAa = merged.aa;
+        tgtIh = merged.ih;
+        tgtOh = merged.oh;
+        tgtOu = merged.ou;
+        tgtEe = merged.ee;
+      }
+    }
+
+    /**
+     * Exponential smoothing toward targets (time constants in seconds) so blend rate matches `delta`,
+     * not a fixed per-frame fraction — stable across 30/60/120 Hz and tab throttling.
+     */
     const blendChannel = (cur: number, tgt: number) => {
-      const blendUp = 0.4;
       const releasing = tgt < cur * 0.88 && cur > 0.18;
-      const blendDown = releasing ? 0.13 : 0.24;
-      const b = tgt >= cur ? blendUp : blendDown;
-      return THREE.MathUtils.lerp(cur, tgt, b);
+      const tauSec = tgt >= cur ? 0.042 : releasing ? 0.068 : 0.055;
+      const k = 1 - Math.exp(-safeDelta / tauSec);
+      return THREE.MathUtils.lerp(cur, tgt, Math.min(1, k));
     };
 
     sm.aa = blendChannel(sm.aa, tgtAa);
@@ -504,18 +785,44 @@ export default function LipSyncManager({
       });
     }
 
+    if (
+      process.env.NEXT_PUBLIC_DEBUG_FACE_SYNC === 'true'
+      && talking
+      && audio
+      && audioReady
+      && nowMs - lastFaceSyncLogAtRef.current > 2000
+    ) {
+      lastFaceSyncLogAtRef.current = nowMs;
+      const cueT = lastActiveCueTRef.current;
+      const driftMs =
+        queue.length > 0 && cueT >= 0 ? Math.round((tSec - cueT) * 1000) : null;
+      // eslint-disable-next-line no-console
+      console.log('[Face-Sync]', {
+        playheadSec: Number(tSec.toFixed(3)),
+        cues: queue.length,
+        lipRms: Number(lipRms.toFixed(4)),
+        driftMs,
+      });
+    }
+
     if (isObservabilityEnabled() && talking && audio && audioReady && queue.length > 0) {
       lipObsFrameRef.current += 1;
       if (lipObsFrameRef.current % 14 === 0) {
         const cueT = lastActiveCueTRef.current;
-        const playhead = timelineAudio
-          ? getPlaybackTimeSec() - VISEME_ANTICIPATION_SEC
-          : audio.currentTime - VISEME_ANTICIPATION_SEC;
+        const playhead =
+          (timelineAudio ? getPlaybackTimeSec() : audio.currentTime) -
+          VISEME_ANTICIPATION_SEC +
+          TTS_SYNC_OFFSET_SEC +
+          TTS_PREATTACK_SEC -
+          TTS_OUTPUT_LATENCY_SEC;
         reportLipSyncDriftMs(Math.abs(playhead - cueT) * 1000);
       }
     }
 
+    /** Viseme / jaw targets are independent of torso or arm pose — no skeleton layer clamps mouth weights. */
     setMouthKeys(em, out.aa, out.ih, out.oh, out.ou, out.ee, 1);
+    const jawProxy = Math.max(out.aa, out.oh * 0.92, out.ih * 0.45, out.ee * 0.38);
+    applyRmsToMouthOpen(em, lipRms, jawProxy, 0.26);
   }, -1);
 
   return null;

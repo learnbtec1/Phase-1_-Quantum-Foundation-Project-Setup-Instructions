@@ -28,8 +28,10 @@ export default function CameraPerception({ enabled, onSample }: Props) {
   }, []);
 
   useEffect(() => {
+    const w = typeof window !== 'undefined' ? (window as Window & { __cogniPerceptionCameraLive?: boolean }) : null;
     if (!enabled || typeof window === 'undefined') {
       stop();
+      if (w) w.__cogniPerceptionCameraLive = false;
       return;
     }
     let cancelled = false;
@@ -44,12 +46,14 @@ export default function CameraPerception({ enabled, onSample }: Props) {
           return;
         }
         streamRef.current = stream;
+        if (w) w.__cogniPerceptionCameraLive = true;
         const v = videoRef.current;
         if (v) {
           v.srcObject = stream;
           await v.play().catch(() => undefined);
         }
       } catch (e) {
+        if (w) w.__cogniPerceptionCameraLive = false;
         setErr('تعذّر تفعيل الكاميرا');
         console.warn('[CameraPerception]', e);
       }
@@ -57,6 +61,7 @@ export default function CameraPerception({ enabled, onSample }: Props) {
     return () => {
       cancelled = true;
       stop();
+      if (w) w.__cogniPerceptionCameraLive = false;
     };
   }, [enabled, stop]);
 

@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import type { BonePoseMap } from './PoseComposer';
+import { isPoseKeyProcedurallySuppressed } from './proceduralSuppressionContext';
 import {
   deterministicNoiseSpineChest,
   deterministicAttentionSeekingNudge,
@@ -19,6 +20,7 @@ const SHOULDER_LAG_SEC = 0.04;
 const HEAD_LAG_SEC = 0.08;
 
 function mulBone(finalPose: BonePoseMap, key: string, rx: number, ry: number, rz: number): void {
+  if (isPoseKeyProcedurallySuppressed(key)) return;
   const q = finalPose.get(key);
   if (!q) return;
   _e.set(rx, ry, rz, 'YXZ');
@@ -35,10 +37,9 @@ function mulFirst(
   rz: number,
 ): void {
   for (const key of keys) {
-    if (finalPose.has(key)) {
-      mulBone(finalPose, key, rx, ry, rz);
-      return;
-    }
+    if (!finalPose.has(key) || isPoseKeyProcedurallySuppressed(key)) continue;
+    mulBone(finalPose, key, rx, ry, rz);
+    return;
   }
 }
 
