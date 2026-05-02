@@ -1,0 +1,6 @@
+# Next.js 14 (App Router) on Netlify
+[build]
+  command = "npm run build"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"

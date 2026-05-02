@@ -1,0 +1,25 @@
+.env
+.venv
+venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+.next/
+out/
+dist/
+*.log
+.DS_Store
+Thumbs.db
+backend/data/*.sqlite
+
+# Temporary reference clones (upstream / GitHub parity — not app runtime env)
+_ref_quantum/
+_ref-quantum/
+
+# Large binary scene meshes — GitHub rejects >100MB; keep locally
+frontend/public/models/*.glb
+# Curriculum slide decks are large binaries — keep locally or use LFS
+backend/data/**/*.pptx

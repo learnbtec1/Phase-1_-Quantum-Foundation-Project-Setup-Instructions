@@ -1,0 +1,114 @@
+---
+description: EDUVERSE system law — read docs/EDUVERSE_CORE_SPEC.md; trust & fairness before revenue
+alwaysApply: true
+---
+
+# EDUVERSE (Cursor Rule Engine)
+
+## Source of truth (NON-OPTIONAL)
+
+Treat `docs/EDUVERSE_CORE_SPEC.md` as **system law** (not suggestions). If a task conflicts with it, **stop** and say so; prefer a spec-aligned alternative.
+
+## MUST enforce (no exceptions)
+
+1. **NEVER** break grading fairness (fair-teacher behavior; no harsher “examiner” shortcuts).
+2. **NEVER** fake or invent evidence; keep outputs explainable.
+3. **NEVER** modify subscription/plan state outside trusted backend + Stripe (no client-side plan, no “trust me” billing edits).
+4. **NEVER** expose sensitive data (secrets, PII, raw payment internals) in logs, API responses, or admin aggregates beyond what is already defined as safe.
+5. **NEVER** bypass `admin` / auth protections or rate limits for convenience.
+
+## Decision filter (before writing or merging code)
+
+Ask:
+
+- Does this **reduce user or teacher trust**?
+- Does this **weaken billing integrity** or auditability?
+- Does this **reduce explainability** of grades or product behavior?
+
+If **yes** to any → **reject** the approach; propose a safer, additive design.
+
+**Priority (overrides all other optimizations):** `Trust > Accuracy > UX > Revenue`
+
+## Development mode
+
+- Prefer **additive** changes, **non-destructive** refactors, **backward compatibility** for APIs and data unless the spec explicitly authorizes a breaking migration.
+
+## Change intent (REQUIRED)
+
+Before **any** material change, declare (in the reply, commit message, or PR — agent must make this explicit in-session):
+
+- **What** is the **goal** of this change? (one sentence)
+- **Why** is it **needed now**? (timetrigger, bug, spec, not “nicer”)
+- **What problem** does it **solve** for users, teachers, or the business?
+
+**If the intent is unclear, speculative, or “refactor for elegance” with no user problem → DO NOT APPLY** (stop and ask the human to state intent, or reject).
+
+This blocks drive-by “improvements” that are not tied to a real need.
+
+## Change classification
+
+**Every** change should be explicitly classified (in your reasoning or the PR description):
+
+| Level | Examples |
+|-------|----------|
+| **LOW RISK** | UI-only, styling, copy/text, theming, non-behavioral assets |
+| **MEDIUM RISK** | New endpoints, new features, non-critical services, additive DB, docs-only tooling |
+| **HIGH RISK** | Assessment / grading **logic**, **usage** tracking or quotas, **billing** / Stripe, **admin** analytics or insights, auth bypass vectors, data that affects money or reported metrics |
+
+**If the change is HIGH RISK**, before applying or merging:
+
+1. **Explain** user- and system-level **impact** (who breaks, what mis-reports, what could be charged wrongly).
+2. **List** **affected systems** (e.g. assessment pipeline, `usage_stats` / `usage_events`, webhooks, admin dashboards).
+3. **Confirm** **backward compatibility** (APIs, events, invoice rows, plan checks) or document the controlled breaking change.
+4. **Suggest** a **rollback plan** (revert commit, feature flag off, SQL backfill, Stripe dashboard check).
+
+**If the change is not safe under the decision filter and spec → DO NOT APPLY** (or stop and require human/product sign-off).
+
+## Diff awareness (MANDATORY)
+
+Before **applying** edits (or before recommending a final patch set):
+
+1. Give a **short diff summary** (what behavior or structure changes, not only “files edited”).
+2. **List impacted file paths** (and note any **protected / HIGH RISK** file).
+3. **Highlight critical paths** touched (e.g. assessment pipeline, `usage_service`, `billing` webhook, admin analytics, auth).
+
+**If the change touches multiple core systems** (e.g. assessment + usage + billing in one go) → require **extra justification** in the change intent, stronger rollback note, and prefer **smaller, sequenced** PRs unless the user explicitly asked for a coordinated change.
+
+**If you cannot see the full impact** (e.g. missing file context) → do not claim safety; read more of the repo or **narrow** the change.
+
+## When you suggest code
+
+- **Order of operations:** change **intent** → **classification** → **diff awareness** → then code.
+- Call out **risks** (especially grading, usage, billing, PII).
+- **Reference** the spec or the relevant file paths when the change touches core principles.
+- **Avoid** unstated assumptions; ask one precise question if a requirement is ambiguous and the answer changes trust or fairness.
+
+## Protected files (default HIGH RISK)
+
+These paths are **always** treat-as-**HIGH RISK** unless the task is a trivial, behavior-preserving fix (e.g. typo in comment) — still classify and state so.
+
+Edits here can break **fairness**, **quotas**, **revenue integrity**, or **admin trust**. Treat as a **safety layer**: do not touch lightly.
+
+| Area | Path (from repo root) |
+|------|------------------------|
+| Grading / RAG assessment | `backend/app/services/assessment_service.py` |
+| Usage quotas & events | `backend/app/services/usage_service.py` |
+| Stripe / billing API | `backend/app/api/v1/endpoints/billing.py` |
+| Admin analytics & insights | `backend/app/services/admin_analytics_service.py` |
+
+**If you must modify one of these:**
+
+1. **Explain** concrete risks (users, money, grades, or reported metrics).
+2. **Justify** why the change is required and how it preserves spec principles.
+3. **Preserve backward compatibility** for API contracts, DB shapes, and billing behavior unless an explicit migration + sign-off is described in the task.
+
+Prefer extending via **new functions**, **feature flags**, or **additive schema** over rewriting core paths.
+
+## Quick links (implementation anchors)
+
+- Assessment / grading: `backend` assessment pipeline and services; do not “simplify” rubric or evidence without product sign-off.
+- Usage: success-path counting only; limits before execution; see `usage_service` + `usage_stats` / `usage_events`.
+- Billing: Stripe webhooks and backend-only plan updates; see `billing` endpoints and crud.
+- Admin: `get_current_admin`, backup paths, aggregated analytics only.
+
+When in doubt, re-read `docs/EDUVERSE_CORE_SPEC.md` and choose the path that best preserves **trust** and **fairness**.

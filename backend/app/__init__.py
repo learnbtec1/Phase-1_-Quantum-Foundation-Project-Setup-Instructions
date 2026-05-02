@@ -1,0 +1,1 @@
+# EDUVERS-CORE application package

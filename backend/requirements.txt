@@ -1,0 +1,58 @@
+# ==============================================================================
+# EDUVERS-CORE Backend Requirements 
+# ==============================================================================
+
+# --- Core Web Framework ---
+fastapi>=0.115.0 
+uvicorn[standard]>=0.32.0 
+pydantic>=2.5.0 
+pydantic-settings>=2.0.0 
+python-multipart>=0.0.9 
+
+# --- Database & Vector Search ---
+psycopg[binary]>=3.1.18 
+pgvector>=0.3.0 
+
+# --- Security & Authentication ---
+python-jose[cryptography]>=3.3.0 
+passlib[bcrypt]>=1.7.4 
+# تم تثبيت bcrypt على النسخة 4.0.1 لحل مشكلة التوافق مع Python 3.12 
+# وتفادي خطأ الـ 72-byte في فحص passlib الداخلي.
+bcrypt==4.0.1 
+email-validator>=2.0.0
+fastapi-mail>=1.4.0
+pyotp>=2.9.0
+slowapi>=0.1.9
+# LLM / assessment: Redis per-user window (used with async redis in main lifespan)
+fastapi-limiter==0.1.6
+stripe>=7.0.0
+
+# --- Optional: error monitoring ---
+sentry-sdk[fastapi]>=2.0.0
+
+# --- AI & LLM Integration ---
+openai>=1.40.0 
+google-generativeai>=0.8.0
+python-dotenv>=1.0.0 
+
+# --- TTS: reference stack Edge TTS + ElevenLabs (tts_service.py) ---
+edge-tts>=6.1.12
+pydub>=0.25.1
+gTTS>=2.5.0
+
+# --- Optional: shared assessment result cache (multi-worker) ---
+redis>=5.0.0
+
+# --- Integrity self-tuning (optional least-squares; teacher feedback) ---
+numpy>=1.26.0
+
+# --- Document Ingestion & RAG (Cogni Knowledge Base) ---
+# pypdf: maintained fork of PyPDF2 API
+pypdf>=4.0.0
+# PyMuPDF: robust PDF text extraction (primary; pypdf fallback)
+pymupdf>=1.24.0
+# Word & PowerPoint for scripts/ingest_data.py
+python-docx>=1.1.0
+# Template-based BTEC record export
+docxtpl>=0.16.0
+python-pptx>=0.6.23

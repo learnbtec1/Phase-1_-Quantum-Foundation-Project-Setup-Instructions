@@ -1,0 +1,2 @@
+# Shell scripts must use LF so Linux/Docker shebang works (avoid UTF-16/CRLF confusion).
+*.sh text eol=lf
