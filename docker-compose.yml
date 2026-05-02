@@ -4,8 +4,10 @@ services:
   redis:
     image: redis:7-alpine
     container_name: eduverse_redis
+    # Host 6380 → container 6379: avoids clash when another Redis (e.g. eduvor-redis) already binds :6379.
+    # Backend keeps redis://redis:6379 inside the Compose network.
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
     command: ["redis-server", "--appendonly", "yes"]
