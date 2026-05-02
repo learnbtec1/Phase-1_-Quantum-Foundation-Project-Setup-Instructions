@@ -35,7 +35,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="ar" dir="rtl" className={`${cairo.variable} h-full`}>
-      <body className="font-cairo bg-midnight text-white min-h-screen antialiased">
+      <body className="font-sans min-h-screen antialiased cognie dark">
         <ServiceWorkerRegister />
         <AuthBootstrap />
         <DevLogFilter />
