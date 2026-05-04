@@ -493,23 +493,72 @@ def strip_internal_llm_markers(text: str) -> str:
 
 def user_message_for_llm(raw_message: str, context: dict) -> str:
     """
-    آخر دور user للنموذج: لا يُمرَّر نص [SYSTEM_EVENT:…] خام (يُنسَخ أحياناً في الرد).
-    يُستبدل بصياغة عربية داخلية قصيرة حسب السياق.
+    آخر دور user للنموذج: لا يُمرَّر نص [SYSTEM_EVENT:…] خام أبداً.
+    يُستبدل بتوجيه عربي داخلي نظيف قبل أن يصل إلى النموذج اللغوي.
+    الترتيب: فحص SYSTEM_EVENT أولاً (قبل أي return آخر) لضمان صفر تسريب.
     """
     raw = (raw_message or "").strip()
+
+    # ── PHASE 1: Intercept ALL [SYSTEM_EVENT:…] variants FIRST ───────────────
+    # Runs BEFORE `if stripped:` so even mixed messages (partial tag + other text)
+    # are caught and converted to a clean Arabic instruction.
+    if "[SYSTEM_EVENT:" in raw.upper():
+        _ru = raw.upper()
+        # Grade / assessment nudge
+        if any(k in _ru for k in ("التقييم", "GRADE", "درجت", "ASSESSMENT", "درجة".upper())):
+            return (
+                "الطالب أنهى للتو مسار تقييم. علّق بلطف باللهجة الأردنية على النتيجة "
+                "إن وُجدت في السياق، ثم اسأله عن نقطة يريد تحسينها."
+            )
+        # Silence / proactive ice-breaker
+        if any(k in _ru for k in ("صمت", "صامت", "SILENT", "SILENCE", "IDLE", "QUIET", "NUDGE")):
+            return (
+                "مبادرة بعد صمت: اطرح سؤالاً تفاعلياً واحداً قصيراً بالأردنية الدافئة "
+                "يرتبط بالدرس. لا تذكر الصمت أو أي وسم نظام."
+            )
+        # Welcome / greeting
+        if any(k in _ru for k in ("GREETING", "WELCOME", "قدّم".upper(), "ترحيب".upper(), "سلام".upper())):
+            return (
+                "ترحيب دافئ بالأردنية: قدّم نفسك كمعلّم رقمي كوجني وابدأ محادثة طبيعية."
+            )
+        # Internal thought / thinker proactive
+        if any(k in _ru for k in ("THOUGHT", "فكرة".upper(), "INTERNAL", "PROACTIVE")):
+            return (
+                "مبادرة لطيفة: ردّ بجملة واحدة قصيرة بالأردنية تُظهر الاهتمام "
+                "وادخل في موضوع الدرس مباشرة."
+            )
+        # BTEC / training mode
+        if any(k in _ru for k in ("BTEC", "تدريب".upper(), "TRAINING")):
+            return (
+                "الطالب في وضع التدريب. ابدأ بسؤال BTEC مناسب بالأردنية "
+                "دون ذكر اسم الوضع أو أي وسم نظام."
+            )
+        # Subject / focus selection
+        if any(k in _ru for k in ("SUBJECT", "مادة".upper(), "موضوع".upper(), "FOCUS")):
+            return (
+                "الطالب اختار مادة للتركيز. انتقل بلطف إلى سؤال أو تحدٍّ يتناسب "
+                "مع المادة والمستوى المستهدف."
+            )
+        # Deep-link trigger
+        if "DEEP_LINK" in _ru:
+            return (
+                "الطالب دخل من رابط يحدد وحدة وهدف مستوى. افتح بلهجة أردنية طبيعية "
+                "وانتقل إلى سؤال يتناسب مع الهدف."
+            )
+        # Catch-all for any unrecognised SYSTEM_EVENT variant
+        return (
+            "توجيه داخلي: نفّذ المطلوب بجملة أو جملتين بالأردنية؛ "
+            "لا تنسخ أي وسم داخلي ولا تذكر [SYSTEM_EVENT]."
+        )
+
+    # ── No SYSTEM_EVENT: normal user message path ─────────────────────────────
     stripped = strip_internal_llm_markers(raw).strip()
     if stripped:
         return stripped
-    if "التقييم" in raw or "تقييم" in raw or "درجت" in raw:
-        return (
-            "الطالب أنهى للتو مسار تقييم. علّق بلطف باللهجة الأردنية على النتيجة إن وُجدت في سياق الجلسة، "
-            "ثم اسأله عن نقطة يريد تحسينها — دون ذكر وسم النظام أو الصمت."
-        )
     if context.get("proactive_engagement"):
         return (
             "مبادرة بعد صمت: الطالب لم يرسل رسالة منذ فترة. "
-            "ردّ بجملة قصيرة دافئة باللهجة الأردنية مع سؤال تفاعلي يرتبط بالدرس. "
-            "لا تذكر النظام أو الصمت أو أي وسم داخلي."
+            "ردّ بجملة قصيرة دافئة باللهجة الأردنية مع سؤال تفاعلي يرتبط بالدرس."
         )
     if context.get("thinker_proactive_speech"):
         return (
@@ -518,17 +567,13 @@ def user_message_for_llm(raw_message: str, context: dict) -> str:
         )
     if context.get("deep_link_trigger_event"):
         return (
-            "رابط معلّم (DEEP_LINK_TRIGGER): الطالب دخل من رابط يحدد وحدة وهدف مستوى (مثل Distinction). "
-            "افتح بلهجة أردنية طبيعية وتعرّف بلطف بالهدف والمادة، ثم انتقل إلى سؤال أو تحدٍّ يتناسب مع هذا الهدف — دون ذكر وسم النظام."
+            "رابط معلّم: الطالب دخل من رابط يحدد وحدة وهدف مستوى. "
+            "افتح بلهجة أردنية طبيعية وانتقل إلى سؤال مناسب."
         )
     if context.get("cogni_welcome_turn"):
         return "ترحيب افتتاحي قصير باللهجة الأردنية؛ قدّم نفسك كمعلّم رقمي كوجني."
-    if "[SYSTEM_EVENT:" in raw.upper():
-        return (
-            "توجيه داخلي للمعلّم: نفّذ المطلوب بلهجة أردنية طبيعية في جملة أو جملتين؛ "
-            "لا تنسخ هذا السطر ولا تذكر وسم النظام أو [SYSTEM_EVENT]."
-        )
     return raw or "…"
+
 
 
 def _jordanize(text: str) -> str:
@@ -1183,7 +1228,7 @@ async def _get_cogni_response(message: str, context: dict) -> str:
     system_content += (
         "\n\n## الحواس والقنوات الداخلية (لا تظهر للطالب)\n"
         "أنت معلم صوتي بصري؛ لا تقل إنك «نص فقط» أو إنك لا تسمع الطالب. "
-        "إن وُجد [SYSTEM_EVENT: ...] فلا تنسخه ولا تعِده في ردك.\n"
+        "قاعدة مطلقة: لا تنسخ أبداً أي وسم نظام مثل [SYSTEM_EVENT:...] أو [EMOTION:...] في نصّ ردّك للطالب. إذا وجدت مثل هذه الوسوم في السياق، تجاهلها تماماً وردّ بالمحتوى التعليمي فقط.
     )
 
     system_content += (
