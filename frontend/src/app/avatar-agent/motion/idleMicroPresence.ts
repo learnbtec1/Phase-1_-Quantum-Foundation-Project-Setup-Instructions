@@ -74,8 +74,15 @@ export function applyIdleMicroPresence(
 ): void {
   const dt = Math.min(Math.max(delta, 0), 0.08);
   if (!isBodyDrivenByVRMA(opts)) return;
-  /** Stabilization: no gesture-weight disable — keep continuous idle life. */
-  const gestureAtten = 1;
+  /**
+   * Stabilization: no gesture-weight disable — keep continuous idle life,
+   * but scale down by the current intent timing weight so idle stays quiet
+   * while a gesture is active.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const _intentW = Math.min(1, Math.max(0, (globalThis as any).__intentAttenuation ?? 0));
+  // Cinematic dominance: hard cut idle to 5% when gesture is clearly active.
+  const gestureAtten = _intentW > 0.4 ? 0.05 : 1 - _intentW * 0.95;
 
   const brain = getBehaviorMotionState();
   const now = masterClockNowMs();

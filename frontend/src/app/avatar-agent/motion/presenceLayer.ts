@@ -90,12 +90,20 @@ export function applyContinuousPresenceToFinalPose(
     const se = Math.min(1, Math.max(0, opts.speechEnergy));
     talkMul *= 0.9 + 0.1 * se;
   }
-  const modePresMul =
+  const modePresMulBase =
     opts.behaviorMode === 'LISTENING' ? 0.97
     : opts.behaviorMode === 'THINKING' ? 1.07
     : opts.behaviorMode === 'RESPONDING' ? 1.02
     : opts.behaviorMode === 'ANTICIPATING' ? 1.01
     : 1;
+  // Intent-driven attenuation: when a gesture timing weight is high,
+  // reduce presence down to 30% so intent shape dominates.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const _intentW = Math.min(1, Math.max(0, (globalThis as any).__intentAttenuation ?? 0));
+  // Cinematic dominance: when gesture is active (w > 0.4), slam presence to 10%.
+  const modePresMul = _intentW > 0.4
+    ? modePresMulBase * 0.1
+    : modePresMulBase * (1 - _intentW * 0.9);
 
   const n1 = noise3(t * 0.11, 1.7, 0.4);
   const n2 = noise3(0.3, t * 0.12, 0.55);

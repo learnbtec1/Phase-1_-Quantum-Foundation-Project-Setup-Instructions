@@ -46,6 +46,19 @@ import {
   applyHumanizationLayer,
   applyAttentionSeekingLayer,
 } from './motion/humanizationBoneApply';
+import {
+  applyBiomechanicalCorrections,
+  applyIntentMotionState,
+  applyNeuralLayer,
+  applySubconsciousLayer,
+  BONE_AXIS_MAP,
+  setBoneAxisMap,
+} from './motion/biomechanicalCorrectionLayer';
+import { applyFingerMicroLayer } from './motion/fingerMicroLayer';
+import { applyGazeIntentLayer } from './motion/gazeIntentLayer';
+import { tickGestureTiming, getGestureTimingSnapshot } from './motion/gestureTiming';
+import { detectIntent, detectIntentDetailed } from './motion/intentClassifier';
+console.log('[FILE_IMPORTED] biomechanicalCorrectionLayer, fingerMicroLayer, gazeIntentLayer, gestureTiming, intentClassifier');
 import { installVrmHumanoidBypassProbe } from '@/app/avatar-agent/motion/proceduralV2';
 import {
   tickHumanization,
@@ -64,6 +77,17 @@ import { tickUnifiedEnergy, getSmoothedUnifiedEnergy } from '@/lib/avatar/unifie
 import { patchSpeechEmotionEnergy } from '@/ai/voice/speechEmotionBridge';
 import { applyProceduralVrmaLifeOverlay } from './motion/proceduralVrmaLifeOverlay';
 import { applyCinematicMicroLayer } from './motion/cinematicMicroLayer';
+import {
+  AVATAR_DEBUG,
+  AVATAR_SAFE_MODE,
+  safeCall,
+  assertOrLog,
+  getErrorCount,
+  getHealthScore,
+  errorState,
+  tickSelfHealing,
+} from './motion/__avatarErrorTracker';
+import { sniper, activateSniper, deactivateSniper } from './motion/__errorSniper';
 import { blendPoseInto, generateIntentPose } from './motion/intentPoseGenerator';
 import { updateIntentFromBehaviorBrain } from '@/lib/avatar/motionIntentContinuity';
 import { deriveEmbodimentFromLLM, getCognitiveOrchestratorInputOverlay } from '@/lib/ai/cognitiveOrchestrator';
@@ -1428,6 +1452,15 @@ export function VRMSkeletonManager({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const w = window as any;
       w.__cogniRefs = { rua: ruaRef, rla: rlaRef, lua: luaRef, lla: llaRef, rh: rhRef, lh: lhRef };
+      // Error-sniper console helpers
+      w.activateSniper   = activateSniper;
+      w.deactivateSniper = deactivateSniper;
+      // Forced-motion test flag (set true in console to run Task-1 probe)
+      w.__forcedMotionTest  = w.__forcedMotionTest  ?? false;
+      // Forced motionState override (set true to run Task-6 probe)
+      w.__forceMotionState  = w.__forceMotionState  ?? false;
+      // Skip finalPoseToVrm test (set true to run Task-3 probe)
+      w.__skipFinalPoseToVrm = w.__skipFinalPoseToVrm ?? false;
       /** Read-only info object (NOT __avatarSkeletonGesture which AnimationController reads as string) */
       w.__cogniSkeletonInfo = {
         get currentGesture()        { return w.__avatarSkeletonGesture ?? 'idle'; },
@@ -1538,6 +1571,156 @@ export function VRMSkeletonManager({
     captureBind(m, 'lRingProximal',   lRingProximalRef.current);
     captureBind(m, 'lLittleProximal', lLittleProximalRef.current);
     captureBind(m, 'lThumbProximal',  lThumbProximalRef.current);
+
+    // ── [VRM_FORENSIC] one-shot humanoid bone map + resolution check ─────────
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (!(globalThis as any).__vrmForensicLogged) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).__vrmForensicLogged = true;
+      const _criticalNames = [
+        'head','neck','spine','chest','upperChest','hips',
+        'leftShoulder','rightShoulder',
+        'leftUpperArm','rightUpperArm','leftLowerArm','rightLowerArm',
+        'leftHand','rightHand',
+        'leftThumbProximal','leftIndexProximal','leftMiddleProximal','leftRingProximal','leftLittleProximal',
+        'rightThumbProximal','rightIndexProximal','rightMiddleProximal','rightRingProximal','rightLittleProximal',
+        'leftIndexIntermediate','leftIndexDistal',
+        'rightIndexIntermediate','rightIndexDistal',
+      ] as const;
+      const _resolved: Record<string, { node: string; rawOnly: boolean }> = {};
+      for (const n of _criticalNames) {
+        const norm = (() => { try { return humanoid.getNormalizedBoneNode(n as never) ?? null; } catch { return null; } })();
+        const raw  = (() => { try { return humanoid.getRawBoneNode(n as never) ?? null; } catch { return null; } })();
+        _resolved[n] = {
+          node: norm?.name ?? raw?.name ?? 'NOT_FOUND',
+          rawOnly: !!raw && !norm,
+        };
+      }
+      console.log('[VRM_BONES]', Object.keys(humanoid.humanBones ?? {}));
+      console.log('[BONE_NODE_CHECK]', _resolved);
+      // ── [AVATAR_AUDIT:BONES] — official one-shot bone health check ─────────
+      if (AVATAR_DEBUG || AVATAR_SAFE_MODE) {
+        const _auditNames = [
+          'head','neck','spine','chest','hips',
+          'leftShoulder','rightShoulder',
+          'rightUpperArm','leftUpperArm','rightLowerArm','leftLowerArm',
+          'rightHand','leftHand',
+        ] as const;
+        const _auditCaptured = _auditNames.filter(n => !!humanoid.getNormalizedBoneNode(n as never));
+        const _auditMissing  = _auditNames.filter(n => !humanoid.getNormalizedBoneNode(n as never));
+        console.log('[AVATAR_AUDIT:BONES]', {
+          captured:           _auditCaptured,
+          missing:            _auditMissing,
+          totalCapturedCount: _auditCaptured.length,
+          finalPoseKeyCount:  m.size,
+        });
+        if (_auditMissing.length > 0) {
+          console.warn('[AVATAR_AUDIT:BONES] ⚠️ Missing bones will produce dead motion for those joints:', _auditMissing);
+        }
+      }
+      console.log('[FINGER_MAP]', {
+        intermediatesInBind: !m.has('leftIndexIntermediate'),
+        distalsInBind:       !m.has('leftIndexDistal'),
+        proximalsInBind:     !!m.get('lIndexProximal'),
+      });
+      console.log('[SPINE_CHAIN]', {
+        spine:       !!m.get('spine'),
+        chest:       !!m.get('chest'),
+        upperChestResolved: !!(humanoid.getNormalizedBoneNode('upperChest' as never)),
+      });
+      console.log('[NAME_MAPPING]', {
+        'lua → leftUpperArm': _resolved['leftUpperArm'].node !== 'NOT_FOUND',
+        'rua → rightUpperArm': _resolved['rightUpperArm'].node !== 'NOT_FOUND',
+        'lla → leftLowerArm': _resolved['leftLowerArm'].node !== 'NOT_FOUND',
+        'rla → rightLowerArm': _resolved['rightLowerArm'].node !== 'NOT_FOUND',
+        'lh → leftHand': _resolved['leftHand'].node !== 'NOT_FOUND',
+        'rh → rightHand': _resolved['rightHand'].node !== 'NOT_FOUND',
+      });
+
+      // ── [AXIS_CALIBRATION] — inspect local axes in world space ────────────
+      // For each critical bone, compute where its local +X, +Y, +Z point in world.
+      // This tells us which local axis produces outward/inward/up motion without
+      // mutating the pose.
+      const _axisTargets: readonly [string, THREE.Object3D | null][] = [
+        ['head',           headRef.current],
+        ['neck',           neckRef.current],
+        ['leftUpperArm',   luaRef.current],
+        ['rightUpperArm',  ruaRef.current],
+        ['leftLowerArm',   llaRef.current],
+        ['rightLowerArm',  rlaRef.current],
+        ['leftHand',       lhRef.current],
+        ['rightHand',      rhRef.current],
+        ['leftShoulder',   leftShoulderRef.current],
+        ['rightShoulder',  rightShoulderRef.current],
+        ['spine',          spineRef.current],
+        ['chest',          chestRef.current],
+        ['hips',           hipsRef.current],
+      ];
+      const _vX = new THREE.Vector3(1, 0, 0);
+      const _vY = new THREE.Vector3(0, 1, 0);
+      const _vZ = new THREE.Vector3(0, 0, 1);
+      const _wX = new THREE.Vector3();
+      const _wY = new THREE.Vector3();
+      const _wZ = new THREE.Vector3();
+      const fmt = (v: THREE.Vector3) => ({
+        x: Number(v.x.toFixed(3)),
+        y: Number(v.y.toFixed(3)),
+        z: Number(v.z.toFixed(3)),
+      });
+      const axisReport: Record<string, Record<string, { x: number; y: number; z: number }>> = {};
+      const axisMap: Record<string, { openAxis: string; openSign: 1 | -1 }> = {};
+      for (const [name, node] of _axisTargets) {
+        if (!node) { axisReport[name] = { x: {x:0,y:0,z:0}, y:{x:0,y:0,z:0}, z:{x:0,y:0,z:0} }; continue; }
+        node.updateWorldMatrix(true, false);
+        // world basis = world rotation applied to local axis
+        _wX.copy(_vX).applyQuaternion(node.getWorldQuaternion(new THREE.Quaternion()));
+        _wY.copy(_vY).applyQuaternion(node.getWorldQuaternion(new THREE.Quaternion()));
+        _wZ.copy(_vZ).applyQuaternion(node.getWorldQuaternion(new THREE.Quaternion()));
+        axisReport[name] = { x: fmt(_wX), y: fmt(_wY), z: fmt(_wZ) };
+        // For arms, the axis with largest |world.x| component is "outward" (sideways).
+        // Positive world.x = right side of avatar; negative = left side.
+        const candidates = [
+          { local: 'x', wx: _wX.x },
+          { local: 'y', wx: _wY.x },
+          { local: 'z', wx: _wZ.x },
+        ];
+        const best = candidates.reduce((a, b) => Math.abs(b.wx) > Math.abs(a.wx) ? b : a);
+        axisMap[name] = {
+          openAxis: best.local,
+          openSign: (best.wx >= 0 ? 1 : -1) as 1 | -1,
+        };
+      }
+      // ── [REST] — current Euler of every critical bone BEFORE any motion ──
+      const _restReport: Record<string, { x: number; y: number; z: number }> = {};
+      const _eTmpRest = new THREE.Euler(0, 0, 0, 'YXZ');
+      for (const [name, node] of _axisTargets) {
+        if (!node) { _restReport[name] = { x: NaN, y: NaN, z: NaN }; continue; }
+        _eTmpRest.setFromQuaternion(node.quaternion, 'YXZ');
+        _restReport[name] = {
+          x: Number(_eTmpRest.x.toFixed(4)),
+          y: Number(_eTmpRest.y.toFixed(4)),
+          z: Number(_eTmpRest.z.toFixed(4)),
+        };
+      }
+      console.log('[REST]', _restReport);
+
+      console.log('[BONE_AXES_WORLD]', axisReport);
+      console.log('[AXIS_MAP]', axisMap);
+      console.log('[AXIS_CALIBRATION_HINT]',
+        'openAxis = local axis whose world-X projection is strongest. ' +
+        'openSign: +1 = points toward avatar right side, −1 = points toward avatar left side. ' +
+        'For LEFT arm: positive rotation on openAxis with openSign=+1 should ABDUCT (open outward). ' +
+        'For RIGHT arm: if openSign=+1, you need NEGATIVE rotation to open outward; reverse if openSign=−1. ' +
+        'To override: window.__setBoneAxisMap({ lua: { open: { axis: "y", sign: 1 } } })',
+      );
+      // Expose override on window for live calibration from DevTools.
+      if (typeof window !== 'undefined') {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).__setBoneAxisMap = setBoneAxisMap;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).__getBoneAxisMap = () => BONE_AXIS_MAP;
+      }
+    }
 
     const extraMap = extraGenerativeNodesRef.current;
     extraMap.clear();
@@ -3772,15 +3955,15 @@ export function VRMSkeletonManager({
 
     runWithProceduralSuppression(proceduralSuppressionKeys, () => {
       if (!isolateVrmaLayers) {
-        applyPresenceFromEmbodiment(finalPose, embFrame, {
+        safeCall('presenceLayer', () => applyPresenceFromEmbodiment(finalPose, embFrame, {
           motionSource,
           elapsedSec: t,
           delta: safeDelta,
           gestureLayerW,
           isTalking: speaking,
-        });
+        }), undefined);
 
-        applyIntentMotor(finalPose, embFrame, safeDelta, {
+        safeCall('intentMotor', () => applyIntentMotor(finalPose, embFrame, safeDelta, {
           motionSource,
           gestureLayerW,
           onMotionApplied: () => {
@@ -3793,12 +3976,12 @@ export function VRMSkeletonManager({
                   headWorldPosition: headRef.current.getWorldPosition(_EYE_HEAD_WORLD),
                 }
               : undefined,
-        });
+        }), undefined);
 
-        applyMotionDriver(finalPose, embFrame, safeDelta, {
+        safeCall('motionDriver', () => applyMotionDriver(finalPose, embFrame, safeDelta, {
           motionSource,
           gestureLayerW,
-        });
+        }), undefined);
       }
 
       if (!isolateVrmaLayers) {
@@ -3826,21 +4009,242 @@ export function VRMSkeletonManager({
           freezeHealNeckTilt: humRaw.freezeHealNeckTilt * cogAmp,
           freezeHealShoulder: humRaw.freezeHealShoulder * cogAmp,
         };
-        applyHumanizationLayer(finalPose, safeDelta, humSnap);
-        applyAttentionSeekingLayer(finalPose, t, getPerceptionAttentionSeekingStrength());
+        safeCall('humanization', () => applyHumanizationLayer(finalPose, safeDelta, humSnap!), undefined);
+        safeCall('attentionSeeking', () => applyAttentionSeekingLayer(finalPose, t, getPerceptionAttentionSeekingStrength()), undefined);
+
+        // ── New motion layers (biomechanical + finger + gaze + timing) ────────
+        // 1) LLM intent wins if provided; otherwise rule-based classifier runs on
+        //    the current utterance text (same source used by semantic hints).
+        const _llmIntent = embFrame.intent.activeIntent ?? '';
+        let _activeIntent = _llmIntent;
+        if (!_activeIntent) {
+          const _utter = getEmbodimentUtteranceTextForSemantics() ?? '';
+          const _detected = detectIntent(_utter);
+          if (_detected !== 'neutral') _activeIntent = _detected;
+        }
+        const _timingWeight = tickGestureTiming(_activeIntent);
+
+        // Simple motion-state hooks (body/gaze layers below also read _activeIntent directly).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const _motionState = ((globalThis as any).__cogniMotionState ??= {
+          openGesture: 0, headTilt: 0, headNod: 0,
+        });
+        _motionState.openGesture =
+          _activeIntent === 'explaining' || _activeIntent === 'emphasizing' ? 1 : 0;
+        _motionState.headTilt =
+          _activeIntent === 'thinking'   ? 0.05 :
+          _activeIntent === 'questioning' ? 0.08 : 0;
+        _motionState.headNod =
+          _activeIntent === 'confirming' || _activeIntent === 'agreeing' ? 0.10 : 0;
+
+        // ── TASK 5 — motionState presence check (throttled, ~1/s) ─────────────
+        if (typeof performance !== 'undefined') {
+          const _msNow = performance.now();
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const _msLast = (globalThis as any).__motionStateLogLastMs ?? 0;
+          if (_msNow - _msLast > 1000) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (globalThis as any).__motionStateLogLastMs = _msNow;
+            console.log('[MOTION_STATE]', {
+              openGesture:  _motionState.openGesture,
+              headTilt:     _motionState.headTilt,
+              headNod:      _motionState.headNod,
+              timingWeight: _timingWeight.toFixed(3),
+              activeIntent: _activeIntent || '(none)',
+              speaking,
+            });
+          }
+        }
+
+        // ── TASK 6 — forced motionState override (enable: window.__forceMotionState = true) ──
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        if ((typeof window !== 'undefined') && (window as any).__forceMotionState) {
+          const _ft6 = performance.now() * 0.002;
+          _motionState.headNod     = Math.sin(_ft6) * 0.3;
+          _motionState.headTilt    = Math.cos(_ft6) * 0.2;
+          _motionState.openGesture = 1.0;
+          console.log('[FORCED_MOTION_STATE]', _motionState);
+        }
+
+        // ── Capture bone rotations BEFORE intent apply ────────────────────
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const _shouldTrace = (() => {
+          const _nowT = typeof performance !== 'undefined' ? performance.now() : 0;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const _lastT = (globalThis as any).__frameTraceLastMs ?? 0;
+          if (_nowT - _lastT < 500) return false;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (globalThis as any).__frameTraceLastMs = _nowT;
+          return true;
+        })();
+
+        const _readEuler = (key: string): { x: number; y: number; z: number } => {
+          const q = finalPose.get(key);
+          if (!q) return { x: NaN, y: NaN, z: NaN };
+          const _eTmp = new THREE.Euler(0, 0, 0, 'YXZ');
+          _eTmp.setFromQuaternion(q, 'YXZ');
+          return { x: _eTmp.x, y: _eTmp.y, z: _eTmp.z };
+        };
+
+        const _boneBefore = _shouldTrace
+          ? {
+              head: _readEuler('head'),
+              neck: _readEuler('neck'),
+              lua: _readEuler('lua'),
+              rua: _readEuler('rua'),
+              lla: _readEuler('lla'),
+              rla: _readEuler('rla'),
+              lIndexProx: _readEuler('lIndexProximal'),
+            }
+          : null;
+
+        // ── Apply motionState onto finalPose bones (the missing connection) ──
+        const _applied = safeCall('intentMotion', () => applyIntentMotionState(finalPose, _motionState, _timingWeight, _activeIntent), { applied: false, headNod: 0, headTilt: 0, armOpen: 0 });
+
+        if (_shouldTrace) {
+          const _afterIntent = {
+            head: _readEuler('head'),
+            neck: _readEuler('neck'),
+            lua: _readEuler('lua'),
+            rua: _readEuler('rua'),
+            lla: _readEuler('lla'),
+            rla: _readEuler('rla'),
+            lIndexProx: _readEuler('lIndexProximal'),
+          };
+          const _delta = (b: string, a: { x: number; y: number; z: number }) => {
+            const b0 = (_boneBefore as Record<string, { x: number; y: number; z: number }>)[b];
+            return {
+              dx: Number((a.x - b0.x).toFixed(4)),
+              dy: Number((a.y - b0.y).toFixed(4)),
+              dz: Number((a.z - b0.z).toFixed(4)),
+            };
+          };
+          console.log('[FRAME_TRACE]', {
+            intent: _activeIntent,
+            timingWeight: Number(_timingWeight.toFixed(3)),
+            motionState: { ..._motionState },
+            speaking,
+          });
+          console.log('[BONE_MAPPING]', {
+            head: finalPose.has('head'),
+            neck: finalPose.has('neck'),
+            lua: finalPose.has('lua'),
+            rua: finalPose.has('rua'),
+            lla: finalPose.has('lla'),
+            rla: finalPose.has('rla'),
+            lh: finalPose.has('lh'),
+            rh: finalPose.has('rh'),
+            lIndexProx: finalPose.has('lIndexProximal'),
+            totalKeys: finalPose.size,
+          });
+          console.log('[BONE_DELTA_AFTER_INTENT]', {
+            head: _delta('head', _afterIntent.head),
+            neck: _delta('neck', _afterIntent.neck),
+            lua:  _delta('lua',  _afterIntent.lua),
+            rua:  _delta('rua',  _afterIntent.rua),
+            lla:  _delta('lla',  _afterIntent.lla),
+            rla:  _delta('rla',  _afterIntent.rla),
+            lIndexProx: _delta('lIndexProx', _afterIntent.lIndexProx),
+          });
+          console.log('[TIMING_WEIGHT]', Number(_timingWeight.toFixed(4)));
+          console.log('[AMPLIFIED_MOTION]', {
+            hn: Number((_applied.headNod ?? 0).toFixed(4)),
+            ht: Number((_applied.headTilt ?? 0).toFixed(4)),
+            og: Number((_applied.armOpen ?? 0).toFixed(4)),
+            weight: Number(_timingWeight.toFixed(4)),
+          });
+          console.log('[CINEMATIC]', {
+            intent: _activeIntent,
+            weight: Number(_timingWeight.toFixed(4)),
+            hn: Number((_applied.headNod ?? 0).toFixed(4)),
+            ht: Number((_applied.headTilt ?? 0).toFixed(4)),
+            og: Number((_applied.armOpen ?? 0).toFixed(4)),
+            cinematicMode: _timingWeight > 0.4,
+          });
+          console.log('[AXIS_APPLIED]', {
+            lua: `${BONE_AXIS_MAP.lua.open.axis}·${BONE_AXIS_MAP.lua.open.sign}`,
+            rua: `${BONE_AXIS_MAP.rua.open.axis}·${BONE_AXIS_MAP.rua.open.sign}`,
+            lla: `${BONE_AXIS_MAP.lla.open.axis}·${BONE_AXIS_MAP.lla.open.sign}`,
+            rla: `${BONE_AXIS_MAP.rla.open.axis}·${BONE_AXIS_MAP.rla.open.sign}`,
+            lh:  `${BONE_AXIS_MAP.lh.open.axis}·${BONE_AXIS_MAP.lh.open.sign}`,
+            rh:  `${BONE_AXIS_MAP.rh.open.axis}·${BONE_AXIS_MAP.rh.open.sign}`,
+          });
+          console.log('[POSE_AFTER_INTENT]', {
+            head: _afterIntent.head,
+            neck: _afterIntent.neck,
+          });
+          console.log('[POSE_AFTER_INTENT_ARMS]', {
+            lua: _afterIntent.lua,
+            rua: _afterIntent.rua,
+            lla: _afterIntent.lla,
+            rla: _afterIntent.rla,
+          });
+          // Stash for end-of-frame override detection
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (globalThis as any).__afterIntentSnapshot = _afterIntent;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (globalThis as any).__readEuler = _readEuler;
+        }
+
+        // ── Priority attenuation global — presence/idle read this flag ───────
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (globalThis as any).__intentAttenuation = _timingWeight;
+        safeCall('biomechanical', () => applyBiomechanicalCorrections(
+          finalPose,
+          t,
+          humSnap!.breathAmpMul,
+          speaking,
+        ), undefined);
+        safeCall('finger',       () => applyFingerMicroLayer(finalPose, t, speaking), undefined);
+        safeCall('gaze',         () => applyGazeIntentLayer(finalPose, _activeIntent, safeDelta, vrm), undefined);
+        safeCall('neural',       () => applyNeuralLayer(finalPose, t, !!speaking, _timingWeight), undefined);
+        safeCall('subconscious', () => applySubconsciousLayer(finalPose, t, _timingWeight, !!speaking), undefined);
+
+        // Throttled checkpoint log (~1/s)
+        if (typeof performance !== 'undefined') {
+          const _now = performance.now();
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const _last = (globalThis as any).__motionLayerLastLog ?? 0;
+          if (_now - _last > 1000) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (globalThis as any).__motionLayerLastLog = _now;
+            const ts = getGestureTimingSnapshot();
+            const _utterNow = getEmbodimentUtteranceTextForSemantics() ?? '';
+            const _detailed = detectIntentDetailed(_utterNow);
+            console.log('[INTENT]', _activeIntent);
+            console.log('[INTENT_ACTIVE]', _activeIntent !== 'neutral' && _activeIntent !== '');
+            console.log('[INTENT_TRACE]', {
+              llmIntent: _llmIntent,
+              ruleIntent: _detailed.intent,
+              confidence: _detailed.confidence,
+              reason: _detailed.reason,
+              utterSample: _utterNow.slice(0, 80),
+            });
+            console.log('[FILE_EXECUTED] motionLayers', {
+              intent: _activeIntent,
+              timingPhase: ts.phase,
+              timingWeight: Number(ts.weight.toFixed(3)),
+              breathAmp: Number(humSnap.breathAmpMul.toFixed(3)),
+              speaking,
+              motionState: _motionState,
+              applied: _applied,
+            });
+          }
+        }
+        // ── End new motion layers ─────────────────────────────────────────────
       }
 
       if (!isolateVrmaLayers) {
-        applyCinematicMicroLayer(finalPose, safeDelta, t, {
+        safeCall('cinematic', () => applyCinematicMicroLayer(finalPose, safeDelta, t, {
           speaking,
           energy: Math.max(0.15, speechDriveSnap.energy),
           syllablePulse: speechDriveSnap.syllablePulse,
-        });
-        applyMicroHumanBehavior(finalPose, embFrame, safeDelta, t, speaking);
-        applyIdleMicroPresence(finalPose, embFrame, safeDelta, {
+        }), undefined);
+        safeCall('microHuman', () => applyMicroHumanBehavior(finalPose, embFrame, safeDelta, t, speaking), undefined);
+        safeCall('idleMicro', () => applyIdleMicroPresence(finalPose, embFrame, safeDelta, {
           motionSource,
           gestureLayerW,
-        });
+        }), undefined);
       }
     });
 
@@ -3892,10 +4296,10 @@ export function VRMSkeletonManager({
       !VRMA_ISOLATION_TEST &&
       ((motionSource === 'VRMA' && vrmaLayerW > 0.02) || vrmaPlaybackFrozen || speaking)
     ) {
-      applyProceduralVrmaLifeOverlay(finalPose, t, safeDelta, {
+      safeCall('vrmaOverlay', () => applyProceduralVrmaLifeOverlay(finalPose, t, safeDelta, {
         intensityMul: proceduralMul,
         neckSway: personaMotion.neckSway,
-      });
+      }), undefined);
     }
 
     if (isAvatarMotionTraceOn() && motionTraceFrameRef.current % 100 === 0) {
@@ -4048,10 +4452,112 @@ export function VRMSkeletonManager({
       if (kinematicSnapKeys.size === 0) kinematicSnapKeys = undefined;
     }
 
-    applyFinalPoseToVrm({
+    // ── End-of-frame override detection (final compare vs after-intent) ──
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const _afterIntentSnap = (globalThis as any).__afterIntentSnapshot;
+    if (_afterIntentSnap) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).__afterIntentSnapshot = null;
+      const _read = (key: string): { x: number; y: number; z: number } => {
+        const q = finalPose.get(key);
+        if (!q) return { x: NaN, y: NaN, z: NaN };
+        const _eTmp = new THREE.Euler(0, 0, 0, 'YXZ');
+        _eTmp.setFromQuaternion(q, 'YXZ');
+        return { x: _eTmp.x, y: _eTmp.y, z: _eTmp.z };
+      };
+      const _finalSnap = {
+        head: _read('head'), neck: _read('neck'),
+        lua: _read('lua'), rua: _read('rua'),
+        lla: _read('lla'), rla: _read('rla'),
+        lIndexProx: _read('lIndexProximal'),
+      };
+      const _override = (b: keyof typeof _finalSnap) => {
+        const a = _afterIntentSnap[b] as { x: number; y: number; z: number };
+        const f = _finalSnap[b];
+        return {
+          ox: Number((f.x - a.x).toFixed(4)),
+          oy: Number((f.y - a.y).toFixed(4)),
+          oz: Number((f.z - a.z).toFixed(4)),
+        };
+      };
+      console.log('[BONE_DELTA_AFTER_ALL]', {
+        head: _override('head'), neck: _override('neck'),
+        lua: _override('lua'), rua: _override('rua'),
+        lla: _override('lla'), rla: _override('rla'),
+        lIndexProx: _override('lIndexProx'),
+      });
+      console.log('[POSE_BEFORE_VRM]', {
+        head: _finalSnap.head,
+        neck: _finalSnap.neck,
+        lua:  _finalSnap.lua,
+        rua:  _finalSnap.rua,
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).__poseForAfterVrmCheck = true;
+    }
+
+    // ── PHASE 1: Critical path asserts (non-throwing) ─────────────────────────
+    assertOrLog(finalPose.size > 0,                   'finalPose_empty_before_apply');
+    assertOrLog(!!vrm.humanoid,                       'vrm_humanoid_null');
+    assertOrLog(safeDelta >= 0 && safeDelta < 0.5,    `safeDelta_out_of_range:${safeDelta.toFixed(4)}`);
+
+    // ── PHASE 2: Health-based motion scaling (behind AVATAR_SAFE_MODE) ────────
+    if (AVATAR_SAFE_MODE && errorState.active) {
+      const _health = getHealthScore();
+      if (_health < 1.0) {
+        finalPose.forEach((q, key) => {
+          const rest = bindRef.current.get(key);
+          if (rest) q.slerp(rest, (1 - _health) * 0.5);
+        });
+        if (AVATAR_DEBUG) {
+          console.log('[ERROR_BEHAVIOR_LINK]', {
+            health:       _health.toFixed(2),
+            activeErrors: getErrorCount(),
+            disabledLayers: [...errorState.disabledLayers],
+          });
+        }
+      }
+    }
+
+    // ── PHASE 1: Beacon — perf-throttled, every 3 s (AVATAR_DEBUG only) ───────
+    if (AVATAR_DEBUG) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _beaconNow = typeof performance !== 'undefined' ? performance.now() : 0;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _lastBeacon = (globalThis as any).__avatarBeaconLastMs ?? 0;
+      if (_beaconNow - _lastBeacon >= 3000) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (globalThis as any).__avatarBeaconLastMs = _beaconNow;
+        console.log('[AVATAR_AUDIT:BEACON]', {
+          timeSec:          t.toFixed(1),
+          fps:              Math.round(1 / (safeDelta || 0.016)),
+          speaking,
+          motionSource,
+          finalPoseSize:    finalPose.size,
+          errorsLogged:     getErrorCount(),
+          systemHealth:     getHealthScore().toFixed(2),
+          selfHealingActive: errorState.active,
+          disabledLayers:   [...errorState.disabledLayers],
+        });
+      }
+    }
+
+    // ── PHASE 3: Self-healing tick — auto-resets errorState after 3 s clean ───
+    tickSelfHealing();
+
+    // TASK 4: sniper probes (only active when window.__sniperActive = true)
+    // activateSniper(['finalPose'])  — pauses DevTools exactly on throw
+    sniper('finalPose', () => {
+      if (finalPose.size === 0) throw new Error('finalPose is empty');
+      if (!vrm.humanoid)       throw new Error('vrm.humanoid is null');
+    });
+
+    safeCall('finalPoseToVrm', () => applyFinalPoseToVrm({
       finalPose,
       humanoid: vrm.humanoid ?? null,
       kinematicSnapKeys,
+      smoothLambda: 8,
+      maxRotationPerFrameRad: 0.35,
       boneRefs: {
         hips: hipsRef.current,
         spine: spineRef.current,
@@ -4078,13 +4584,118 @@ export function VRMSkeletonManager({
         lThumbProximal: lThumbProximalRef.current,
       },
       delta: safeDelta,
-    });
+    }), undefined);
+
+    // ─── [POSE_AFTER_VRM] — read actual scene-graph rotations post-apply ──
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if ((globalThis as any).__poseForAfterVrmCheck) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).__poseForAfterVrmCheck = false;
+      const _eTmp = new THREE.Euler(0, 0, 0, 'YXZ');
+      const _readNode = (node: THREE.Object3D | null | undefined) => {
+        if (!node) return { x: NaN, y: NaN, z: NaN };
+        _eTmp.setFromQuaternion(node.quaternion, 'YXZ');
+        return {
+          x: Number(_eTmp.x.toFixed(4)),
+          y: Number(_eTmp.y.toFixed(4)),
+          z: Number(_eTmp.z.toFixed(4)),
+        };
+      };
+      let _luaNode: THREE.Object3D | null = luaRef.current;
+      let _ruaNode: THREE.Object3D | null = ruaRef.current;
+      let _llaNode: THREE.Object3D | null = llaRef.current;
+      let _rlaNode: THREE.Object3D | null = rlaRef.current;
+      if (vrm.humanoid) {
+        try {
+          if (!_luaNode) _luaNode = vrm.humanoid.getNormalizedBoneNode('leftUpperArm') ?? null;
+          if (!_ruaNode) _ruaNode = vrm.humanoid.getNormalizedBoneNode('rightUpperArm') ?? null;
+          if (!_llaNode) _llaNode = vrm.humanoid.getNormalizedBoneNode('leftLowerArm') ?? null;
+          if (!_rlaNode) _rlaNode = vrm.humanoid.getNormalizedBoneNode('rightLowerArm') ?? null;
+        } catch { /* ignore */ }
+      }
+      console.log('[POSE_AFTER_VRM]', {
+        head: _readNode(headRef.current),
+        neck: _readNode(neckRef.current),
+        lua:  _readNode(_luaNode),
+        rua:  _readNode(_ruaNode),
+        lla:  _readNode(_llaNode),
+        rla:  _readNode(_rlaNode),
+      });
+    }
 
     // ─── vrm.update() — Phase 20 “heartbeat” ──────────────────────────────────
     // Every frame while the canvas runs: propagate humanoid + expressionManager + spring bones.
     // AnimationController (priority −2) and LipSyncManager (−1) write morphs first; this applies them.
+    // TASK 2: pre-vrm.update snapshot (throttled ~1/s)
+    const _diagNow  = typeof performance !== 'undefined' ? performance.now() : 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const _diagLast = (globalThis as any).__diagSnapshotLastMs ?? 0;
+    const _doDiagSnap = _diagNow - _diagLast > 1000;
+    if (_doDiagSnap) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).__diagSnapshotLastMs = _diagNow;
+      const _eT = new THREE.Euler(0, 0, 0, 'YXZ');
+      const _snapB = (node: THREE.Object3D | null) => {
+        if (!node) return null;
+        _eT.setFromQuaternion(node.quaternion, 'YXZ');
+        return { x: +_eT.x.toFixed(4), y: +_eT.y.toFixed(4), z: +_eT.z.toFixed(4) };
+      };
+      const _preSnap = { head: _snapB(headRef.current), lua: _snapB(luaRef.current), rua: _snapB(ruaRef.current) };
+      console.log('[DIAG_PRE_VRM_UPDATE]', _preSnap);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).__diagPreSnap = _preSnap;
+    }
+
     if (!VRM_HARD_ISOLATION) {
       vrm.update(safeDelta);
+    }
+
+    // TASK 2: post-vrm.update snapshot + override-detection
+    if (_doDiagSnap) {
+      const _eT2 = new THREE.Euler(0, 0, 0, 'YXZ');
+      const _snapB2 = (node: THREE.Object3D | null) => {
+        if (!node) return null;
+        _eT2.setFromQuaternion(node.quaternion, 'YXZ');
+        return { x: +_eT2.x.toFixed(4), y: +_eT2.y.toFixed(4), z: +_eT2.z.toFixed(4) };
+      };
+      const _postSnap = { head: _snapB2(headRef.current), lua: _snapB2(luaRef.current), rua: _snapB2(ruaRef.current) };
+      console.log('[DIAG_POST_VRM_UPDATE]', _postSnap);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _preStored = (globalThis as any).__diagPreSnap as { head: { x: number } | null } | undefined;
+      if (_preStored?.head && _postSnap.head) {
+        const _headDelta = Math.abs(_postSnap.head.x - _preStored.head.x);
+        if (_headDelta > 0.01) {
+          console.warn(
+            '[DIAG_VRM_UPDATE_OVERRIDE] WARNING vrm.update() changed head.x by', _headDelta.toFixed(4),
+            '=> vrm.lookAt or autoUpdateHumanBones is resetting bones!',
+            { before: _preStored.head.x, after: _postSnap.head.x },
+          );
+        } else {
+          console.log('[DIAG_VRM_UPDATE_OVERRIDE] OK head.x stable across vrm.update()');
+        }
+      }
+    }
+
+    // TASK 1: forced direct bone write test (enable: window.__forcedMotionTest = true)
+    // Run AFTER vrm.update() so this is the LAST write.
+    // If arms/head MOVE  => render pipeline OK, bug is upstream
+    // If arms/head STILL => bone/render pipeline broken
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if ((typeof window !== 'undefined') && (window as any).__forcedMotionTest) {
+      const _fmtSin = Math.sin(performance.now() * 0.002) * 0.3;
+      if (headRef.current) headRef.current.rotation.x = _fmtSin;
+      if (luaRef.current)  luaRef.current.rotation.z  =  0.8;
+      if (ruaRef.current)  ruaRef.current.rotation.z  = -0.8;
+      if (neckRef.current) neckRef.current.rotation.y = Math.sin(performance.now() * 0.001) * 0.15;
+      console.log('[FORCED_MOTION_TEST]', {
+        head_x:    headRef.current?.rotation.x.toFixed(3) ?? 'NULL_REF',
+        lua_z:     luaRef.current?.rotation.z.toFixed(3)  ?? 'NULL_REF',
+        rua_z:     ruaRef.current?.rotation.z.toFixed(3)  ?? 'NULL_REF',
+        refsExist: { head: !!headRef.current, lua: !!luaRef.current, rua: !!ruaRef.current },
+        verdict:   (!headRef.current && !luaRef.current)
+          ? 'REFS_NULL => bone mapping broken'
+          : 'refs_valid => if no movement, check scene graph parenting',
+      });
     }
 
     enforceAvatarRootStability(vrm);

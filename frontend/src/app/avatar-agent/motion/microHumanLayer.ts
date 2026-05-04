@@ -102,6 +102,15 @@ export function applyMicroHumanBehavior(
     noiseMul *= 0.97;
   }
 
+  // Cinematic dominance: when intent gesture is active, slam micro-human life.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const _microIntentW = Math.min(1, Math.max(0, (globalThis as any).__intentAttenuation ?? 0));
+  if (_microIntentW > 0.4) {
+    ampMul *= 0.10;
+    noiseMul *= 0.10;
+    jitterMul *= 0.10;
+  }
+
   const intent = emb.intent.activeIntent;
   const sinceMotionMs = emb.intent.startTime > 0 ? now - emb.intent.startTime : Number.POSITIVE_INFINITY;
   const lastCog = getLastIntentUpdateTime();
