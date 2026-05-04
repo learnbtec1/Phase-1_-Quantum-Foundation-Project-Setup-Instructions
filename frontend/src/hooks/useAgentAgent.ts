@@ -389,6 +389,11 @@ const INTERNAL_SYSTEM_EVENT_PREFIX = /^\[SYSTEM_EVENT:/i;
  * يزيل [SYSTEM_EVENT: …] من النص الظاهر (دفاع أمامي إن وصل من الخادم قديماً).
  */
 function stripInternalSystemEvents(raw: string): string {
+  // Phase 6: Debug guard — warn if the LLM response contains a leaked SYSTEM_EVENT tag.
+  // This should NEVER fire in normal operation.
+  if (raw && /\[SYSTEM_EVENT:/i.test(raw)) {
+    console.warn('[SYSTEM_EVENT_LEAK] Backend allowed tag through to frontend. Stripping now.', raw.slice(0, 120));
+  }
   return raw
     .replace(/\[SYSTEM_EVENT:\s*[\s\S]*?\]/gi, '')
     .replace(/\n{3,}/g, '\n\n')
