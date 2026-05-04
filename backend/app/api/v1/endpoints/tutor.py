@@ -1480,6 +1480,13 @@ async def _get_cogni_response(message: str, context: dict) -> str:
             )
         raw_reply = strip_internal_llm_markers(raw_reply)
         raw_reply = _maybe_jordanize_cogni_raw(raw_reply)
+        # ── Phase 2: SYSTEM_EVENT_LEAK guard ──────────────────────────────────
+        if "[SYSTEM_EVENT:" in (raw_reply or "").upper():
+            logger.warning(
+                "[SYSTEM_EVENT_LEAK] Tag survived strip_internal_llm_markers — forcing second pass. session=%s",
+                context.get("session_id", "?"),
+            )
+            raw_reply = strip_internal_llm_markers(raw_reply)
 
         try:
             from app.services.ethical_filter import apply_ethical_filter
