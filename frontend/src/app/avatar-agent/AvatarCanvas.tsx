@@ -12,20 +12,19 @@ import React, {
   type RefObject,
 } from 'react';
 import * as THREE from 'three';
-import { Canvas, useFrame, useThree, useLoader } from '@react-three/fiber';
-import type { ThreeEvent } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import {
   PerspectiveCamera,
   OrbitControls,
   Text,
-  TransformControls,
 } from '@react-three/drei';
 import {
   GLTFLoader,
   type GLTF,
   type GLTFParser,
 } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
+
+
 import { VRMLoaderPlugin, VRM } from '@pixiv/three-vrm';
 import { useBrainStore } from '@/store/useBrainStore';
 import { initBrainPersistence, flushBrainPersistence } from '@/lib/brainPersistence';
@@ -33,7 +32,7 @@ import { recordPersonalitySessionVisit } from '@/ai/avatar/personalityMemory';
 import { initMasterClockSession } from '@/lib/avatar/masterClock';
 import { applyBrainStatePayload, transitionFsmToListening } from '@/lib/avatar/behaviorExecutionContract';
 import type { BrainStatePayload } from '@/lib/avatar/brainStatePayload';
-import { clearAudioTimeline, patchTimelineCues, setPlaybackAudio } from '@/lib/avatar/audioTimeline';
+import { clearAudioTimeline, patchTimelineCues, setPlaybackAudio, clearVisemeTimelineCues, type AudioTimelineSource } from '@/lib/avatar/audioTimeline';
 import { initAvatarVoiceListener } from '@/ai/io/tts';
 import { startSpontaneousBehavior, stopSpontaneousBehavior } from '@/lib/behavior/SpontaneousBehavior';
 import { CameraUpLock } from './CameraUpLock';
@@ -58,56 +57,35 @@ import { dispatchAvatar } from '@/utils/events/normalizeAvatarEvents';
 import { avatarDebug, DEBUG_AVATAR } from '@/app/avatar-agent/debugAvatar';
 import { getSharedAudioContext } from '@/lib/audio/avatarAudioContext';
 import {
-  AVATAR_OFFICE_SCENE_DEFAULTS,
   getAvatarOfficeScenePosition,
-  OFFICE_GLB_PUBLIC_PATH,
   pickVrmUrl,
   AVATAR_GROUP_ROTATION_Y,
+  AVATAR_EQUIRECT_ENV_PUBLIC_PATH,
+  AVATAR_OFFICE_SCENE_DEFAULTS,
   PHYSICS_CONFIG,
-  readFloorBaselineOffsetEnv,
   readDebugFloorGridEnv,
-  FINAL_ROOM_POSITION,
-  getRoomGroupPosition,
   getWorldFloorY,
-  OFFICE_BACKGROUND_MESH_NAME,
   showGestureCalibrationUi,
-  showOfficeSceneEditorUi,
+  useAvatarBoundedRoomScene,
+  useAvatarEquirectSceneBackground,
+  useCognieHtmlBackdropUnderCanvas,
+  readAvatarStandYOffsetEnv,
+  readBoundedFootCalibYOffsetM,
 } from '@/config/avatar';
-import defaultOfficeScene from '@/config/office_scene.default.json';
-import {
-  ENV_ROOT_NAME,
-  type OfficeSceneFileV1,
-  type OfficeSceneObjectSnapshot,
-  applyOfficeSceneJson,
-  buildOfficeSceneJson,
-  cullFarEnvironmentMeshes,
-  resetGltfEnvironmentAndReapplyDefaults,
-  snapshotFromObject,
-} from '@/app/avatar-agent/scene/officeEnvironmentLayout';
-import {
-  setDeskScene,
-  clearDeskScene,
-  computeChairAnchor,
-  markDeskSceneTransformDirty,
-  resolveIfEnabled,
-} from './physics/WorldColliders';
+import { clearDeskScene, resolveIfEnabled } from './physics/WorldColliders';
 import { createAvatarPerformanceHandler } from '@/app/avatar-agent/avatarPerformanceBridge';
 import {
   applyFootFloorCalib,
   createLiftNode,
   runWorldFloorAntiDriftFrame,
 } from '@/app/avatar-agent/floorLockV121';
-import { ROOM_BOUNDS } from '@/app/avatar-agent/scene/RoomShell';
+import { ROOM_BOUNDS, getDefaultStandXZ } from '@/app/avatar-agent/scene/RoomShell';
+import { BoundedMiniRoom } from '@/app/avatar-agent/scene/BoundedMiniRoom';
 import { isObservabilityEnabled } from '@/lib/observability/config';
 import { ObservabilityOverlay } from '@/lib/observability/ObservabilityOverlay';
 import { ObservabilityR3F } from '@/lib/observability/ObservabilityR3F';
+import { EquirectSceneEnvironment } from './EquirectSceneEnvironment';
 
-const ROOM_POSITION_EPS = 1e-4;
-
-/** Metres — hide office meshes whose world position is farther than this (after room placement). */
-const ENV_FAR_CULL_WORLD_RADIUS = 150;
-
-/** V120 — lower-body bind snapshot for resetLowerBodyToIdle (f22f888b). */
 const LOWER_BONES_FLOOR = [
   'leftUpperLeg',
   'leftLowerLeg',
@@ -118,23 +96,26 @@ const LOWER_BONES_FLOOR = [
 ] as const;
 
 /**
- * World-floor lock — `applyFootFloorCalib` on mount (parent) + per-frame anti-drift (feet never below Y=0).
+ * World-floor lock — `applyFootFloorCalib` on mount (parent) + per-frame anti-drift.
+ * Bounded room passes `footTargetWorldY = ROOM_BOUNDS.floorY + sole gap`; legacy uses `getWorldFloorY()`.
  * Vertical correction is ONLY `liftNode.position.y`; do not clamp AvatarRoot Y to `ROOM_BOUNDS.floorY`.
  */
 function FloorLockRuntime({
   vrm,
   liftNode,
   groupRef,
+  footTargetWorldY,
 }: {
   vrm: VRM;
   liftNode: THREE.Group;
   groupRef: React.RefObject<THREE.Group | null>;
+  footTargetWorldY?: number;
 }) {
   const liftDebugFrameRef = useRef(0);
   useFrame(() => {
     const g = groupRef.current;
     if (g) {
-      runWorldFloorAntiDriftFrame(vrm, liftNode, g);
+      runWorldFloorAntiDriftFrame(vrm, liftNode, g, footTargetWorldY);
     }
     if (process.env.NODE_ENV === 'development' && DEBUG_AVATAR) {
       liftDebugFrameRef.current += 1;
@@ -164,13 +145,6 @@ function FloorBaselineDebugGrid() {
 
 type AvatarCanvasProps = {
   vrmUrl?: string;
-  /** عرض نموذج المكتب خلف الأفاتار */
-  showOfficeEnvironment?: boolean;
-  /** مسار GLB للمكتب (افتراضي من `OFFICE_GLB_PUBLIC_PATH`) */
-  officeGlbUrl?: string;
-  /** Uniform scale for office room `<group>` (default from `AVATAR_OFFICE_SCENE_DEFAULTS.officeScale`). */
-  officeScale?: number;
-  /** جذر الأفاتار (VRM) — مع المكتب: أرضية الغرفة وليس سطح المكتب (انظر `getAvatarOfficeScenePosition`) */
   avatarPosition?: [number, number, number];
   avatarScale?: number;
   visemeCueQueueRef?: MutableRefObject<VisemeCue[]>;
@@ -209,222 +183,6 @@ function ErrorFallback() {
   );
 }
 
-// ── Office scene editor (save/load layout JSON) ─────
-
-type TransformMode = 'translate' | 'rotate' | 'scale';
-
-function pickFirstMesh(hit: THREE.Object3D | null): THREE.Mesh | null {
-  let o: THREE.Object3D | null = hit;
-  while (o) {
-    if ((o as THREE.Mesh).isMesh) return o as THREE.Mesh;
-    o = o.parent;
-  }
-  return null;
-}
-
-function isBackgroundMeshOrDescendant(obj: THREE.Object3D, backgroundName: string): boolean {
-  let o: THREE.Object3D | null = obj;
-  while (o) {
-    if (o.name === backgroundName) return true;
-    o = o.parent;
-  }
-  return false;
-}
-
-type OfficeSceneWithEditorProps = {
-  url: string;
-  position: [number, number, number];
-  scale: number;
-  /** XZ probe for future floor raycast; GLB AABB uses the whole placed group. */
-  floorProbeXZ: [number, number];
-  editorEnabled: boolean;
-  transformMode: TransformMode;
-  gizmoVisible: boolean;
-  selectedUuid: string | null;
-  onSelect: (uuid: string | null, snap: OfficeSceneObjectSnapshot | null) => void;
-  officeGltfRef: MutableRefObject<GLTF | null>;
-};
-
-function OfficeSceneWithEditor({
-  url,
-  position,
-  scale,
-  floorProbeXZ: _floorProbeXZ,
-  editorEnabled,
-  transformMode,
-  gizmoVisible,
-  selectedUuid,
-  onSelect,
-  officeGltfRef,
-}: OfficeSceneWithEditorProps) {
-  void _floorProbeXZ;
-  const officeRootRef = useRef<THREE.Group>(null);
-  const roomEditGroupRef = useRef<THREE.Group | null>(null);
-  const [roomEditVersion, setRoomEditVersion] = useState(0);
-  const roomPositionLoggedRef = useRef(false);
-  const gltf = useLoader(GLTFLoader, url, (loader) => {
-    const dracoLoader = new DRACOLoader();
-    dracoLoader.setDecoderPath('/draco/');
-    dracoLoader.setDecoderConfig({ type: 'js' });
-    loader.setDRACOLoader(dracoLoader);
-  });
-
-  useLayoutEffect(() => {
-    officeGltfRef.current = gltf;
-    gltf.scene.traverse((obj) => {
-      if ((obj as THREE.Mesh).isMesh) {
-        const mesh = obj as THREE.Mesh;
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        if (mesh.material) {
-          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-          mats.forEach((m) => {
-            m.needsUpdate = true;
-          });
-        }
-      }
-    });
-    setDeskScene(gltf.scene);
-    return () => {
-      officeGltfRef.current = null;
-      clearDeskScene();
-    };
-  }, [gltf, officeGltfRef]);
-
-  useLayoutEffect(() => {
-    if (!gltf?.scene) return;
-    const scene = gltf.scene;
-    const hadEditGroup = !!scene.userData.roomContentEditGroup;
-    resetGltfEnvironmentAndReapplyDefaults(gltf, defaultOfficeScene as OfficeSceneFileV1);
-    const g = scene.userData.roomContentEditGroup as THREE.Group | undefined;
-    if (g) {
-      roomEditGroupRef.current = g;
-      if (!hadEditGroup) setRoomEditVersion((v) => v + 1);
-    }
-  }, [gltf]);
-
-  /** `ROOM_BOUNDS.floorY` tracks world floor + env offset only — never GLB Box3. */
-  const syncRoomFloorToWorld = useCallback(() => {
-    const next = getWorldFloorY() + readFloorBaselineOffsetEnv();
-    if (Math.abs(next - ROOM_BOUNDS.floorY) < 1e-3) return;
-    ROOM_BOUNDS.floorY = next;
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('room:bounds:applied', { detail: { floorY: next, source: 'world-floor' } }),
-      );
-    }
-    if (process.env.NODE_ENV === 'development' && DEBUG_AVATAR) {
-      console.log('[floor] ROOM_BOUNDS.floorY synced to world', { floorY: next });
-    }
-  }, []);
-
-  /** Apply room lift to `gltf.scene` root so walls + furniture (entire GLB graph) share one transform. */
-  useLayoutEffect(() => {
-    if (!gltf?.scene) return;
-    gltf.scene.position.set(position[0], position[1], position[2]);
-    gltf.scene.updateMatrixWorld(true);
-    const cull = cullFarEnvironmentMeshes(gltf.scene, ENV_FAR_CULL_WORLD_RADIUS);
-    if (process.env.NODE_ENV === 'development' && DEBUG_AVATAR && cull.hiddenCount > 0) {
-      console.warn('[AvatarCanvas] far office meshes hidden (world cull)', cull);
-    }
-    markDeskSceneTransformDirty();
-    computeChairAnchor();
-  }, [gltf, position, scale]);
-
-  useLayoutEffect(() => {
-    syncRoomFloorToWorld();
-  }, [gltf, position, scale, syncRoomFloorToWorld]);
-
-  useLayoutEffect(() => {
-    if (!gltf?.scene) return;
-    const s = gltf.scene;
-    if (!roomPositionLoggedRef.current) {
-      roomPositionLoggedRef.current = true;
-      console.log(
-        'OFFICE GLB root (gltf.scene) position — base FINAL_ROOM_POSITION + ROOM_Y_OFFSET on Y',
-        FINAL_ROOM_POSITION,
-        '→',
-        position,
-      );
-      console.log('gltf.scene.position (Three.js)', s.position.x, s.position.y, s.position.z);
-    }
-    if (
-      process.env.NODE_ENV === 'development' &&
-      (Math.abs(s.position.x - position[0]) > ROOM_POSITION_EPS ||
-        Math.abs(s.position.y - position[1]) > ROOM_POSITION_EPS ||
-        Math.abs(s.position.z - position[2]) > ROOM_POSITION_EPS)
-    ) {
-      console.warn('[AvatarCanvas] gltf.scene position differs from expected — check for overrides.', {
-        expected: [...position],
-        actual: [s.position.x, s.position.y, s.position.z],
-      });
-    }
-  }, [gltf, position]);
-
-  const selectedObject = useMemo((): THREE.Object3D | null => {
-    if (!selectedUuid) return null;
-    const rg = roomEditGroupRef.current;
-    if (rg && rg.uuid === selectedUuid) return rg;
-    return null;
-  }, [selectedUuid, roomEditVersion]);
-
-  useEffect(() => {
-    if (!editorEnabled) {
-      onSelect(null, null);
-    }
-  }, [editorEnabled, onSelect]);
-
-  const handleClick = useCallback(
-    (e: ThreeEvent<MouseEvent>) => {
-      if (!editorEnabled) return;
-      e.stopPropagation();
-      const mesh = pickFirstMesh(e.object);
-      if (!mesh) {
-        onSelect(null, null);
-        return;
-      }
-      if (isBackgroundMeshOrDescendant(mesh, OFFICE_BACKGROUND_MESH_NAME)) {
-        onSelect(null, null);
-        return;
-      }
-      const rg = roomEditGroupRef.current;
-      if (!rg) {
-        onSelect(null, null);
-        return;
-      }
-      onSelect(rg.uuid, snapshotFromObject(rg));
-    },
-    [editorEnabled, onSelect],
-  );
-
-  const handlePointerMissed = useCallback(() => {
-    if (!editorEnabled) return;
-    onSelect(null, null);
-  }, [editorEnabled, onSelect]);
-
-  const onTcChange = useCallback(() => {
-    markDeskSceneTransformDirty();
-    computeChairAnchor();
-    if (selectedObject) onSelect(selectedObject.uuid, snapshotFromObject(selectedObject));
-  }, [selectedObject, onSelect]);
-
-  return (
-    <group onPointerMissed={handlePointerMissed}>
-      <group ref={officeRootRef} scale={scale}>
-        <primitive object={gltf.scene} onClick={handleClick} />
-      </group>
-      {editorEnabled && gizmoVisible && selectedObject && (
-        <TransformControls
-          object={selectedObject}
-          mode={transformMode}
-          space="world"
-          onObjectChange={onTcChange}
-        />
-      )}
-    </group>
-  );
-}
-
 /**
  * Invisible floor plane that intercepts right-clicks and emits the XZ position.
  * Placed at the avatar's floor level (Y = avatarPositionY).
@@ -452,10 +210,21 @@ function FloorClickDetector({
   );
 }
 
-/** Office: camera on +Z side of avatar (same X), elevated; one-shot align after VRM load + label. */
+/** Office panorama / equirect path — elevated wide framing. */
 const OFFICE_CAMERA_FACE_Y = 2.5;
+/** Bounded 6×6 room: eye height ≈1.6 m — matches real interior perspective (less “top-down”). */
+const OFFICE_CAMERA_FACE_Y_BOUNDED = 1.62;
 const OFFICE_CAMERA_Z_OFFSET = 5;
+/**
+ * Bounded room: camera **in front of** the +Z glass façade (~3 m), not inside the box.
+ * ~5.5–6 m from avatar +Z matches a 40° FOV “window view” without wide‑lens stretch.
+ */
+const OFFICE_CAMERA_Z_OFFSET_BOUNDED_ROOM = 5.78;
 const OFFICE_LOOK_AT_Y_OFFSET = 1.25;
+/** Look-at ≈ face/chest height from avatar root (feet) — aligns with avatar integration. */
+const OFFICE_LOOK_AT_Y_OFFSET_BOUNDED = 1.42;
+/** Tight horizontal FOV for bounded room atlas / façade (see product art direction). */
+const BOUNDED_ROOM_CAMERA_FOV = 40;
 const OFFICE_CAMERA_LABEL_Y = 0.3;
 
 function OfficeAvatarCameraFaceSetup({
@@ -464,12 +233,18 @@ function OfficeAvatarCameraFaceSetup({
   avatarX,
   avatarY,
   avatarZ,
+  cameraEyeY,
+  cameraZOffset,
+  lookAtYOffset,
 }: {
   active: boolean;
   hasVrm: boolean;
   avatarX: number;
   avatarY: number;
   avatarZ: number;
+  cameraEyeY: number;
+  cameraZOffset: number;
+  lookAtYOffset: number;
 }) {
   const { camera, controls } = useThree();
   const appliedRef = useRef(false);
@@ -477,21 +252,32 @@ function OfficeAvatarCameraFaceSetup({
   useLayoutEffect(() => {
     if (!active || !hasVrm || appliedRef.current) return;
     appliedRef.current = true;
-    const look = new THREE.Vector3(avatarX, avatarY + OFFICE_LOOK_AT_Y_OFFSET, avatarZ);
-    camera.position.set(avatarX, OFFICE_CAMERA_FACE_Y, avatarZ + OFFICE_CAMERA_Z_OFFSET);
+    const look = new THREE.Vector3(avatarX, avatarY + lookAtYOffset, avatarZ);
+    camera.position.set(avatarX, cameraEyeY, avatarZ + cameraZOffset);
     camera.lookAt(look);
     const ctrl = controls as { target?: THREE.Vector3; update?: () => void } | undefined;
     if (ctrl?.target && typeof ctrl.update === 'function') {
       ctrl.target.copy(look);
       ctrl.update();
     }
-  }, [active, hasVrm, avatarX, avatarY, avatarZ, camera, controls]);
+  }, [
+    active,
+    hasVrm,
+    avatarX,
+    avatarY,
+    avatarZ,
+    camera,
+    controls,
+    cameraEyeY,
+    cameraZOffset,
+    lookAtYOffset,
+  ]);
 
   if (!active || !hasVrm) return null;
 
   const cx = avatarX;
-  const cz = avatarZ + OFFICE_CAMERA_Z_OFFSET;
-  const labelY = OFFICE_CAMERA_FACE_Y + OFFICE_CAMERA_LABEL_Y;
+  const cz = avatarZ + cameraZOffset;
+  const labelY = cameraEyeY + OFFICE_CAMERA_LABEL_Y;
 
   return (
     <Suspense fallback={null}>
@@ -512,9 +298,6 @@ function OfficeAvatarCameraFaceSetup({
 
 export default function AvatarCanvas({
   vrmUrl = pickVrmUrl(),
-  showOfficeEnvironment = true,
-  officeGlbUrl = OFFICE_GLB_PUBLIC_PATH,
-  officeScale = AVATAR_OFFICE_SCENE_DEFAULTS.officeScale,
   avatarPosition = getAvatarOfficeScenePosition(),
   avatarScale = AVATAR_OFFICE_SCENE_DEFAULTS.avatarScale,
   visemeCueQueueRef: visemeCueQueueProp,
@@ -526,23 +309,43 @@ export default function AvatarCanvas({
   generativeGestureWsUrl,
   onAgentSpeak,
 }: AvatarCanvasProps) {
+  const boundedRoomScene = useAvatarBoundedRoomScene();
+  const cognieHtmlBackdrop =
+    useCognieHtmlBackdropUnderCanvas() && !boundedRoomScene;
+  const equirectSceneBg =
+    useAvatarEquirectSceneBackground() && !boundedRoomScene;
+  const canvasAlpha = cognieHtmlBackdrop && !equirectSceneBg;
+
+  /** Bounded room: avatar root on `ROOM_BOUNDS.floorY` so atlas floor plane matches foot calibration baseline. */
+  const resolvedAvatarPosition = useMemo((): [number, number, number] => {
+    if (!boundedRoomScene) return avatarPosition;
+    const { x, z } = getDefaultStandXZ(ROOM_BOUNDS);
+    return [x, ROOM_BOUNDS.floorY + readAvatarStandYOffsetEnv(), z];
+  }, [boundedRoomScene, avatarPosition]);
+
+  /** Bounded room foot snap target: room floor + VRM bone→sole gap (default 0.10 m). Omit = use `getWorldFloorY()`. */
+  const boundedFootCalibTargetY = useMemo((): number | undefined => {
+    if (!boundedRoomScene) return undefined;
+    return ROOM_BOUNDS.floorY + readBoundedFootCalibYOffsetM();
+  }, [boundedRoomScene]);
+
   const [vrm, setVrm] = useState<VRM | null>(null);
   const [error, setError] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
   // Right-click → move avatar to floor position (starts at desk position)
   const [avatarXZ, setAvatarXZ] = useState<[number, number]>([
-    avatarPosition[0],
-    avatarPosition[2],
+    boundedRoomScene ? getDefaultStandXZ(ROOM_BOUNDS).x : avatarPosition[0],
+    boundedRoomScene ? getDefaultStandXZ(ROOM_BOUNDS).z : avatarPosition[2],
   ]);
   const floorClickScratchRef = useRef(new THREE.Vector3());
   const onAvatarFloorNavigate = useCallback(
     (x: number, z: number) => {
       const v = floorClickScratchRef.current;
-      v.set(x, avatarPosition[1], z);
+      v.set(x, resolvedAvatarPosition[1], z);
       resolveIfEnabled(v, PHYSICS_CONFIG.avatar.capsuleRadius);
       setAvatarXZ([v.x, v.z]);
     },
-    [avatarPosition[1]],
+    [resolvedAvatarPosition[1]],
   );
 
   // Shared Refs for Managers
@@ -622,109 +425,10 @@ export default function AvatarCanvas({
     vr.scene?.updateMatrixWorld(true);
   }, []);
 
-  /** GLB المكتب المحمّل داخل Canvas — للحفظ/التحميل JSON */
-  const officeGltfRef = useRef<GLTF | null>(null);
-  const sceneFileInputRef = useRef<HTMLInputElement>(null);
-  const [sceneEditorEnabled, setSceneEditorEnabled] = useState(false);
-  const [sceneTransformMode, setSceneTransformMode] = useState<TransformMode>('translate');
-  const [sceneGizmoVisible, setSceneGizmoVisible] = useState(true);
-  const [sceneSelectedUuid, setSceneSelectedUuid] = useState<string | null>(null);
-  const [sceneLive, setSceneLive] = useState<OfficeSceneObjectSnapshot | null>(null);
-
-  /** Stable `[x, y+ROOM_Y_OFFSET, z]` — base from `FINAL_ROOM_POSITION` in `@/config/avatar`. */
-  const roomGroupPosition = useMemo(() => getRoomGroupPosition(), []);
-
-  const onOfficeSceneSelect = useCallback((uuid: string | null, snap: OfficeSceneObjectSnapshot | null) => {
-    setSceneSelectedUuid(uuid);
-    setSceneLive(snap);
-  }, []);
-
-  /** أثناء محرر المشهد: تعطيل raycast على شبكة الـ VRM حتى لا يُختار الجسم بدل الأثاث */
   useEffect(() => {
-    if (!vrm?.scene || !sceneEditorEnabled) return;
-    const restores: { m: THREE.Mesh; r: THREE.Mesh['raycast'] }[] = [];
-    const noopRaycast: THREE.Mesh['raycast'] = function (_raycaster, _intersects) {
-      /* editor: ignore hits on avatar skin */
-    };
-    vrm.scene.traverse((o) => {
-      const m = o as THREE.Mesh;
-      if (m.isMesh) {
-        restores.push({ m, r: m.raycast });
-        m.raycast = noopRaycast;
-      }
-    });
-    return () => {
-      restores.forEach(({ m, r }) => {
-        m.raycast = r;
-      });
-    };
-  }, [vrm, sceneEditorEnabled]);
-
-  useEffect(() => {
-    if (!sceneEditorEnabled) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setSceneSelectedUuid(null);
-        setSceneLive(null);
-        setSceneGizmoVisible(false);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [sceneEditorEnabled]);
-
-  const handleSaveOfficeScene = useCallback(() => {
-    const gltf = officeGltfRef.current;
-    if (!gltf || typeof window === 'undefined') return;
-    const data = buildOfficeSceneJson(
-      gltf,
-      officeGlbUrl,
-      [...roomGroupPosition],
-      officeScale,
-    );
-    const dataStr = JSON.stringify(data, null, 2);
-    const blob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'office_scene.json';
-    a.click();
-    URL.revokeObjectURL(url);
-  }, [officeGlbUrl, officeScale, roomGroupPosition]);
-
-  const handlePickSceneFile = useCallback(() => {
-    sceneFileInputRef.current?.click();
+    clearDeskScene();
+    return () => clearDeskScene();
   }, []);
-
-  const onSceneFileChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      e.target.value = '';
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        try {
-          const parsed = JSON.parse(String(reader.result ?? '{}')) as OfficeSceneFileV1;
-          if (parsed.version !== 1 || !Array.isArray(parsed.objects)) {
-            console.warn('[AvatarCanvas] Invalid office_scene.json (expected version 1)');
-            return;
-          }
-          const gltf = officeGltfRef.current;
-          if (!gltf) return;
-          applyOfficeSceneJson(gltf, parsed);
-          gltf.scene.updateMatrixWorld(true);
-          cullFarEnvironmentMeshes(gltf.scene, ENV_FAR_CULL_WORLD_RADIUS);
-          computeChairAnchor();
-          setSceneSelectedUuid(null);
-          setSceneLive(null);
-        } catch (err) {
-          console.error('[AvatarCanvas] Failed to parse scene JSON', err);
-        }
-      };
-      reader.readAsText(file);
-    },
-    [],
-  );
 
   const spontaneousBehaviorEnabled = true;
 
@@ -991,7 +695,10 @@ export default function AvatarCanvas({
       const src = ctx.createMediaElementSource(audio);
       const analyser = ctx.createAnalyser();
       analyser.fftSize        = 512;  // more bins → better mouth resolution
-      analyser.smoothingTimeConstant = 0.65;
+      // Lowered 0.65 → 0.50: energy rises faster at speech onset so the
+      // motion pipeline (VRMSkeletonManager → tickUnifiedEnergy) sees
+      // non-zero RMS within the first render frame after play() resolves.
+      analyser.smoothingTimeConstant = 0.50;
       src.connect(analyser);
       analyser.connect(ctx.destination);
       analyserRef.current          = analyser;
@@ -1033,20 +740,21 @@ export default function AvatarCanvas({
 
     // Server audio path dispatches viseme timeline separately.
     const onVisemesTimeline = (e: Event) => {
-      const d = (e as CustomEvent<{ cues?: unknown[] }>).detail;
+      const d = (e as CustomEvent<{ cues?: unknown[]; source?: AudioTimelineSource }>).detail;
       if (!Array.isArray(d?.cues) || d.cues.length === 0) return;
       // Accept both { t, id } (VisemeCue) and raw WS shapes — cast to shared contract
       const validated = (d.cues as Array<{ t?: unknown; id?: unknown }>)
         .filter(c => typeof c.t === 'number' && typeof c.id === 'number')
         .map(c => ({ t: c.t as number, id: c.id as number }));
       if (validated.length > 0) {
-        patchTimelineCues(validated);
+        patchTimelineCues(validated, d.source);
         visemeCueQueueRef.current = validated;
       }
     };
 
     // Clear viseme queue and reset LipSync state at end of utterance
     const onVisemesClear = () => {
+      clearVisemeTimelineCues();
       visemeCueQueueRef.current = [];
     };
 
@@ -1121,26 +829,46 @@ export default function AvatarCanvas({
     vrmRef.current = vrm;
     if (!vrm || !liftNode || !groupRef.current) return;
     captureLowerBodyBindPose();
-    applyFootFloorCalib({ vrm, liftNode, group: groupRef.current });
+    applyFootFloorCalib({
+      vrm,
+      liftNode,
+      group: groupRef.current,
+      footTargetWorldY: boundedFootCalibTargetY,
+    });
     resetLowerBodyToIdle();
-  }, [vrm, liftNode, captureLowerBodyBindPose, resetLowerBodyToIdle]);
+  }, [vrm, liftNode, boundedFootCalibTargetY, captureLowerBodyBindPose, resetLowerBodyToIdle]);
+
+  /** Signals `useAgentAgent` to arm hands-free VAD — must fire after VRM + lift node exist (was never dispatched before). */
+  useEffect(() => {
+    if (typeof window === 'undefined' || !vrm || !liftNode) return;
+    queueMicrotask(() => {
+      window.dispatchEvent(
+        new CustomEvent('avatar:scene:ready', { detail: { source: 'AvatarCanvas' as const } }),
+      );
+    });
+  }, [vrm, liftNode]);
 
   const ax = avatarXZ[0];
-  const ay = avatarPosition[1];
+  const ay = resolvedAvatarPosition[1];
   const az = avatarXZ[1];
 
-  const cameraPosition: [number, number, number] = showOfficeEnvironment
-    ? [ax, OFFICE_CAMERA_FACE_Y, az + OFFICE_CAMERA_Z_OFFSET]
-    : [0, 1.38, -2.65];
-  const orbitTarget: [number, number, number] = showOfficeEnvironment
-    ? [ax, ay + OFFICE_LOOK_AT_Y_OFFSET, az]
-    : [0, 1.28, 0];
+  const cameraZOff = boundedRoomScene ? OFFICE_CAMERA_Z_OFFSET_BOUNDED_ROOM : OFFICE_CAMERA_Z_OFFSET;
+  const cameraEyeY = boundedRoomScene ? OFFICE_CAMERA_FACE_Y_BOUNDED : OFFICE_CAMERA_FACE_Y;
+  const lookYOffset = boundedRoomScene ? OFFICE_LOOK_AT_Y_OFFSET_BOUNDED : OFFICE_LOOK_AT_Y_OFFSET;
+  const perspectiveFov = boundedRoomScene ? BOUNDED_ROOM_CAMERA_FOV : 45;
+
+  const cameraPosition: [number, number, number] = [
+    ax,
+    cameraEyeY,
+    az + cameraZOff,
+  ];
+  const orbitTarget: [number, number, number] = [ax, ay + lookYOffset, az];
 
   // ROOT DIV MUST ALWAYS RENDER so r3fEventSourceRef.current is non-null when Canvas mounts.
   // This is the permanent fix for "Cannot read properties of null (reading 'addEventListener')".
   // Loading/error overlays are positioned on top — never use early return before this div.
   return (
-    <div ref={r3fEventSourceRef} className="relative w-full h-full bg-[#0a0a12]">
+    <div ref={r3fEventSourceRef} className="relative h-full w-full bg-transparent">
       <MotionTraceOverlay />
       <ObservabilityOverlay />
       {showGestureCalibrationUi() && (
@@ -1150,95 +878,6 @@ export default function AvatarCanvas({
         </>
       )}
       <BehaviorBrainHost motorSpeedMulRef={motorSpeedMulRef} isTalkingRef={isTalkingRef} />
-      {showOfficeEnvironment && showOfficeSceneEditorUi() && (
-        <>
-          <input
-            ref={sceneFileInputRef}
-            type="file"
-            accept="application/json,.json"
-            className="hidden"
-            onChange={onSceneFileChange}
-          />
-          <div className="pointer-events-auto absolute top-3 right-3 z-30 max-w-[min(100%,18rem)] rounded-lg border border-white/15 bg-black/70 px-3 py-2 text-xs text-gray-200 shadow-lg backdrop-blur-sm">
-            <div className="mb-2 font-semibold text-white/90">محرّر المشهد (المكتب)</div>
-            <label className="mb-2 flex cursor-pointer items-center gap-2">
-              <input
-                type="checkbox"
-                checked={sceneEditorEnabled}
-                onChange={(e) => {
-                  setSceneEditorEnabled(e.target.checked);
-                  if (!e.target.checked) {
-                    setSceneSelectedUuid(null);
-                    setSceneLive(null);
-                  }
-                }}
-                className="accent-sky-500"
-              />
-              <span>تفعيل التحريك / التحديد</span>
-            </label>
-            {sceneEditorEnabled && (
-              <>
-                <div className="mb-2 flex flex-wrap gap-1">
-                  {(['translate', 'rotate', 'scale'] as const).map((m) => (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => setSceneTransformMode(m)}
-                      className={`rounded px-2 py-0.5 capitalize ${
-                        sceneTransformMode === m
-                          ? 'bg-sky-600 text-white'
-                          : 'bg-white/10 text-gray-300 hover:bg-white/20'
-                      }`}
-                    >
-                      {m}
-                    </button>
-                  ))}
-                </div>
-                <label className="mb-2 flex cursor-pointer items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={sceneGizmoVisible}
-                    onChange={(e) => setSceneGizmoVisible(e.target.checked)}
-                    className="accent-sky-500"
-                  />
-                  <span>إظهار Gizmo</span>
-                </label>
-                <div className="mb-2 rounded border border-white/10 bg-black/40 p-2 font-mono text-[10px] leading-relaxed text-gray-300">
-                  {sceneLive ? (
-                    <>
-                      <div className="mb-1 text-sky-300/90">المحدد: {sceneLive.name}</div>
-                      <div>pos: {sceneLive.position.map((n) => n.toFixed(3)).join(', ')}</div>
-                      <div>rot (rad YXZ): {sceneLive.rotation.map((n) => n.toFixed(3)).join(', ')}</div>
-                      <div>scl: {sceneLive.scale.map((n) => n.toFixed(3)).join(', ')}</div>
-                    </>
-                  ) : (
-                    <span className="text-gray-500">
-                      انقر على الغرفة لتحريك المحتوى كاملاً (الخلفية ثابتة)…
-                    </span>
-                  )}
-                </div>
-                <div className="flex flex-wrap gap-1">
-                  <button
-                    type="button"
-                    onClick={handleSaveOfficeScene}
-                    className="rounded bg-emerald-700/90 px-2 py-1 text-white hover:bg-emerald-600"
-                  >
-                    حفظ JSON
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handlePickSceneFile}
-                    className="rounded bg-sky-700/90 px-2 py-1 text-white hover:bg-sky-600"
-                  >
-                    تحميل JSON
-                  </button>
-                </div>
-                <p className="mt-1 text-[10px] text-gray-500">Escape: إخفاء Gizmo وإلغاء التحديد</p>
-              </>
-            )}
-          </div>
-        </>
-      )}
       {(loading && !error) && (
         <div className="pointer-events-none absolute inset-0 z-10">
           <LoadingFallback />
@@ -1254,23 +893,32 @@ export default function AvatarCanvas({
         eventSource={r3fEventSourceRef as React.RefObject<HTMLElement>}
         frameloop="always"
         shadows
-        gl={{ powerPreference: 'high-performance', alpha: false, antialias: true }}
+        gl={{ powerPreference: 'high-performance', alpha: canvasAlpha, antialias: true }}
         style={{ width: '100%', height: '100%', display: 'block' }}
         onCreated={({ gl }) => {
           gl.outputColorSpace = THREE.SRGBColorSpace;
           gl.toneMapping = THREE.ACESFilmicToneMapping;
           gl.toneMappingExposure = 1.0;
+          if (canvasAlpha) {
+            gl.setClearColor(0x000000, 0);
+          } else if (boundedRoomScene) {
+            gl.setClearColor(0x0b0f14, 1);
+          } else if (equirectSceneBg) {
+            gl.setClearColor(0x000000, 1);
+          } else {
+            gl.setClearColor(0x1a1a2e, 1);
+          }
           gl.domElement.addEventListener('webglcontextlost', (e) => {
             e.preventDefault();
             setTimeout(() => window.location.reload(), 800);
           }, { once: true });
         }}
       >
-        {/* كاميرا أمام الأفاتار (جهة −Z) مع رؤية المكتب خلفه */}
+        {/* كاميرا أمام الأفاتار — غرفة مصغَّرة حقيقية (6×6 م) أو equirect / HTML حسب الإعداد */}
         <PerspectiveCamera
           makeDefault
           position={cameraPosition}
-          fov={45}
+          fov={perspectiveFov}
           near={0.05}
           far={8000}
         />
@@ -1281,23 +929,27 @@ export default function AvatarCanvas({
             • ambientLight + hemisphereLight + pointLight
             • directionalLight (key) مع castShadow + shadow-mapSize 2048×2048
             • directionalLight fill + rim (castShadow=false)
-            • Environment preset="city"
+            • Environment preset="apartment" (يُعطّل عند تفعيل equirect الاستوديو)
           → لا نُكرّر أياً منها هنا لتجنّب ضوءَي shadow-casting في نفس الـ Canvas،
             وهو ما تسبّب في "undefined.shadowIntensity" (فشل تهيئة directionalLightShadows).
         */}
-        <ComfortLightingRig />
+        <ComfortLightingRig
+          skipEnvironmentMap={equirectSceneBg || boundedRoomScene}
+          roomInteriorBoost={boundedRoomScene}
+        />
 
-        {/* ContactShadows removed — room floor is the ground surface now */}
+        {boundedRoomScene ? <BoundedMiniRoom /> : null}
 
-        {/* Fallback floor plane — shown only when office env is disabled */}
-        {!showOfficeEnvironment && (
-          <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
-            <planeGeometry args={[20, 20]} />
-            <meshStandardMaterial color="#1a1a2e" roughness={0.9} metalness={0.1} />
-          </mesh>
+        {equirectSceneBg && (
+          <Suspense fallback={null}>
+            <EquirectSceneEnvironment url={AVATAR_EQUIRECT_ENV_PUBLIC_PATH} />
+          </Suspense>
         )}
 
-        <color attach="background" args={['#1a1a2e']} />
+        {boundedRoomScene ? <color attach="background" args={['#0b0f14']} /> : null}
+        {!boundedRoomScene && !equirectSceneBg && !cognieHtmlBackdrop && (
+          <color attach="background" args={['#1a1a2e']} />
+        )}
         {/* fog disabled — was hiding room geometry at Z>4 */}
 
         <OrbitControls
@@ -1306,7 +958,7 @@ export default function AvatarCanvas({
           enableZoom
           enableRotate
           minDistance={0.05}
-          maxDistance={5000}
+          maxDistance={boundedRoomScene ? 11 : 5000}
           target={orbitTarget}
           minPolarAngle={0}
           maxPolarAngle={Math.PI}
@@ -1318,11 +970,14 @@ export default function AvatarCanvas({
         />
 
         <OfficeAvatarCameraFaceSetup
-          active={showOfficeEnvironment}
+          active={!!vrm}
           hasVrm={!!vrm}
           avatarX={ax}
           avatarY={ay}
           avatarZ={az}
+          cameraEyeY={cameraEyeY}
+          cameraZOffset={cameraZOff}
+          lookAtYOffset={lookYOffset}
         />
 
         <Suspense fallback={null}>
@@ -1330,14 +985,8 @@ export default function AvatarCanvas({
             <group
               ref={groupRef}
               name="AvatarRoot"
-              position={[avatarXZ[0], avatarPosition[1], avatarXZ[1]]}
-              rotation={[
-                0,
-                showOfficeEnvironment
-                  ? AVATAR_GROUP_ROTATION_Y + Math.PI
-                  : AVATAR_GROUP_ROTATION_Y,
-                0,
-              ]}
+              position={[avatarXZ[0], resolvedAvatarPosition[1], avatarXZ[1]]}
+              rotation={[0, AVATAR_GROUP_ROTATION_Y + Math.PI, 0]}
               scale={avatarScale}
             >
               {liftNode && <primitive object={liftNode} />}
@@ -1389,6 +1038,7 @@ export default function AvatarCanvas({
                   vrm={vrm}
                   liftNode={liftNode}
                   groupRef={groupRef}
+                  footTargetWorldY={boundedFootCalibTargetY}
                 />
               )}
               {observabilityEnabled && (
@@ -1398,32 +1048,11 @@ export default function AvatarCanvas({
           )}
         </Suspense>
 
-        <Suspense fallback={null}>
-          {showOfficeEnvironment && (
-            <group name="RoomGroup">
-              <group name={ENV_ROOT_NAME} position={[0, 0, 0]} scale={[1, 1, 1]}>
-                <OfficeSceneWithEditor
-                  url={officeGlbUrl}
-                  position={roomGroupPosition}
-                  scale={officeScale}
-                  floorProbeXZ={[avatarPosition[0], avatarPosition[2]]}
-                  editorEnabled={sceneEditorEnabled}
-                  transformMode={sceneTransformMode}
-                  gizmoVisible={sceneGizmoVisible}
-                  selectedUuid={sceneSelectedUuid}
-                  onSelect={onOfficeSceneSelect}
-                  officeGltfRef={officeGltfRef}
-                />
-              </group>
-            </group>
-          )}
-        </Suspense>
-
-        {readDebugFloorGridEnv() && showOfficeEnvironment && <FloorBaselineDebugGrid />}
+        {readDebugFloorGridEnv() ? <FloorBaselineDebugGrid /> : null}
 
         {/* Invisible floor — right-click moves the avatar */}
         <FloorClickDetector
-          floorY={avatarPosition[1]}
+          floorY={boundedRoomScene ? ROOM_BOUNDS.floorY : resolvedAvatarPosition[1]}
           onRightClick={onAvatarFloorNavigate}
         />
       </Canvas>

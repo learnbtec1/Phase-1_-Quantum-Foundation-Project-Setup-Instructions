@@ -70,7 +70,8 @@ export function applyCinematicMicroLayer(
 
   /** Idle baseline from caller (e.g. speechDrive) — keeps non-speech micro visible. */
   const en = speaking ? enRaw : Math.max(0.15, enRaw);
-  const speakMul = speaking ? 1 + 0.07 + en * 0.1 : 1 + 0.05 + en * 0.14;
+  /** Speaking branch slightly reduced so layered procedural expression stays visible. */
+  const speakMul = speaking ? 1 + 0.04 + en * 0.07 : 1 + 0.05 + en * 0.14;
   /** Raw coefficients ~1e-4 rad — too subtle alone; amplify when not speaking. */
   const idleAmplify = speaking ? 1 : 6.2;
   const s = s0 * speakMul * idleAmplify;
@@ -106,8 +107,8 @@ export function applyCinematicMicroLayer(
     * s
     * envMul;
 
-  /** Syllable-linked micro pitch — keeps head alive during speech without large motion */
-  const syllNod = sp * 0.0004 * s;
+  /** Syllable-linked micro pitch — reduced so expression/sequencer head motion reads clearly */
+  const syllNod = sp * 0.00026 * s;
 
   mulBoneDeltaEuler(finalPose, 'neck', headYaw * 0.42, headPitch * 0.4 + syllNod * 0.35, headRoll * 0.35);
   mulBoneDeltaEuler(finalPose, 'head', headYaw * 0.88, headPitch * 0.82 + syllNod, headRoll * 0.62);

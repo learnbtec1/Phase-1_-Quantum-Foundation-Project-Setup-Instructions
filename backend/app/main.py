@@ -227,6 +227,13 @@ async def lifespan(app_instance):
         logger.error("Edge TTS service initialization failed: %s", e)
         app_instance.state.tts_service = None
 
+    try:
+        from app.services.local_tts_startup import warmup_local_tts_instances
+
+        await warmup_local_tts_instances()
+    except Exception as _lu_exc:
+        logger.warning("Local TTS pool startup warmup skipped: %s", _lu_exc)
+
     # 3) TTS health-ping background task — updates _tts_health every 5 min
     _ping_task = asyncio.create_task(_tts_ping_loop())
     app_instance.state.tts_ping_task = _ping_task

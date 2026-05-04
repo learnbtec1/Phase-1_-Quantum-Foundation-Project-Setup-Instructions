@@ -78,6 +78,12 @@ import { getSpeechIntentHints } from '@/lib/avatar/speechIntentHints';
 import type { UserMirrorEmotion, UserSpeechRhythm } from '@/lib/avatar/userEmotionMirror';
 import type { BrainStatePayload } from '@/lib/avatar/brainStatePayload';
 import type { MotionBlendResult } from '@/lib/avatar/motionBlendContract';
+import {
+  ingestPedagogicalFromAgentFrame,
+  notifyBrainInteractionIntentChanged,
+} from '@/lib/avatar/cogniPersonaStance';
+import { resetUnifiedEnergyForSession } from '@/lib/avatar/unifiedEnergyModel';
+import { resetProceduralMotionSmoother } from '@/app/avatar-agent/motion/proceduralV2/motionComposition';
 
 // ─── Conversation turn ────────────────────────────────────────────────────────
 
@@ -591,6 +597,9 @@ export const useBrainStore = create<BrainState>()(
           gaze: next === 'listening' ? 'focus' : 'neutral',
         },
       });
+      if (changed) {
+        notifyBrainInteractionIntentChanged(next);
+      }
       return { changed, intent: next };
     },
 
@@ -691,6 +700,7 @@ export const useBrainStore = create<BrainState>()(
         pad,
         thinking:      false,
       });
+      ingestPedagogicalFromAgentFrame(frame);
     },
 
     recordEmotionalMoment: (userMood, topic) => {
@@ -768,6 +778,8 @@ export const useBrainStore = create<BrainState>()(
     },
 
     reset: () => {
+      resetUnifiedEnergyForSession();
+      resetProceduralMotionSmoother();
       setCognitiveOrchestratorLLMOutput(null);
       set({
         ...INITIAL,

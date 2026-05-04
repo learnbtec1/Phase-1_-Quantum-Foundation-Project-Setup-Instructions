@@ -86,7 +86,13 @@ const RE_EXPLAIN_AR = /(يعني|لأن|وبالتالي|بالتالي|لذلك
 
 const RE_THINK_EN =
   /\b(why|how come|what if|unsure|maybe|perhaps|not sure|i think|i guess|probably|might|could it|hmm)\b/i;
-const RE_THINK_AR = /(كيف|لماذا|لم|هل|ماذا|ربما|أظن|يمكن|غير متأكد|مو متأكد|مش متأكد|؟|\?)/u;
+/**
+ * Word-level Arabic hesitation / interrogative cues — the standalone `?` / `؟`
+ * was deliberately removed: a single trailing question mark in an explanatory
+ * sentence must NOT classify intent as `thinking` (it locks the expression
+ * engine into tilt-only motion).
+ */
+const RE_THINK_AR_WORDS = /(كيف|لماذا|لم |هل |ماذا|ربما|أظن|يمكن|غير متأكد|مو متأكد|مش متأكد)/u;
 
 const RE_STRONG_EN = /\b(very|important|critical|essential|must|definitely|strongly|key)\b/i;
 const RE_STRONG_AR = /(لازم|مهم جدا|مهمّ|جداً|جدا|ضروري|حرج|أساسي|بالغ الأهمية)/u;
@@ -105,9 +111,13 @@ export type CognitiveOrchestratorInput = {
 function inferIntentHeuristic(raw: string, lower: string, isAgentSpeaking: boolean): MotionIntentKind | null {
   if (!isAgentSpeaking || !raw.length) return null;
   const explain = RE_EXPLAIN_EN.test(raw) || RE_EXPLAIN_AR.test(raw);
-  const thinkCue =
-    RE_THINK_EN.test(lower) || RE_THINK_AR.test(raw) || /[؟?]/.test(raw);
-  if (thinkCue) return 'thinking';
+  /** Word-level hesitation is the only signal allowed to override an explanation cue. */
+  const wordThinkCue = RE_THINK_EN.test(lower) || RE_THINK_AR_WORDS.test(raw);
+  const hasQuestionMark = /[؟?]/.test(raw);
+
+  if (explain && !wordThinkCue) return 'explaining';
+  if (wordThinkCue) return 'thinking';
+  if (hasQuestionMark && !explain) return 'thinking';
   if (explain) return 'explaining';
   return null;
 }

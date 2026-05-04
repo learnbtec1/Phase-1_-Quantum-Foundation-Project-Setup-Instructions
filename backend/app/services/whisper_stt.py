@@ -60,11 +60,12 @@ def _patch_logging_handlers() -> None:
 _patch_logging_handlers()  # patch whatever exists now
 
 try:
-    from app.services.settings import STT_MIN_MS, STT_MAX_MB, STT_MIME_OK
+    from app.services.settings import STT_MIN_MS, STT_MAX_MB, STT_MIME_OK, STT_DURATION_SLACK_MS
 except Exception:
     STT_MIN_MS  = 400
     STT_MAX_MB  = 8
     STT_MIME_OK = ["audio/webm", "audio/ogg", "audio/wav", "audio/mp4"]
+    STT_DURATION_SLACK_MS = 60
 
 logger = logging.getLogger(__name__)
 
@@ -449,11 +450,23 @@ async def transcribe_audio(
             audio_array = np.interp(x_new, x_old, audio_array.astype(np.float64)).astype(np.float32)
             detected_sr = 16000
 
-        # Duration sanity check — Whisper needs at least 0.4 s (STT_MIN_MS)
+        # Duration sanity check — Whisper needs enough signal; allow slack for decode/rounding vs STT_MIN_MS.
         duration_ms = int(len(audio_array) / max(detected_sr, 1) * 1000)
-        if duration_ms < STT_MIN_MS:
-            logger.info("%s [STT_ERROR] duration_too_short ms=%d", label, duration_ms)
-            raise STTError("audio_too_short", f"مدة الصوت {duration_ms} ms أقل من الحد الأدنى ({STT_MIN_MS} ms)")
+        _slack = max(0, min(200, STT_DURATION_SLACK_MS))
+        _effective_min_ms = max(250, STT_MIN_MS - _slack)
+        if duration_ms < _effective_min_ms:
+            logger.info(
+                "%s [STT_ERROR] duration_too_short ms=%d (min=%d = STT_MIN_MS %d - slack %d)",
+                label,
+                duration_ms,
+                _effective_min_ms,
+                STT_MIN_MS,
+                _slack,
+            )
+            raise STTError(
+                "audio_too_short",
+                f"مدة الصوت {duration_ms} ms أقل من الحد الأدنى ({_effective_min_ms} ms)",
+            )
 
         def _run_transcription() -> str:
             """Blocking transcription — runs in executor."""

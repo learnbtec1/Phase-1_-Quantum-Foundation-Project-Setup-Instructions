@@ -1,10 +1,20 @@
 'use client';
 
 /**
- * When `NEXT_PUBLIC_DISABLE_VRMA` is truthy, all pre-baked `.vrma` mixer playback is bypassed.
- * Procedural layers (breathing, blink, lip-sync, lookAt) stay active — only macro skeleton tracks from VRMA stop.
+ * HARDCODED KILL SWITCH — env-var reading removed.
+ *
+ * VRMA mixer playback proved to hijack `motionSource` and suppress procedural
+ * motion even when the relevant `.env` flags were set, due to Next.js build-time
+ * caching of `process.env` values. Both functions are hard-wired to `true` so
+ * the procedural-only policy is guaranteed regardless of the build cache.
+ *
+ * To re-enable VRMA in future: revert this file and set the env vars.
  */
+
 export function isVrmaPlaybackGloballyDisabled(): boolean {
-  const v = (process.env.NEXT_PUBLIC_DISABLE_VRMA ?? '').trim().toLowerCase();
-  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+  return true; // HARDCODED: VRMA permanently off — procedural-only mode
+}
+
+export function isProceduralOnlyMotion(): boolean {
+  return true; // HARDCODED: procedural-only mode active
 }

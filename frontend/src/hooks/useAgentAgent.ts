@@ -3,7 +3,7 @@
  *
  * Orchestrates the complete Phase 4 pipeline:
  *
- *   [Microphone] → useVAD → WebSocket → [Backend]
+ *   [Microphone] → useVAD (armed after session + scene; closed on cold load) → WebSocket → [Backend]
  *       → JSON AgentFrame → BrainStore.processFrame()
  *       → AgentDirector (gestures, expressions, head, voice)
  *       → WebSocket `speech_data` + `playWsAgentTtsAudio` when enabled (single audio authority),
@@ -74,6 +74,7 @@ import {
 } from '@/ai/avatar/coSpeechPlanner';
 import { normalizeSpeechFrame, toAgentFrame } from '@/lib/frameNormalizer';
 import { dispatchAvatar } from '@/utils/events/normalizeAvatarEvents';
+import { diagVad } from '@/utils/diagnostics';
 import {
   analyzeIntent,
   intentToEmotionOverlay,
@@ -109,8 +110,28 @@ import {
   ipv4LoopbackWsUrl,
   buildDefaultWsAgentUrl,
   agentApiHealthUrlFromWsAgentUrl,
+  readWsConnectTimeoutMs,
+  agentWsSkippedByEnv,
+  WS_CLIENT_OPEN_TIMEOUT_CODE,
 } from '@/lib/wsAgentUrl';
 import { traceCogniIntegration } from '@/lib/integrationTrace';
+import { resumeSharedAudioContext } from '@/lib/audio/avatarAudioContext';
+
+/** Keep-alive ping period (ms); stay below typical proxy idle timeouts. */
+const WS_KEEPALIVE_PING_MS = 28_000;
+/** Close and reconnect when no pong arrives within this window while the socket reports OPEN (zombie TCP). */
+const WS_STALE_NO_PONG_MS = 60_000;
+/** Application-defined WebSocket close code for stale keep-alive (see RFC close codes 4000–4999). */
+const WS_STALE_KEEPALIVE_CLOSE_CODE = 4409;
+/** Expected inbound `speech_data` payloads stopped while WS TTS timeline is active (transport vs decoder freeze). */
+const WS_AUDIO_STALL_CLOSE_CODE = 4410;
+/** If no streamed audio chunk/time activity for this long while WS TTS timeline is armed, reconnect. */
+const WS_AUDIO_STALL_MS = 10_000;
+
+/** Exponential backoff (ms), capped at 10s — pass `attempts` after increment (first reconnect → 2000 ms). */
+function wsReconnectBackoffMs(attempts: number): number {
+  return Math.min(1000 * 2 ** attempts, 10_000);
+}
 
 /** When true (and backend `COGNI_WS_ALLOW_ANONYMOUS=true`), open `/ws/agent` without JWT subprotocol if no valid token. */
 function wsGuestModeEnabled(): boolean {
@@ -173,13 +194,18 @@ export interface AgentAgentOptions {
   autoReconnect?: boolean;
   /** BCP-47 language tag for TTS / VAD. Default: 'ar-JO' (Jordanian) */
   lang?:          string;
+  /**
+   * After the user starts the session (e.g. «ابدأ الآن»), arms hands-free VAD when WS is open and the scene is ready.
+   * Keeps the mic closed on initial page load. Default false.
+   */
+  sessionActive?: boolean;
 }
 
 /** Mic / Whisper pipeline phase for conversational UI status lines. */
 export type SttUiPhase = 'idle' | 'listening' | 'converting';
 
 export interface AgentAgentState {
-  /** True while the microphone / VAD is actively recording */
+  /** True while the VAD session is armed (stream + segment detector); not toggled manually when using hands-free mode */
   isListening:     boolean;
   /** True while the WebSocket is in OPEN state */
   isConnected:     boolean;
@@ -203,7 +229,7 @@ export interface AgentAgentState {
   /** Toggle mic on/off — preferred for button bindings. */
   toggleListening: () => Promise<void>;
   /** Send a plain-text message (bypasses VAD). Use `opts.practice` for adaptive question mode. */
-  sendText:        (text: string, opts?: SendTextOptions) => void;
+  sendText:        (text: string, opts?: SendTextOptions) => Promise<void>;
   /** Reset all state and BrainStore memory. */
   clearHistory:    () => void;
   /** V28 — send arbitrary WS JSON (camera_frame, session_feedback, tool_interaction, …). */
@@ -415,12 +441,23 @@ function trimAssessmentCoachingForWs(p: AssessmentCoachingPayload): Record<strin
   };
 }
 
+/**
+ * Default off: mic arms only when the user toggles listening.
+ * Set `NEXT_PUBLIC_VAD_AUTO_ARM=true` to restore “hands-free” arm on session + scene ready.
+ */
+function isNextPublicVadAutoArmEnabled(): boolean {
+  if (typeof process === 'undefined') return false;
+  const v = (process.env.NEXT_PUBLIC_VAD_AUTO_ARM ?? '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
 export function useAgentAgent({
   wsUrl: wsUrlProp,
   autoReconnect = true,
   lang          = 'ar-JO',   // Jordanian Arabic dialect — Dr. Hamza
+  sessionActive = false,
 }: AgentAgentOptions = {}): AgentAgentState {
 
   // ── React state ─────────────────────────────────────────────────────────
@@ -440,17 +477,17 @@ export function useAgentAgent({
   const pendingUserSttRef  = useRef(false);
   const wsRef              = useRef<WebSocket | null>(null);
   const reconnectTimer     = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Counts disconnect→reconnect cycles; reset on successful <code>onopen</code> (used for exponential backoff). */
+  const wsReconnectAttemptsRef = useRef(0);
   const mountedRef         = useRef(true);
   const isListeningRef     = useRef(false);
+  /** Prevents concurrent startListening() double getUserMedia before isListeningRef is set. */
+  const listeningStartInFlightRef = useRef(false);
   const idleTimerRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Tracks avatar-speaking state via window events — kept as a ref to avoid re-renders. */
   const isSpeakingRef      = useRef(false);
-  /**
-   * True when the avatar-speaking tracker paused VAD mid-session (half-duplex).
-   * Set on avatar:speak:start, cleared on avatar:speak:end or manual stopListening().
-   * Allows automatic VAD resume once TTS playback ends.
-   */
-  const wasListeningRef    = useRef(false);
+  /** Latest `sessionActive` prop — half-duplex resume only while the user session is active */
+  const sessionActiveRef   = useRef(sessionActive);
   /** Cleared on new utterance / unmount — avoids resuming VAD while a later TTS clip is already playing. */
   const vadResumeTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Timestamp (ms) of the last empty_transcript warn — used to rate-limit console spam. */
@@ -467,7 +504,9 @@ export function useAgentAgent({
   /** Last time the user sent audio/text (for proactive silence loop) */
   const lastUserActivityRef = useRef(Date.now());
   const proactiveSilenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const sendTextRef = useRef<(t: string) => void>(() => {});
+  const sendTextRef = useRef<(t: string, opts?: SendTextOptions) => Promise<void>>(
+    async () => {},
+  );
   const isProcessingRef = useRef(isProcessing);
   const isRecordingRef = useRef(false);
   /** Timers for co-speech keyword gestures — cleared on new reply / barge-in */
@@ -485,8 +524,7 @@ export function useAgentAgent({
   const wsPlaybackTurnIdRef = useRef<string | null>(null);
 
   const useWsAgentAudio = useCallback((): boolean => {
-    if (typeof process === 'undefined') return true;
-    return process.env.NEXT_PUBLIC_USE_WS_AGENT_AUDIO !== 'false';
+    return false;
   }, []);
   /** Segments captured while WS is CONNECTING/CLOSED — sent after OPEN (see flush effect). */
   const pendingAudioBlobsRef = useRef<Blob[]>([]);
@@ -505,6 +543,12 @@ export function useAgentAgent({
   const sessionTurnCountRef = useRef(0);
   /** Keep-alive ping interval — cleared on WS close / unmount. */
   const keepAliveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Last `pong` from server in reply to our `ping`; used to detect half-open sockets. */
+  const lastWsPongAtMsRef = useRef<number>(0);
+  /** Timeline expecting WS `speech_data` payloads when WS agent audio is enabled; arms stalled-stream watchdog. */
+  const wsAudioTimelineActiveRef = useRef(false);
+  /** Last inbound WS audio activity (`speech_start` / substantive `speech_data`) while timeline armed. */
+  const lastWsInboundAudioActivityAtMsRef = useRef(0);
   /** Connection-open timeout — cleared in onopen; fires close() if server never opens. */
   const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Retries GET /api/health when preflight fails (backend down). Cleared on success or unmount. */
@@ -520,6 +564,10 @@ export function useAgentAgent({
   const lastConnectUsedJwtSubprotocolRef = useRef(false);
   /** Reset to `true` on each successful `onopen` so one fallback remains available per connection cycle. */
   const ws1006FallbackPendingRef = useRef(true);
+  /** Client handshake timeouts (see WS_CLIENT_OPEN_TIMEOUT_CODE); capped to avoid reconnect storms when API is down. */
+  const wsOpenTimeoutStreakRef = useRef(0);
+  /** Max consecutive handshake timeouts before disabling auto-reconnect (backend likely down). */
+  const WS_OPEN_TIMEOUT_MAX_STREAK = 8;
 
   const clearCoSpeechTimers = useCallback((): void => {
     coSpeechTimersRef.current.forEach(clearTimeout);
@@ -901,6 +949,7 @@ export function useAgentAgent({
 
       // ── Backend asked to stop TTS immediately (barge-in / turn cancelled) ───
       case 'stop_speech': {
+        wsAudioTimelineActiveRef.current = false;
         const stopTid =
           typeof (frame as { turn_id?: string }).turn_id === 'string'
             ? (frame as { turn_id?: string }).turn_id
@@ -933,6 +982,10 @@ export function useAgentAgent({
         const dur = typeof (frame as { duration_ms?: number }).duration_ms === 'number' ? (frame as { duration_ms?: number }).duration_ms : undefined;
         if (tid) {
           currentSpeechTurnIdRef.current = tid;
+        }
+        if (useWsAgentAudio()) {
+          wsAudioTimelineActiveRef.current = true;
+          lastWsInboundAudioActivityAtMsRef.current = Date.now();
         }
         if (typeof window !== 'undefined') {
           window.dispatchEvent(
@@ -971,6 +1024,7 @@ export function useAgentAgent({
           );
         }
         if (useWsAgentAudio() && b64 && typeof b64 === 'string' && b64.length > 8) {
+          lastWsInboundAudioActivityAtMsRef.current = Date.now();
           if (sdTurn) {
             wsPlaybackTurnIdRef.current = sdTurn;
           }
@@ -998,6 +1052,9 @@ export function useAgentAgent({
         if (eid && currentSpeechTurnIdRef.current === eid) {
           currentSpeechTurnIdRef.current = null;
           wsPlaybackTurnIdRef.current = null;
+          wsAudioTimelineActiveRef.current = false;
+        } else if (!eid && wsAudioTimelineActiveRef.current) {
+          wsAudioTimelineActiveRef.current = false;
         }
         if (typeof window !== 'undefined') {
           window.dispatchEvent(
@@ -1030,35 +1087,32 @@ export function useAgentAgent({
       // ── Speech (with or without PCM audio) ───────────────────────────
       case 'speech':
       case 'tts_unavailable': {
-        const userTranscript = ((frame as { transcript?: string }).transcript ?? '').trim();
-        if (userTranscript && pendingUserSttRef.current) {
+        const userTranscript = String(
+          (frame as { transcript?: string }).transcript ?? '',
+        ).trim();
+
+        // Backend sends user text on `speech` / `tts_unavailable`, not a separate `transcript` frame.
+        // Always mirror STT into UI + brain — do not gate on pendingUserSttRef (race / cleared early → silent failure).
+        if (userTranscript) {
           pendingUserSttRef.current = false;
           setLastTranscript(userTranscript);
+          useBrainStore.getState().pushTurn({ role: 'user', text: userTranscript });
         }
         setSttUiPhase('idle');
 
         const dialogueRaw = (frame.dialogue ?? frame.text ?? '') as string;
         const dialogue   = stripInternalSystemEvents(dialogueRaw.trim());
         const norm       = normalizeSpeechFrame({ ...frame, dialogue });
-        if (!norm) break;
+        if (!norm) {
+          setIsProcessing(false);
+          break;
+        }
 
         const ftid =
           typeof (frame as { turn_id?: string }).turn_id === 'string'
             ? (frame as { turn_id?: string }).turn_id
             : undefined;
         if (ftid) {
-          if (
-            currentSpeechTurnIdRef.current &&
-            ftid !== currentSpeechTurnIdRef.current
-          ) {
-            if (process.env.NODE_ENV === 'development') {
-              console.warn('[useAgentAgent] Ignoring stale speech frame', {
-                frameTurnId: ftid,
-                expectedTurnId: currentSpeechTurnIdRef.current,
-              });
-            }
-            break;
-          }
           currentSpeechTurnIdRef.current = ftid;
         }
 
@@ -1077,7 +1131,8 @@ export function useAgentAgent({
 
         const tsNow = Date.now();
         if (
-          dialogue === lastTtsFallbackTextRef.current
+          useWsAgentAudio()
+          && dialogue === lastTtsFallbackTextRef.current
           && tsNow - lastTtsFallbackAtRef.current < 10_000
         ) {
           console.warn('[useAgentAgent] Skipping duplicate TTS fallback (same text within 10s — likely quota loop)');
@@ -1182,7 +1237,7 @@ export function useAgentAgent({
         // 3c. Co-speech يُقدَّر من نص الحوار (client TTS).
         clearCoSpeechTimers();
 
-        // 4. Audio — مصدر واحد: AgentDirector.scheduleTTS → speakWithTTS (`/api/tts-with-timing`).
+        // 4. Audio — مصدر واحد: AgentDirector.scheduleTTS → speakWithTTS (BFF: EL or Edge per NEXT_PUBLIC_TTS_PROVIDER).
         //    لا تُستدعِ speakWithTTS هنا (ازدواجية). audio_base64 من الـWS يُتجاهل؛ الليب يتبع HTMLAudioElement.currentTime.
         //    NEXT_PUBLIC_USE_AGENT_MESSAGE_AZURE_TTS → مسار Canvas Azure SDK بدلاً من speakWithTTS.
         const contagion = frame.contagion as
@@ -1226,12 +1281,15 @@ export function useAgentAgent({
         const skipHttpTts = wsAudioActive;
 
         if (type === 'tts_unavailable' || !skipHttpTts) {
-          agentDirector.scheduleTTS(
-            dialogue,
-            emotionLabel,
-            0,
-            type === 'tts_unavailable' ? { forceEdgeBff: true } : undefined,
-          );
+          // Backend sends tts_unavailable when WS TTS lacks audio — do NOT force Edge when ElevenLabs
+          // is primary: forceEdgeBff disables NEXT_PUBLIC_TTS_PROVIDER=elevenlabs and skips EL rescue.
+          const ttsFallbackOpts =
+            type === 'tts_unavailable' && !isElevenLabsTtsProvider()
+              ? ({ forceEdgeBff: true } as const)
+              : undefined;
+          // eslint-disable-next-line no-console
+          console.log('[TTS_TRIGGER]', dialogue);
+          void agentDirector.scheduleTTS(dialogue, emotionLabel, 0, ttsFallbackOpts);
         } else if (typeof window !== 'undefined') {
           setSpeechIntentHintsFromText(dialogue);
           setSpeechEmotionBridge({
@@ -1323,8 +1381,10 @@ export function useAgentAgent({
       }
 
       case 'heartbeat':
-        // Heartbeat frame received — update ping timer, no action needed
-        console.log('[useAgentAgent] Heartbeat frame received');
+        // Never bump lastWsPongAtMsRef here — server heartbeats prove downlink-only; only `pong` validates our pings.
+        if (process.env.NODE_ENV === 'development') {
+          console.log('[useAgentAgent] Heartbeat frame received');
+        }
         break;
 
       case 'init_ack':
@@ -1336,9 +1396,34 @@ export function useAgentAgent({
         console.log('[useAgentAgent] ✅ Connection acknowledged by server:', frame);
         break;
 
-      case 'pong':
-        // Response to our keep-alive ping — connection is alive.
+      case 'pong': {
+        const now = Date.now();
+        lastWsPongAtMsRef.current = now;
+        if (process.env.NODE_ENV === 'development') {
+          let rttLogged = '';
+          const tsRaw = frame.timestamp as unknown;
+          const tsMs =
+            typeof tsRaw === 'number'
+              ? tsRaw
+              : typeof tsRaw === 'string'
+                ? Number(tsRaw)
+                : NaN;
+          if (
+            typeof tsMs === 'number'
+            && !Number.isNaN(tsMs)
+            && tsMs > 0
+            && now >= tsMs
+            && now - tsMs < 120_000
+          ) {
+            const rttMs = Math.round(now - tsMs);
+            if (Number.isFinite(rttMs)) {
+              rttLogged = ` RTT=${rttMs}ms`;
+            }
+          }
+          console.log('[WS] pong received' + rttLogged);
+        }
         break;
+      }
 
       case 'device_context_ack':
         break;
@@ -1404,6 +1489,11 @@ export function useAgentAgent({
       return;
     }
 
+    if (agentWsSkippedByEnv()) {
+      console.warn('[WS] NEXT_PUBLIC_SKIP_AGENT_WS is set — skipping agent WebSocket (no connection attempt)');
+      return;
+    }
+
     const allowGuestWs = wsGuestModeEnabled();
 
     /** Single read — avoids duplicate JWT parse + duplicate empty-token logs from getAccessToken(). */
@@ -1463,7 +1553,11 @@ export function useAgentAgent({
       console.log('[AUTH] token preview:', tokenForWs.slice(0, 12));
     }
 
-    const resolvedWs = wsUrlProp ?? buildDefaultWsAgentUrl();
+    const resolvedWs = (wsUrlProp ?? buildDefaultWsAgentUrl()).trim();
+    if (!resolvedWs) {
+      console.warn('[WS] Empty WebSocket URL — skip connection (set NEXT_PUBLIC_WS_URL or NEXT_PUBLIC_API_URL)');
+      return;
+    }
     const url = ipv4LoopbackWsUrl(resolvedWs);
     if (process.env.NODE_ENV === 'development') {
       // eslint-disable-next-line no-console
@@ -1503,17 +1597,33 @@ export function useAgentAgent({
       return;
     }
 
+    if (connectTimeoutRef.current) {
+      clearTimeout(connectTimeoutRef.current);
+      connectTimeoutRef.current = null;
+    }
+
     lastConnectUsedJwtSubprotocolRef.current = useJwtSubprotocol;
     wsRef.current = ws;
 
-    // Connection-open watchdog: if the server never ACKs the WS upgrade within 8s,
-    // close and let autoReconnect handle it.
+    const openTimeoutMs = readWsConnectTimeoutMs();
+    // Watchdog: if handshake stays CONNECTING past openTimeoutMs, close with an app close code so onclose can cap retries.
     connectTimeoutRef.current = setTimeout(() => {
       if (ws.readyState !== WebSocket.OPEN) {
-        console.warn('[useAgentAgent] ⏱ Connection timeout (8s) — closing and retrying');
-        ws.close();
+        console.warn(`[useAgentAgent] Connection open timeout (${openTimeoutMs}ms) — aborting handshake`);
+        try {
+          ws.close(
+            WS_CLIENT_OPEN_TIMEOUT_CODE,
+            'client-handshake-timeout',
+          );
+        } catch {
+          try {
+            ws.close();
+          } catch {
+            /* ignore */
+          }
+        }
       }
-    }, 8000);
+    }, openTimeoutMs);
 
     ws.onopen = () => {
       // Cancel connection watchdog
@@ -1522,6 +1632,11 @@ export function useAgentAgent({
         connectTimeoutRef.current = null;
       }
       if (!mountedRef.current) return;
+      lastWsPongAtMsRef.current = Date.now();
+      wsReconnectAttemptsRef.current = 0;
+      wsAudioTimelineActiveRef.current = false;
+      lastWsInboundAudioActivityAtMsRef.current = 0;
+      wsOpenTimeoutStreakRef.current = 0;
       ws1006StreakRef.current = 0;
       wsReconnectStoppedRef.current = false;
       ws1006FallbackPendingRef.current = true;
@@ -1595,18 +1710,53 @@ export function useAgentAgent({
         console.warn('[useAgentAgent] set_focus_subject send failed:', e);
       }
 
-      // Keep-alive ping every 28s — prevents idle-timeout disconnects from proxy/nginx/Docker.
+      // Keep-alive ping + stale detection — prevents idle proxy timeouts and half-open/zombie sockets.
       if (keepAliveIntervalRef.current) clearInterval(keepAliveIntervalRef.current);
       keepAliveIntervalRef.current = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
+        if (ws.readyState !== WebSocket.OPEN) return;
+
+        const now = Date.now();
+        const sincePong = now - lastWsPongAtMsRef.current;
+        if (sincePong > WS_STALE_NO_PONG_MS) {
+          console.warn(
+            '[WS] stale connection (no pong within',
+            WS_STALE_NO_PONG_MS,
+            'ms) — closing to reconnect',
+          );
           try {
-            if (process.env.NODE_ENV === 'development') {
-              console.log('[useAgentAgent] Sending keep-alive ping');
-            }
-            ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now(), v: 1.1 }));
-          } catch { /* ignore — onclose will handle reconnect */ }
+            ws.close(WS_STALE_KEEPALIVE_CLOSE_CODE, 'stale_keepalive');
+          } catch {
+            /* ignore — onclose clears interval */
+          }
+          return;
         }
-      }, 28_000);
+
+        if (
+          useWsAgentAudio() &&
+          wsAudioTimelineActiveRef.current &&
+          wsRef.current === ws
+        ) {
+          const stalled = now - lastWsInboundAudioActivityAtMsRef.current;
+          if (stalled > WS_AUDIO_STALL_MS) {
+            console.warn('[AUDIO] stalled (no streamed audio) → closing WS', { stalledMs: stalled });
+            try {
+              ws.close(WS_AUDIO_STALL_CLOSE_CODE, 'audio_stall');
+            } catch {
+              /* ignore — onclose clears interval */
+            }
+            return;
+          }
+        }
+
+        try {
+          if (process.env.NODE_ENV === 'development') {
+            console.log('[WS] ping sent');
+          }
+          ws.send(JSON.stringify({ type: 'ping', timestamp: now, v: 1.1 }));
+        } catch (err) {
+          console.error('[WS] ping send error', err);
+        }
+      }, WS_KEEPALIVE_PING_MS);
     };
 
     ws.onmessage = (evt: MessageEvent) => {
@@ -1622,6 +1772,7 @@ export function useAgentAgent({
     };
 
     ws.onclose = (event: CloseEvent) => {
+      wsAudioTimelineActiveRef.current = false;
       if (keepAliveIntervalRef.current) {
         clearInterval(keepAliveIntervalRef.current);
         keepAliveIntervalRef.current = null;
@@ -1635,6 +1786,19 @@ export function useAgentAgent({
 
       const reason = (event.reason || '').trim() || '(no reason)';
       console.warn('[WS] ❌ CLOSED', { code: event.code, reason, clean: event.wasClean });
+
+      if (event.code === WS_CLIENT_OPEN_TIMEOUT_CODE) {
+        wsOpenTimeoutStreakRef.current += 1;
+        if (wsOpenTimeoutStreakRef.current >= WS_OPEN_TIMEOUT_MAX_STREAK) {
+          wsReconnectStoppedRef.current = true;
+          setError(
+            `WebSocket: handshake timed out ${WS_OPEN_TIMEOUT_MAX_STREAK} times — backend may be down or URL is wrong.`,
+          );
+          console.warn(
+            '[WS] Open-timeout streak limit reached — stopping auto-reconnect (set NEXT_PUBLIC_SKIP_AGENT_WS or fix API)',
+          );
+        }
+      }
 
       if (event.code === 1006) {
         ws1006StreakRef.current += 1;
@@ -1671,6 +1835,7 @@ export function useAgentAgent({
       if (!autoReconnect || !mountedRef.current) return;
 
       if (event.wasClean && event.code === 1000) {
+        wsReconnectAttemptsRef.current = 0;
         console.log('[useAgentAgent] Clean closure (1000), not scheduling reconnect');
         return;
       }
@@ -1688,8 +1853,13 @@ export function useAgentAgent({
         return;
       }
 
-      const delay = 3000;
-      console.log(`[useAgentAgent] Reconnecting in ${delay / 1000}s...`);
+      if (reconnectTimer.current) {
+        clearTimeout(reconnectTimer.current);
+        reconnectTimer.current = null;
+      }
+      wsReconnectAttemptsRef.current += 1;
+      const delay = wsReconnectBackoffMs(wsReconnectAttemptsRef.current);
+      console.warn('[WS] reconnect in', delay, 'ms (attempt', wsReconnectAttemptsRef.current, ')');
       reconnectTimer.current = setTimeout(connect, delay);
     };
 
@@ -1754,11 +1924,20 @@ export function useAgentAgent({
    * (Chromium always logs that as a red "WebSocket connection failed" — cannot be suppressed in JS).
    */
   const runHealthPreflightOnce = useCallback(async (): Promise<void> => {
+    if (agentWsSkippedByEnv()) {
+      console.warn('[WS] NEXT_PUBLIC_SKIP_AGENT_WS — skipping health preflight and WebSocket');
+      return;
+    }
     if (!wsPreflightHealthEnabled()) {
       connect();
       return;
     }
-    const resolvedWs = ipv4LoopbackWsUrl(wsUrlProp ?? buildDefaultWsAgentUrl());
+    const trimmedWs = (wsUrlProp ?? buildDefaultWsAgentUrl()).trim();
+    if (!trimmedWs) {
+      console.warn('[WS] Empty WebSocket URL — skipping health preflight');
+      return;
+    }
+    const resolvedWs = ipv4LoopbackWsUrl(trimmedWs);
     const healthUrl = agentApiHealthUrlFromWsAgentUrl(resolvedWs);
     const ac = new AbortController();
     const tmo = window.setTimeout(() => ac.abort(), 3000);
@@ -1827,6 +2006,10 @@ export function useAgentAgent({
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       return;
     }
+    // Awareness Layer: mic-driven student input is real interaction.
+    void import('@/lib/avatar/awareness/studentAwarenessEngine').then(
+      (m) => m.registerInteraction(),
+    ).catch(() => { /* no-op */ });
     setIsProcessing(true);
     try {
       console.log(
@@ -1957,6 +2140,7 @@ export function useAgentAgent({
     if (typeof window === 'undefined') return;
     const onSilent = (): void => {
       useBrainStore.getState().setUserSpeaking(false);
+      setSttUiPhase((p) => (p === 'converting' ? p : 'idle'));
     };
     window.addEventListener('cogni:user:silent', onSilent);
     return () => window.removeEventListener('cogni:user:silent', onSilent);
@@ -1971,27 +2155,58 @@ export function useAgentAgent({
   _vadStartRef.current = vadStart;
   _vadStopRef.current  = vadStop;
 
+  useEffect(() => {
+    sessionActiveRef.current = sessionActive;
+  }, [sessionActive]);
+
   // ── Public API ────────────────────────────────────────────────────────────
 
   const startListening = useCallback(async (): Promise<void> => {
-    if (isListeningRef.current) return;
-    isListeningRef.current = true;
+    if (isSpeakingRef.current) {
+      // eslint-disable-next-line no-console
+      console.log('[MIC] blocked — avatar is speaking');
+      return;
+    }
+    if (isListeningRef.current || listeningStartInFlightRef.current) return;
+    listeningStartInFlightRef.current = true;
 
     // Interrupt any ongoing speech before listening (prevents echo)
     stopAllAudio();
     agentDirector.interruptSpeech();
-    useBrainStore.getState().setPhysical({ isListening: true });
-    emitListeningEvent(true);
 
-    await vadStart();
-    console.log('[useAgentAgent] Listening started');
+    try {
+      diagVad('START');
+      await resumeSharedAudioContext();
+      await vadStart();
+      isListeningRef.current = true;
+      useBrainStore.getState().setPhysical({ isListening: true });
+      emitListeningEvent(true);
+      console.log('[Agent] Listening started');
+      // eslint-disable-next-line no-console
+      console.log('[MIC] activated');
+      diagVad('SUCCESS');
+    } catch (e) {
+      console.error('[Agent] vadStart failed', e);
+      diagVad('FAIL', e instanceof Error ? e : new Error(String(e)));
+      isListeningRef.current = false;
+      if (vadResumeTimerRef.current) {
+        clearTimeout(vadResumeTimerRef.current);
+        vadResumeTimerRef.current = null;
+      }
+      useBrainStore.getState().setPhysical({ isListening: false });
+      emitListeningEvent(false);
+      setSttUiPhase('idle');
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('cogni:user:silent'));
+      }
+    } finally {
+      listeningStartInFlightRef.current = false;
+    }
   }, [vadStart, stopAllAudio]);
 
   const stopListening = useCallback((): void => {
     if (!isListeningRef.current) return;
     isListeningRef.current = false;
-    // Cancel any pending half-duplex auto-resume — the user explicitly stopped listening.
-    wasListeningRef.current = false;
     if (vadResumeTimerRef.current) {
       clearTimeout(vadResumeTimerRef.current);
       vadResumeTimerRef.current = null;
@@ -2004,8 +2219,55 @@ export function useAgentAgent({
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('cogni:user:silent'));
     }
-    console.log('[useAgentAgent] Listening stopped');
+    // eslint-disable-next-line no-console
+    console.log('[MIC] stopped');
   }, [vadStop]);
+
+  /** Mic track ended (Bluetooth/USB disconnect) or VAD hard-stop — sync refs + brain so toggles still work. */
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onVoiceMicStopped = (): void => {
+      if (!isListeningRef.current) return;
+      console.warn('[Agent] mic stopped → reset');
+      stopListening();
+    };
+    window.addEventListener('voice:mic:stopped', onVoiceMicStopped as EventListener);
+    return () =>
+      window.removeEventListener('voice:mic:stopped', onVoiceMicStopped as EventListener);
+  }, [stopListening]);
+
+  useEffect(() => {
+    if (sessionActive) return;
+    if (!isListeningRef.current) return;
+    stopListening();
+  }, [sessionActive, stopListening]);
+
+  // Arm hands-free VAD once session + WebSocket + scene are ready (mic stays closed before that).
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!isNextPublicVadAutoArmEnabled()) return;
+    if (!sessionActive || !isConnected) return;
+
+    const tryArmVad = (): void => {
+      if (!mountedRef.current || !sessionActiveRef.current) return;
+      if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+      if (!sceneReadyRef.current) return;
+      if (isSpeakingRef.current || listeningStartInFlightRef.current) return;
+      if (isListeningRef.current) return;
+      void startListening().catch((err: unknown) => {
+        console.warn('[useAgentAgent] Hands-free VAD arm failed:', err);
+      });
+    };
+
+    const onScene = (): void => {
+      // Let `avatar:scene:ready` handlers that set `sceneReadyRef` run first (listener order).
+      queueMicrotask(() => tryArmVad());
+    };
+    window.addEventListener('avatar:scene:ready', onScene);
+    tryArmVad();
+
+    return () => window.removeEventListener('avatar:scene:ready', onScene);
+  }, [sessionActive, isConnected, startListening]);
 
   const toggleListening = useCallback(async (): Promise<void> => {
     if (isListeningRef.current) {
@@ -2015,7 +2277,7 @@ export function useAgentAgent({
     }
   }, [startListening, stopListening]);
 
-  const sendText = useCallback((text: string, opts?: SendTextOptions): void => {
+  const sendText = useCallback(async (text: string, opts?: SendTextOptions): Promise<void> => {
     const practice = opts?.practice === true;
     if (!text?.trim() && !practice) return;
     const ws = wsRef.current;
@@ -2024,6 +2286,8 @@ export function useAgentAgent({
       setError('Not connected to agent');
       return;
     }
+
+    await resumeSharedAudioContext();
 
     const trimmed = (text || '').trim();
 
@@ -2034,7 +2298,7 @@ export function useAgentAgent({
           setIsProcessing(false);
           return;
         }
-        sendText(trimmed, { ...opts, skipAssignmentRag: true });
+        await sendText(trimmed, { ...opts, skipAssignmentRag: true });
       })();
       return;
     }
@@ -2178,7 +2442,7 @@ export function useAgentAgent({
       const prompt =
         '[SYSTEM_EVENT: يبدو أنك تفكّر بعمق أو متوقف. بلهجة أردنية دافئة اسأل جملة واحدة قصيرة: هل في نقطة مش واضحة أو بدك نرجع خطوة؟ لا تكرر عبارات الجلسة السابقة.]';
       fireMentorSilenceCheckInMotion();
-      sendTextRef.current(prompt);
+      void sendTextRef.current(prompt);
       lastUserActivityRef.current = Date.now();
       resetProactiveSilenceTimer();
     }, PROACTIVE_QUESTION_MS + jitter);
@@ -2290,29 +2554,27 @@ export function useAgentAgent({
       }
       // Mute VAD the instant TTS playback begins.
       if (isListeningRef.current) {
-        wasListeningRef.current = true;
         _vadStopRef.current();
         console.log('[useAgentAgent] Half-duplex: VAD paused — avatar is speaking');
       }
     };
     const onEnd = (): void => {
       isSpeakingRef.current = false;
-      // Re-enable VAD after a 250 ms settling delay once TTS finishes.
-      if (wasListeningRef.current) {
-        wasListeningRef.current = false;
-        if (vadResumeTimerRef.current) {
-          clearTimeout(vadResumeTimerRef.current);
-          vadResumeTimerRef.current = null;
-        }
-        vadResumeTimerRef.current = setTimeout(() => {
-          vadResumeTimerRef.current = null;
-          if (!mountedRef.current || !isListeningRef.current || isSpeakingRef.current) return;
-          _vadStartRef.current().catch((e: unknown) => {
-            console.warn('[useAgentAgent] Half-duplex: failed to resume VAD after TTS:', e);
-          });
-          console.log('[useAgentAgent] Half-duplex: VAD resumed — avatar finished speaking');
-        }, 250);
+      if (vadResumeTimerRef.current) {
+        clearTimeout(vadResumeTimerRef.current);
+        vadResumeTimerRef.current = null;
       }
+      if (!sessionActiveRef.current) return;
+      vadResumeTimerRef.current = setTimeout(() => {
+        vadResumeTimerRef.current = null;
+        if (!mountedRef.current || !sessionActiveRef.current || isSpeakingRef.current) return;
+        if (!isListeningRef.current) return;
+        if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+        _vadStartRef.current().catch((e: unknown) => {
+          console.warn('[useAgentAgent] Half-duplex: failed to resume VAD after TTS:', e);
+        });
+        console.log('[useAgentAgent] Half-duplex: VAD resumed — avatar finished speaking');
+      }, 250);
     };
     window.addEventListener('avatar:speak:start', onStart);
     window.addEventListener('avatar:speak:end',   onEnd);
@@ -2348,8 +2610,8 @@ export function useAgentAgent({
       idleTimerRef.current = null;
     }
 
-    // Block conditions: already greeted, not yet connected, busy, or user is speaking
-    if (hasInitiated || !isConnected || isProcessing || isRecording) return;
+    // Block conditions: already greeted, not yet connected, or STT/LLM busy
+    if (hasInitiated || !isConnected || isProcessing) return;
 
     idleTimerRef.current = setTimeout(() => {
       // Re-check live state via refs before firing (guards against stale closure)
@@ -2372,7 +2634,7 @@ export function useAgentAgent({
           ? `[SYSTEM_EVENT: طالب عائد. آخر موضوع اشتغلنا عليه: "${resume.lastTopic}". آخر مزاج مسجّل: ${resume.lastMood}. رحّب بلهجة أردنية دافئة واسأل بلطف إذا بده يكمّل على هالموضوع — جملة أو جملتين بس، بدون تكرار نمطي.]`
           : PROACTIVE_PROMPT;
 
-      sendText(prompt);
+      void sendText(prompt);
       setHasInitiated(true);
       console.log('[useAgentAgent] Smart heartbeat fired — proactive greeting sent', pendingGrade ? `(debrief: ${pendingGrade.final_grade})` : '');
     }, IDLE_TIMEOUT);
@@ -2383,7 +2645,7 @@ export function useAgentAgent({
         idleTimerRef.current = null;
       }
     };
-  }, [isConnected, isProcessing, isRecording, hasInitiated, sendText]);
+  }, [isConnected, isProcessing, hasInitiated, sendText]);
 
   // ── Mount / unmount ───────────────────────────────────────────────────────
 
@@ -2391,6 +2653,7 @@ export function useAgentAgent({
     const onAuthChanged = (): void => {
       ws1006StreakRef.current = 0;
       wsReconnectStoppedRef.current = false;
+      wsReconnectAttemptsRef.current = 0;
       ws1006FallbackPendingRef.current = true;
       wsSkipSubprotocolOnceRef.current = false;
       if (reconnectTimer.current) {

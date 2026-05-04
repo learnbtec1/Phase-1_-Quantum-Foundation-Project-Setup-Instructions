@@ -18,7 +18,6 @@ import type { VRM } from '@pixiv/three-vrm';
 import { avatarDebug, DEBUG_AVATAR } from '@/app/avatar-agent/debugAvatar';
 import { waitAudioReady as waitForAudioReady } from '@/lib/audio/waitAudioReady';
 import { useBrainStore } from '@/store/useBrainStore';
-import { AVATAR_BEHAVIOR_SINGLE_CONTROLLER } from '@/config/avatar';
 import {
   blendVisemeWithExpression,
   getCognitiveMouthOverlay,
@@ -26,17 +25,17 @@ import {
 } from '@/app/avatar-agent/motion/facialExpressionBlend';
 import { isObservabilityEnabled } from '@/lib/observability/config';
 import { reportLipSyncDriftMs } from '@/lib/observability/audioLipSyncMonitor';
-import {
-  getSpeechEmotionSnapshot,
-  patchSpeechEmotionEnergy,
-} from '@/ai/voice/speechEmotionBridge';
+import { getSpeechEmotionSnapshot } from '@/ai/voice/speechEmotionBridge';
 import { installUserGestureAudioUnlock } from '@/lib/audio/avatarAudioContext';
 import { nowMs as masterClockNowMs, sessionElapsedSec } from '@/lib/avatar/masterClock';
 import {
   getActiveAudioElement,
   getPlaybackTimeSec,
+  getRawPlaybackTimeSec,
   getUtteranceGeneration,
   getVisemeCues,
+  isPlaybackAnchored,
+  isWebSpeechLipTimelineActive,
   resetDriftOffset,
 } from '@/lib/avatar/audioTimeline';
 
@@ -48,7 +47,7 @@ const AUDIO_READY_FALLBACK = 1;
 
 /**
  * Lip-sync / face sync (ms): prefer NEXT_PUBLIC_FACE_* when set, else NEXT_PUBLIC_TTS_* (same playhead).
- * Positive offset delays lip vs audio (e.g. 80–120). Pre-attack advances cue lookup (~50 ms).
+ * Positive offset adjusts lip-vs-acoustic framing (Calibration). Defaults: pre-attack 0 (clock-driven sync).
  */
 function readEnvOffsetMsPreferFace(): number {
   if (typeof process === 'undefined') return 0;
@@ -66,11 +65,11 @@ function readEnvOffsetMsPreferFace(): number {
 }
 
 /**
- * Pre-attack (ms): advance viseme lookup vs `audio.currentTime` so the mouth leads
- * the acoustic peak slightly (~50 ms default). Env overrides; set to 0 to disable.
+ * Pre-attack was disabled by default: lip timing follows AudioContext-anchored playhead,
+ * not a fixed mouth lead (`NEXT_PUBLIC_FACE_PREATTACK_MS` restores optional lead ms).
  */
 function readPreattackMsPreferFace(): number {
-  const DEFAULT_MS = 50;
+  const DEFAULT_MS = 0;
   if (typeof process === 'undefined') return DEFAULT_MS;
   const face = process.env.NEXT_PUBLIC_FACE_PREATTACK_MS;
   if (face !== undefined && face !== '') {
@@ -107,10 +106,6 @@ function readOutputLatencyMsPreferFace(): number {
 const TTS_SYNC_OFFSET_SEC = readEnvOffsetMsPreferFace() / 1000;
 const TTS_PREATTACK_SEC = readPreattackMsPreferFace() / 1000;
 const TTS_OUTPUT_LATENCY_SEC = readOutputLatencyMsPreferFace() / 1000;
-
-/** RMS → viseme strength (power damping); tune with lip level in browser. */
-const LIP_RMS_SILENCE = 0.0026;
-const LIP_RMS_SENS = 5.6;
 
 /**
  * Azure viseme id → VRM mouth morph weights (index 0–21).
@@ -311,8 +306,6 @@ export default function LipSyncManager({
   const freqByteBufRef = useRef<Uint8Array | null>(null);
   /** Smoothed 0 = rounded (O/U), 1 = narrow (S/T/Z); lerped each frame to avoid choppy jumps */
   const smoothNarrowWeightRef = useRef(0.5);
-  const visemeUnitCheckedRef = useRef(false);
-  const visemeIsMs = useRef(false);
 
   const lastVisemeIdRef = useRef<number>(-2);
   const lastActiveCueTRef = useRef(0);
@@ -371,7 +364,6 @@ export default function LipSyncManager({
     const onSpeakEnd = (): void => {
       resetDriftOffset();
       lastVisemeIdRef.current = -2;
-      visemeUnitCheckedRef.current = false;
       smoothNarrowWeightRef.current = 0.5;
     };
 
@@ -399,27 +391,38 @@ export default function LipSyncManager({
     const ug = getUtteranceGeneration();
     if (ug !== utteranceGenTrackedRef.current) {
       utteranceGenTrackedRef.current = ug;
-      visemeUnitCheckedRef.current = false;
-      visemeIsMs.current = false;
     }
 
     const talking = isTalkingRef.current;
-    const tc = getVisemeCues();
+    const queue = getVisemeCues();
+    const webSpeechSynthetic = isWebSpeechLipTimelineActive();
     const timelineAudio = getActiveAudioElement();
     const audioProbe = timelineAudio ?? audioElementRef.current;
-    const qProbe = tc.length > 0 ? tc : visemeCueQueueRef.current;
+    const elementPlayheadProbe = timelineAudio
+      ? getRawPlaybackTimeSec()
+      : audioProbe && !Number.isNaN(audioProbe.currentTime)
+        ? audioProbe.currentTime
+        : null;
     if (typeof window !== 'undefined') {
+      const playheadProbe =
+        webSpeechSynthetic || timelineAudio !== null
+          ? getPlaybackTimeSec()
+          : elementPlayheadProbe;
       (window as Window & {
         __cogniLipSyncProbe?: {
           talking: boolean;
           visemeCount: number;
           audioCurrentTime: number | null;
+          playbackPlayheadSec: number | null;
+          playbackAnchored: boolean;
         };
       }).__cogniLipSyncProbe = {
         talking,
-        visemeCount: qProbe.length,
-        audioCurrentTime:
-          audioProbe && !Number.isNaN(audioProbe.currentTime) ? audioProbe.currentTime : null,
+        visemeCount: queue.length,
+        audioCurrentTime: elementPlayheadProbe,
+        playbackPlayheadSec:
+          typeof playheadProbe === 'number' && Number.isFinite(playheadProbe) ? playheadProbe : null,
+        playbackAnchored: Boolean(timelineAudio && isPlaybackAnchored()),
       };
     }
 
@@ -461,8 +464,8 @@ export default function LipSyncManager({
     prevTalkingRef.current = true;
 
     const audio = timelineAudio ?? audioElementRef.current;
-    const queue = tc.length > 0 ? tc : visemeCueQueueRef.current;
-    const analyser = analyserRef?.current ?? null;
+    /** Web Speech path has no decoded media element — ignore mic/RMS analyser tied to stale `<audio>`. */
+    const analyser = webSpeechSynthetic ? null : analyserRef?.current ?? null;
 
     let lipRms = 0;
     let ampMul = 0;
@@ -481,7 +484,6 @@ export default function LipSyncManager({
       for (let i = 0; i < n; i++) sum += td[i] * td[i];
       const rms = Math.sqrt(sum / n);
       lipRms = rms;
-      patchSpeechEmotionEnergy(Math.min(1, rms * 4.5));
 
       const sr = analyser.context.sampleRate;
       const hzPerBin = sr / analyser.fftSize;
@@ -510,26 +512,17 @@ export default function LipSyncManager({
       );
     }
 
-    if (queue.length > 0 && !visemeUnitCheckedRef.current) {
-      visemeUnitCheckedRef.current = true;
-      const maxT = queue.reduce((m, c) => Math.max(m, c.t), 0);
-      visemeIsMs.current = maxT > 300;
-      if (visemeIsMs.current && process.env.NODE_ENV === 'development') {
-        console.warn('[LipSyncManager] Viseme cues appear to be in ms — auto-converting to seconds');
-      }
-    }
-    if (queue.length === 0) {
-      visemeUnitCheckedRef.current = false;
-      visemeIsMs.current = false;
-    }
-    const cueTSec = (c: { t: number }) => (visemeIsMs.current ? c.t / 1000 : c.t);
+    /** All cue times are **seconds** (API contract); no LipSync-side unit heuristic. */
+    const cueTSec = (c: { t: number }) => c.t;
 
     const audioReady =
-      !!audio &&
-      !Number.isNaN(audio.currentTime) &&
-      audio.currentTime >= 0 &&
-      (audio.readyState >= AUDIO_READY_MIN ||
-        (queue.length > 0 && !audio.paused && audio.readyState >= AUDIO_READY_FALLBACK));
+      (webSpeechSynthetic && queue.length > 0) ||
+      (!webSpeechSynthetic &&
+        !!audio &&
+        !Number.isNaN(audio.currentTime) &&
+        audio.currentTime >= 0 &&
+        (audio.readyState >= AUDIO_READY_MIN ||
+          (queue.length > 0 && !audio.paused && audio.readyState >= AUDIO_READY_FALLBACK)));
 
     /** Lip sync playhead = audio time + sync offset + optional pre-attack (cue lookup). */
     const VISEME_ANTICIPATION_SEC = 0;
@@ -542,9 +535,11 @@ export default function LipSyncManager({
 
     let tSec = 0;
     if (audioReady) {
-      const decodeSec = timelineAudio
+      const decodeSec = webSpeechSynthetic
         ? getPlaybackTimeSec()
-        : audio!.currentTime;
+        : timelineAudio !== null
+          ? getPlaybackTimeSec()
+          : (audio!.currentTime ?? 0);
       tSec = Math.max(
         0,
         decodeSec -
@@ -656,22 +651,6 @@ export default function LipSyncManager({
       tgtEe = 0;
     }
 
-    /** Power-damped visemes: near-silent frames → closed mouth even if timeline has a cue. */
-    if (analyser && queue.length > 0 && audioReady) {
-      let visemePower =
-        lipRms < LIP_RMS_SILENCE ? 0 : Math.min(1, lipRms * LIP_RMS_SENS);
-      if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) {
-        const abIntent = useBrainStore.getState().avatarBehavior.intent;
-        const speakingLike = abIntent === 'explaining' || abIntent === 'emphasizing';
-        visemePower *= speakingLike ? 1 : 0.3;
-      }
-      tgtAa *= visemePower;
-      tgtIh *= visemePower;
-      tgtOh *= visemePower;
-      tgtOu *= visemePower;
-      tgtEe *= visemePower;
-    }
-
     /** Blend viseme-driven mouth with frequency-weighted narrow/rounded shape (smooth lerp, no single-axis jaw). */
     if (freqBlend && audioReady) {
       const maxCueT =
@@ -758,7 +737,12 @@ export default function LipSyncManager({
       const driftMs =
         queue.length > 0 && cueT >= 0 ? Math.round((visemeTime - cueT) * 1000) : 0;
       avatarDebug('[LipSync]', {
-        audioTime: Number(audio.currentTime.toFixed(4)),
+        audioContextPlayheadSec: Number(
+          (timelineAudio ? getPlaybackTimeSec() : 0).toFixed(4),
+        ),
+        elementMediaTimeSec: Number(
+          (timelineAudio !== null ? getRawPlaybackTimeSec() : audio!.currentTime).toFixed(4),
+        ),
         visemeTime: Number(visemeTime.toFixed(4)),
         motionTime: Number(sessionElapsedSec().toFixed(4)),
         driftMs,
@@ -775,11 +759,21 @@ export default function LipSyncManager({
     ) {
       lastLipDriftConsoleAtRef.current = nowMs;
       const cueT = lastActiveCueTRef.current;
+      const decodeForDrift =
+        timelineAudio !== null ? getPlaybackTimeSec() : (audio!.currentTime ?? 0);
+      const calibratedPlayheadSec =
+        Math.max(
+          0,
+          decodeForDrift + TTS_SYNC_OFFSET_SEC + TTS_PREATTACK_SEC - TTS_OUTPUT_LATENCY_SEC,
+        );
       const driftSec =
-        queue.length > 0 && cueT >= 0 ? Math.abs(audio.currentTime - cueT) : 0;
+        queue.length > 0 && cueT >= 0 ? Math.abs(calibratedPlayheadSec - cueT) : 0;
       // eslint-disable-next-line no-console
       console.log({
-        audio: Number(audio.currentTime.toFixed(4)),
+        calibratedPlayheadSec: Number(calibratedPlayheadSec.toFixed(4)),
+        elementMediaSec: Number(
+          (timelineAudio !== null ? getRawPlaybackTimeSec() : audio!.currentTime).toFixed(4),
+        ),
         visemeCueT: Number(cueT.toFixed(4)),
         driftMs: Math.round(driftSec * 1000),
       });
@@ -809,13 +803,7 @@ export default function LipSyncManager({
       lipObsFrameRef.current += 1;
       if (lipObsFrameRef.current % 14 === 0) {
         const cueT = lastActiveCueTRef.current;
-        const playhead =
-          (timelineAudio ? getPlaybackTimeSec() : audio.currentTime) -
-          VISEME_ANTICIPATION_SEC +
-          TTS_SYNC_OFFSET_SEC +
-          TTS_PREATTACK_SEC -
-          TTS_OUTPUT_LATENCY_SEC;
-        reportLipSyncDriftMs(Math.abs(playhead - cueT) * 1000);
+        reportLipSyncDriftMs(Math.abs(tSec - cueT) * 1000);
       }
     }
 

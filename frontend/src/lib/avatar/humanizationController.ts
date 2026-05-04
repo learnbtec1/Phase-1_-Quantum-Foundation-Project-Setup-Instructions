@@ -8,6 +8,7 @@ import { nowMs } from '@/lib/avatar/masterClock';
 import { deterministicNoiseUnit, getNoiseTimeSec } from '@/lib/avatar/deterministicNoiseController';
 import type { BrainStatePayload } from '@/lib/avatar/brainStatePayload';
 import { getBehaviorMotionState } from '@/lib/behavior/behaviorMotionBrain';
+import { isDebugMotion } from '@/lib/logging/runtimeLog';
 
 export type BreathingMode = 'idle' | 'speaking' | 'thinking';
 
@@ -138,8 +139,7 @@ export function tickHumanization(args: {
     antTilt = _anticipationNeckTilt;
   }
 
-  const motionDebugLog =
-    typeof process !== 'undefined' && process.env.NEXT_PUBLIC_DEBUG_MOTION === 'true';
+  const motionDebugLog = isDebugMotion();
   if (motionDebugLog && args.nowMs - _lastLogAtMs > 900) {
     _lastLogAtMs = args.nowMs;
     // eslint-disable-next-line no-console

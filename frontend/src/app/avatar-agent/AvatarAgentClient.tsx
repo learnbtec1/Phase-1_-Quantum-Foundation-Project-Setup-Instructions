@@ -16,13 +16,23 @@ import ResponseFeedback    from '@/components/ResponseFeedback';
 import ToolSandbox         from '@/components/ToolSandbox';
 import styles              from './AvatarCanvas.module.css';
 import { pickVrmUrl }      from '@/config/avatar';
-import { apiBase, clearAccessToken, getAccessToken, notifyAuthChanged } from '@/lib/auth';
+import {
+  apiBase,
+  clearAccessToken,
+  getAccessToken,
+  hasStoredAccessToken,
+  isCogniGuestBrowserMode,
+  notifyAuthChanged,
+} from '@/lib/auth';
 import { buildDefaultWsAgentUrl } from '@/lib/wsAgentUrl';
+import { isCogniDiagnosticsEnabled } from '@/utils/diagnostics';
+import { runFullDiagnostics } from '@/utils/runDiagnostics';
 import { BodyPortal } from '@/components/portal/BodyPortal';
 import { AvatarBodyPortal } from '@/components/portal/AvatarBodyPortal';
 import { Z_LAYERS } from '@/lib/z-layers';
 import { usePerceptionStore } from '@/store/usePerceptionStore';
-import { resumeSharedAudioContext } from '@/lib/audio/avatarAudioContext';
+import { registerInteraction as registerAwarenessInteraction } from '@/lib/avatar/awareness/studentAwarenessEngine';
+import { resumeSharedAudioContext, installUserGestureAudioUnlock } from '@/lib/audio/avatarAudioContext';
 import { isElevenLabsTtsProvider, setTtsPlaybackAudioElement } from '@/ai/io/tts';
 import { useCogniAvatarDebug } from '@/hooks/useCogniAvatarDebug';
 import type { VisemeCue } from '@/app/avatar-agent/LipSyncManager';
@@ -121,9 +131,21 @@ export default function AvatarAgentClient({
 }: AvatarAgentClientProps) {
   const [hasStarted, setHasStarted] = useState(false);
 
-  // Run cache-clear once on first mount (before any 3D scene initializes)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { clearStaleAvatarCache(); }, []);
+  useEffect(() => {
+    clearStaleAvatarCache();
+  }, []);
+
+  /** Browser autoplay policy: resume shared AudioContext on first pointer/click/touch/key (before canvas mount). */
+  useEffect(() => {
+    installUserGestureAudioUnlock();
+  }, []);
+
+  /** Optional boot probe: mic + AudioContext + WS handshake (requests mic — off unless env). */
+  useEffect(() => {
+    if (!isCogniDiagnosticsEnabled()) return;
+    void runFullDiagnostics(WS_AGENT_URL);
+  }, []);
 
   useCogniAvatarDebug(hasStarted);
 
@@ -167,6 +189,12 @@ export default function AvatarAgentClient({
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    // Guest stack: WS + TTS work without JWT; do not nag with the login/register modal on load.
+    if (isCogniGuestBrowserMode()) return;
+    if (!hasStoredAccessToken()) {
+      setAuthOpen(true);
+      return;
+    }
     if (!getAccessToken()) setAuthOpen(true);
   }, []);
 
@@ -234,10 +262,10 @@ export default function AvatarAgentClient({
     lastDialogue,
     emotion,
     error,
-    toggleListening,
     sendText,
     sendWsPayload,
-  } = useAgentAgent({ wsUrl: WS_AGENT_URL });
+    toggleListening,
+  } = useAgentAgent({ wsUrl: WS_AGENT_URL, sessionActive: hasStarted });
 
   // ADDED: build WebSocket payload for teacher deep-link (dashboard: URL subject wins, else chip for sync)
   const deepLinkWsPayload = useMemo(() => {
@@ -467,6 +495,7 @@ export default function AvatarAgentClient({
       const t = text.trim();
       if (!t) return;
       usePerceptionStore.getState().recordUserSubmit(t.length, Date.now());
+      registerAwarenessInteraction();
       agentDirector.processUserMessage(t);
       void unifiedGestureEngine.play('listening', { priority: PRIORITY.LOW });
       sendText(t);
@@ -493,11 +522,9 @@ export default function AvatarAgentClient({
   return (
     <>
     <main className={shellClass} dir="rtl">
-      {/* Solid fill behind the scene — not on the same layer as the canvas (avoids stacking paint over WebGL). */}
-      <div
-        className="pointer-events-none absolute inset-0 z-0 bg-[#06060c]"
-        aria-hidden
-      />
+      {/* Match root layout backdrop (new_env + vignette) under the WebGL layer. */}
+      <div className="pointer-events-none absolute inset-0 z-0 cognie-html-env-bg" aria-hidden />
+      <div className="pointer-events-none absolute inset-0 z-0 cognie-bg-overlay" aria-hidden />
       {ttsSecondaryNotice && (
         <BodyPortal>
           <div
@@ -524,7 +551,7 @@ export default function AvatarAgentClient({
               جاهز لرحلة تعلم BTEC فريدة؟ اضغط أدناه لتفعيل الصوت والبدء.
             </p>
             <p className="text-gray-500 mb-10 text-sm leading-relaxed">
-              بعد البدء تظهر نافذة المحادثة أسفل يمين الشاشة — يمكنك الكتابة أو استخدام الميكروفون.
+              بعد البدء يفتح الميكروفون تلقائياً عندما تتكلّم (بدون زر)، ويتوقّف بعد سكون قصير. يمكنك دائماً الكتابة في المحادثة.
             </p>
             <div className="flex flex-col gap-3 w-full">
               <button
@@ -536,15 +563,10 @@ export default function AvatarAgentClient({
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  void (async () => {
-                    await handleStartSession();
-                    await toggleListening();
-                  })();
-                }}
+                onClick={() => void handleStartSession()}
                 className="w-full py-4 rounded-2xl text-lg font-bold text-white bg-cyan-700 hover:bg-cyan-600 transition-all shadow-lg active:scale-95"
               >
-                🎤 ابدأ والتحدث بالميكروفون
+                🎤 ابدأ مباشرة (صوت تلقائي)
               </button>
             </div>
           </div>
@@ -879,8 +901,8 @@ export default function AvatarAgentClient({
                 {history.length === 0 && (
                   <p className="px-1 text-center text-[12px] leading-relaxed text-gray-500">
                     {sessionLocked
-                      ? 'اضغط «ابدأ الآن» أعلاه لتفعيل المحادثة والميكروفون.'
-                      : 'Speak, or type here — messages appear in this thread.'}
+                      ? 'اضغط «ابدأ الآن» لتفعيل الجلسة؛ ثم يعمل الميكروفون تلقائياً عندما تتكلّم.'
+                      : 'تكلّم أو اكتب هنا — الرسائل تظهر في هذا السجل.'}
                   </p>
                 )}
                 {history.map((h, i) => (
@@ -913,20 +935,41 @@ export default function AvatarAgentClient({
                     COGNI_MIC_UI_ENABLED ? (
                       <button
                         type="button"
-                        disabled={sessionLocked}
-                        onClick={() => void toggleListening()}
-                        title={isListening ? 'إيقاف الاستماع' : 'تحدث بالميكروفون'}
-                        aria-label={isListening ? 'إيقاف الاستماع' : 'تشغيل الميكروفون'}
-                        aria-pressed={isListening}
-                        className={`flex h-14 min-w-[3.5rem] shrink-0 items-center justify-center rounded-2xl text-xl text-white shadow-lg transition-all active:scale-90 disabled:cursor-not-allowed disabled:opacity-40 ${
+                        disabled={sessionLocked || !isConnected}
+                        onClick={() => {
+                          void toggleListening();
+                        }}
+                        aria-label={
+                          sessionLocked
+                            ? 'ابدأ الجلسة أولاً لتفعيل الميكروفون'
+                            : !isConnected
+                              ? 'انتظر اتصال الخادم'
+                              : sttUiPhase === 'listening'
+                                ? 'إيقاف الميكروفون'
+                                : 'تشغيل الميكروفون'
+                        }
+                        title={
+                          sessionLocked
+                            ? 'الميكروفون بعد بدء الجلسة'
+                            : !isConnected
+                              ? 'انتظر الاتصال'
+                              : sttUiPhase === 'converting'
+                                ? 'تحويل الكلام إلى نص'
+                                : sttUiPhase === 'listening'
+                                  ? 'اضغط لإيقاف الميكروفون — أو يُفعَّل تلقائياً بعد تحميل المشهد'
+                                  : 'اضغط لتشغيل الميكروفون (أو يُشغَّل تلقائياً بعد تحميل الأفاتار)'
+                        }
+                        className={`flex h-14 min-w-[3.5rem] shrink-0 cursor-pointer select-none items-center justify-center rounded-2xl text-xl text-white shadow-lg transition-transform active:scale-95 disabled:cursor-not-allowed ${
+                          sessionLocked ? 'opacity-40 grayscale' : ''
+                        } ${
                           sttUiPhase === 'converting'
                             ? 'animate-pulse bg-orange-500 ring-2 ring-orange-300/50'
-                            : isListening
+                            : sttUiPhase === 'listening'
                               ? 'animate-pulse bg-red-600'
-                              : 'bg-slate-600 hover:bg-cyan-600'
+                              : 'bg-slate-600 hover:bg-slate-500'
                         }`}
                       >
-                        {sttUiPhase === 'converting' ? '⏳' : isListening ? '⏹' : '🎤'}
+                        {sttUiPhase === 'converting' ? '⏳' : sttUiPhase === 'listening' ? '🎤' : '🎙️'}
                       </button>
                     ) : null
                   }

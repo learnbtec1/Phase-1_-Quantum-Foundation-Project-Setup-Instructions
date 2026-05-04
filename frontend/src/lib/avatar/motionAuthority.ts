@@ -9,6 +9,8 @@ import { DEBUG_AVATAR } from '@/app/avatar-agent/debugAvatar';
 import { motionDebug } from '@/lib/avatar/motionDebug';
 import { motionDiagIncrBlock } from '@/lib/avatar/motionDiagnosticsStore';
 import { PRIORITY, type PriorityValue } from '@/constants/gestures';
+import { isProceduralOnlyMotion, isVrmaPlaybackGloballyDisabled } from '@/lib/avatar/vrmaPlaybackPolicy';
+import { isDebugMotion, logError, logWarn } from '@/lib/logging/runtimeLog';
 
 export type MotionSource = 'NONE' | 'VRMA' | 'GESTURE' | 'IDLE' | 'REACTION';
 
@@ -64,15 +66,12 @@ export function canOverride(current: MotionSource, next: MotionSource): boolean 
   return PRIORITY_RANK[next] >= PRIORITY_RANK[current];
 }
 
-function isDevMotionLog(): boolean {
-  return typeof process !== 'undefined' && process.env.NODE_ENV === 'development';
-}
-
 function motionLog(kind: 'START' | 'BLOCKED' | 'END', detail: string): void {
-  if (!isDevMotionLog() && !DEBUG_AVATAR) return;
-  if (kind === 'START') console.log('MOTION START:', detail);
-  else if (kind === 'BLOCKED') console.log('MOTION BLOCKED:', detail);
-  else console.log('MOTION END:', detail);
+  if (!isDebugMotion() && !DEBUG_AVATAR) return;
+  const tag =
+    kind === 'START' ? 'MOTION START:' : kind === 'BLOCKED' ? 'MOTION BLOCKED:' : 'MOTION END:';
+  // eslint-disable-next-line no-console -- gated by DEBUG_AVATAR / motion debug env
+  console.log('[DEBUG][MOTION]', tag, detail);
 }
 
 function dispatchAuthorityEvent(): void {
@@ -87,7 +86,34 @@ export function getMotionControllerState(): Readonly<MotionControllerState> {
   return motionController;
 }
 
+/**
+ * Hard guard called every frame by VRMSkeletonManager.
+ * In procedural-only mode, if VRMA somehow owns the controller, evict it immediately.
+ */
+export function assertNoVrmaLeak(): void {
+  if (!isProceduralOnlyMotion()) return;
+  const src: MotionSource = motionController.source;
+  if (src === 'VRMA') {
+    logError(
+      'SYSTEM',
+      '[VRMA LEAK DETECTED] motionController.source=VRMA while PROCEDURAL_ONLY_MOTION=true — forcing release',
+    );
+    motionController.active = false;
+    motionController.source = 'NONE';
+    motionController.startedAt = 0;
+    motionController.lockUntil = 0;
+    vrmaBaselineLayerActive = false;
+    dispatchAuthorityEvent();
+  }
+}
+
 function applyAcquire(next: Exclude<MotionSource, 'NONE'>, lockMs: number): boolean {
+  // Hard block — VRMA cannot acquire authority in procedural-only OR globally-disabled mode.
+  if ((next as MotionSource) === 'VRMA' && isVrmaPlaybackGloballyDisabled()) {
+    // eslint-disable-next-line no-console -- VRMA block confirmation (always-on)
+    console.warn('[VRMA BLOCKED SOURCE]', 'applyAcquire hard-blocked', { next, lockMs, caller: new Error().stack?.split('\n')[2]?.trim() });
+    return false;
+  }
   releaseStaleNonVrmaAuthority();
   const t = perfNow();
   const cur = motionController.source;
@@ -202,6 +228,11 @@ export function motionAuthorityAllowsIdleLayer(): boolean {
  * (Optional sync when not driving authority purely through `tryAcquireMotion` in `playClip`.)
  */
 export function syncMotionAuthorityFromVrma(blocking: boolean): void {
+  if (isProceduralOnlyMotion()) {
+    // In procedural-only mode never let VRMA acquire authority; force-clear if somehow set.
+    if (motionController.source === 'VRMA') releaseMotion('VRMA');
+    return;
+  }
   if (blocking) {
     if (motionController.source !== 'VRMA') {
       tryAcquireMotion('VRMA', 600_000);

@@ -1,6 +1,6 @@
 /**
  * Stub viseme timeline for BFF direct ElevenLabs (no phoneme alignment from API).
- * Mirrors backend `stub_viseme_timeline_for_text` + `estimate_mp3_duration_ms`.
+ * Mirrors backend `stub_viseme_timeline_for_text` + `get_audio_duration_ms` (ffprobe).
  */
 
 export function estimateMp3DurationMs(mp3Bytes: Uint8Array): number {

@@ -52,7 +52,40 @@ export interface UseVADReturn {
 }
 
 // ---------------------------------------------------------------------------
-// Internal amplitude-based VAD (no external library needed)
+// Exported mic helpers — Edge-safe constraints + Brain sync (`voice:mic:stopped`)
+// ---------------------------------------------------------------------------
+
+export function dispatchMicStopped(): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new Event('voice:mic:stopped'));
+}
+
+/**
+ * Production mic open: strict `{ channelCount + sampleRate }` first.
+ * Edge: `OverconstrainedError` → single retry with `{ audio: true }` (stream kept alive).
+ */
+export async function getMicStreamSafe(): Promise<MediaStream> {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: { ideal: 16000 },
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
+    });
+  } catch (e: unknown) {
+    const err = e as { name?: string };
+    if (err?.name === 'OverconstrainedError' || err?.name === 'ConstraintNotSatisfiedError') {
+      console.warn('[useVAD] fallback to loose constraints');
+      return await navigator.mediaDevices.getUserMedia({ audio: true });
+    }
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Internal VAD amplitude pipeline (MediaRecorder + analyser RMS gate)
 // ---------------------------------------------------------------------------
 
 async function buildWavBlob(chunks: Blob[], sampleRate: number): Promise<Blob | null> {
@@ -204,21 +237,23 @@ export function useVAD({
     vocalStartMsRef.current = 0;
     lastLoudAtMsRef.current = 0;
     chunksRef.current = [];
-    window.dispatchEvent(new CustomEvent('voice:mic:stopped'));
+    dispatchMicStopped();
   }, []);
 
   const startListening = useCallback(async () => {
-    if (!isSupported || isRecording) return;
+    if (!isSupported) {
+      throw new Error('[useVAD] getUserMedia / MediaRecorder not supported');
+    }
+    if (isRecording) return;
     if (manualActiveRef.current) {
       console.warn('[useVAD] startListening ignored — manual recording active');
-      return;
+      throw new Error('[useVAD] manual recording active');
     }
 
-    // Don't retry if we already know there's no device or permission was denied
     if (micNotFoundRef.current || permissionDeniedRef.current) {
       console.log('[useVAD] Not retrying — previous error (micNotFound=' +
         micNotFoundRef.current + ' permissionDenied=' + permissionDeniedRef.current + ')');
-      return;
+      throw new Error('[useVAD] microphone blocked (not found or permission denied)');
     }
 
     // Defensive segment-state reset — idempotent guard against any code path
@@ -251,11 +286,7 @@ export function useVAD({
 
     try {
       console.log('[useVAD] Requesting microphone...');
-      const stream = await navigator.mediaDevices.getUserMedia({
-        // Use `ideal` for sampleRate — Edge/Safari may reject exact 16000 with OverconstrainedError.
-        // channelCount:1 + echoCancellation/noiseSuppression are kept as hard constraints.
-        audio: { channelCount: 1, sampleRate: { ideal: 16000 }, echoCancellation: true, noiseSuppression: true },
-      });
+      const stream = await getMicStreamSafe();
       console.log('[useVAD] Microphone access granted');
       streamRef.current = stream;
       activeRef.current = true;
@@ -266,29 +297,32 @@ export function useVAD({
       // "listening" state forever and future startListening() calls are skipped.
       // We normalise the whole session to idle — no console.error, just debug.
       for (const track of stream.getAudioTracks()) {
-        track.addEventListener('ended', () => {
-          if (!activeRef.current) return; // already stopped cleanly — ignore
-          console.debug('[useVAD] Audio track ended externally — transitioning to idle (no error)');
+        track.onended = () => {
+          if (!activeRef.current) return;
+          console.warn('[useVAD] track ended');
           activeRef.current = false;
           setIsRecording(false);
           cancelAnimationFrame(rafRef.current);
-          if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
-          streamRef.current   = null;
+          if (silenceTimerRef.current) {
+            clearTimeout(silenceTimerRef.current);
+            silenceTimerRef.current = null;
+          }
+          streamRef.current = null;
           recorderRef.current = null;
           try {
             vadMediaSourceRef.current?.disconnect();
           } catch { /* ignore */ }
           vadMediaSourceRef.current = null;
-          audioCtxRef.current  = null;
-          analyserRef.current  = null;
-          chunksRef.current    = [];
-          firstChunkSavedRef.current      = false;
+          audioCtxRef.current = null;
+          analyserRef.current = null;
+          chunksRef.current = [];
+          firstChunkSavedRef.current = false;
           hadSpeechThisSegmentRef.current = false;
-          speechStartedRef.current        = false;
-          vocalStartMsRef.current         = 0;
-          lastLoudAtMsRef.current         = 0;
-          window.dispatchEvent(new CustomEvent('voice:mic:stopped'));
-        }, { once: true });
+          speechStartedRef.current = false;
+          vocalStartMsRef.current = 0;
+          lastLoudAtMsRef.current = 0;
+          dispatchMicStopped();
+        };
       }
 
       // Set up recorder — restart after each segment happens inside onstop only
@@ -404,6 +438,8 @@ export function useVAD({
           const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
           // Log once per speech segment — only when transitioning from silence to speech
           if (!speechStartedRef.current) {
+            // eslint-disable-next-line no-console
+            console.log('[VAD] voice detected');
             console.log(`[useVAD] Speech Detected — Recording... (rms=${rms.toFixed(4)}, threshold=${silenceThreshold})`);
             hadSpeechThisSegmentRef.current = true;
             vocalStartMsRef.current = nowMs;
@@ -442,6 +478,8 @@ export function useVAD({
               }
             }
 
+            // eslint-disable-next-line no-console
+            console.log('[VAD] silence detected');
             console.log(`[VAD] Silence Detected — ending segment (gap=${silenceGapMs}ms) → stop → onstop → WAV`);
             window.dispatchEvent(new CustomEvent('cogni:user:silent'));
             const rec = recorderRef.current;
@@ -472,16 +510,6 @@ export function useVAD({
         setPermissionDenied(true);
         permissionDeniedRef.current = true;
         return;
-      } else if (e?.name === 'OverconstrainedError' || e?.name === 'ConstraintNotSatisfiedError') {
-        // Edge may reject sampleRate:ideal — retry without audio constraints
-        console.warn('[useVAD] OverconstrainedError — retrying with no constraints');
-        try {
-          const fallbackStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          // Replace stream variable used below — restart the whole startListening call
-          fallbackStream.getTracks().forEach((t) => t.stop());
-        } catch { /* ignore */ }
-        // Re-throw so callers know to retry
-        throw err;
       } else if (e?.name === 'SecurityError') {
         console.error('[useVAD] SecurityError — page must be served over HTTPS or localhost');
         setPermissionDenied(true);
@@ -533,29 +561,23 @@ export function useVAD({
 
     try {
       console.log('[useVAD] Manual: requesting microphone...');
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, sampleRate: { ideal: 16000 }, echoCancellation: true, noiseSuppression: true },
-      });
+      const stream = await getMicStreamSafe();
       manualStreamRef.current = stream;
       manualChunksRef.current = [];
       manualCancelRef.current = false;
       manualActiveRef.current = true;
 
       for (const track of stream.getAudioTracks()) {
-        track.addEventListener(
-          'ended',
-          () => {
-            if (!manualActiveRef.current) return;
-            console.debug('[useVAD] Manual: track ended — stopping');
-            manualCancelRef.current = true;
-            try {
-              manualRecorderRef.current?.stop();
-            } catch {
-              /* ignore */
-            }
-          },
-          { once: true },
-        );
+        track.onended = () => {
+          if (!manualActiveRef.current) return;
+          console.warn('[useVAD] track ended');
+          manualCancelRef.current = true;
+          try {
+            manualRecorderRef.current?.stop();
+          } catch {
+            /* ignore */
+          }
+        };
       }
 
       const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
@@ -580,7 +602,7 @@ export function useVAD({
         manualRecorderRef.current = null;
         manualActiveRef.current = false;
         setIsRecording(false);
-        window.dispatchEvent(new CustomEvent('voice:mic:stopped'));
+        dispatchMicStopped();
 
         if (cancelled || chunks.length === 0) {
           if (cancelled) console.log('[useVAD] Manual: cancelled — no upload');

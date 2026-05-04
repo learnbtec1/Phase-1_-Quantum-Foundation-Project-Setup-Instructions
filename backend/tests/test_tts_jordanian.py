@@ -48,6 +48,14 @@ def test_detect_markers():
     assert not c.detect_egyptian_markers("هيك تمام")
 
 
+def test_locked_accepts_jordanian_voice():
+    from app.core.config import settings
+
+    with patch.object(settings, "TTS_FORCE_JORDANIAN", True):
+        assert _locked_jordanian_male_voice("ar-JO-TaimNeural") == "ar-JO-TaimNeural"
+        assert _locked_jordanian_male_voice("ar-JO-SanaNeural") == "ar-JO-SanaNeural"
+
+
 def test_locked_rejects_non_jo_voice():
     from app.core.config import settings
 

@@ -22,13 +22,24 @@ export type BehaviorMotionMode =
 
 export type BehaviorMotionState = {
   mode: BehaviorMotionMode;
+  /**
+   * Wall-clock of the last DISCRETE gesture completion. Drives anti-spam guards
+   * (motionScheduler `sched-3`). Continuous procedural motion does NOT touch this
+   * — it would otherwise refresh every frame and permanently block the scheduler.
+   */
   lastActionTime: number;
+  /**
+   * Wall-clock of the most recent procedural-frame activity. Used **only** by
+   * idle / under-motion diagnostics, never by gating logic.
+   */
+  lastContinuousActivityTime: number;
   attentionLevel: number;
 };
 
 const behaviorState: BehaviorMotionState = {
   mode: 'IDLE',
   lastActionTime: 0,
+  lastContinuousActivityTime: 0,
   attentionLevel: 0.5,
 };
 
@@ -150,9 +161,14 @@ export function recordBehaviorMotionAction(): void {
   motionDebug(`ACTION RECORDED at ${t.toFixed(1)}`);
 }
 
-/** Continuous procedural motion (intent motor, etc.) — refreshes idle timer only; not a discrete gesture completion. */
+/**
+ * Continuous procedural motion (intent motor, etc.) — refreshes the idle / under-motion
+ * diagnostic clock ONLY. Must NOT touch `lastActionTime` (the discrete-gesture clock used
+ * by `motionScheduler` sched-3); doing so would permanently deadlock ambient scheduling
+ * because procedural motion runs every frame.
+ */
 export function recordContinuousMotionActivity(): void {
-  behaviorState.lastActionTime = perfNow();
+  behaviorState.lastContinuousActivityTime = perfNow();
 }
 
 export function getBehaviorMotionState(): Readonly<BehaviorMotionState> {

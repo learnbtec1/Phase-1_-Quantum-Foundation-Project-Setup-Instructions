@@ -66,12 +66,14 @@ function warnOverBlocking(): void {
 
 function warnUnderMotion(): void {
   const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-  const { lastActionTime } = getBehaviorMotionState();
-  if (lastActionTime > 0 && now - lastActionTime > 5000) {
+  const b = getBehaviorMotionState();
+  /** Either a real gesture OR continuous procedural motion counts as "moving". */
+  const lastAny = Math.max(b.lastActionTime, b.lastContinuousActivityTime);
+  if (lastAny > 0 && now - lastAny > 5000) {
     // eslint-disable-next-line no-console
     console.warn('[MOTION] NO MOTION FOR TOO LONG', {
-      msSinceLastAction: Math.round(now - lastActionTime),
-      mode: getBehaviorMotionState().mode,
+      msSinceLastAction: Math.round(now - lastAny),
+      mode: b.mode,
     });
   }
 }

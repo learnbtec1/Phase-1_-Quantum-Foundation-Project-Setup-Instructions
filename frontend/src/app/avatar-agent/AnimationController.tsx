@@ -12,6 +12,7 @@ import type { VRM } from '@pixiv/three-vrm';
 import { DEBUG_AVATAR } from '@/app/avatar-agent/debugAvatar';
 import { lerp } from './utils';
 import { useBrainStore } from '@/store/useBrainStore';
+import { getSmoothedUnifiedEnergy } from '@/lib/avatar/unifiedEnergyModel';
 import { isExplainingIntent } from '@/ai/avatar/avatarIntent';
 import { getBlendedIntentPresentation, humanVariationMul } from '@/ai/avatar/brainState';
 import {
@@ -426,7 +427,7 @@ export function AnimationController({
         isThinkingBrainRef.current,
     });
     const interactionIntent = brain.interactionIntent;
-    const intentE = brain.intentEnergy ?? 0.5;
+    const intentE = getSmoothedUnifiedEnergy();
     const hv = humanVariationMul(t + brain.interactionIntent.length * 0.17);
     const presBlended = getBlendedIntentPresentation({
       committedIntent: brain.interactionIntent,

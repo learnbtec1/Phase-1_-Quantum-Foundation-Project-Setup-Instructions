@@ -14,6 +14,10 @@ export type SpeechSemanticHints = {
   question: number;
   uncertainty: number;
   explanation: number;
+  /** "Look", "notice", "pay attention", imperative cues → headTurn. */
+  attention?: number;
+  /** "Let me think", "hmm" — explicit hesitation cues → headTilt. */
+  thinkingCue?: number;
   emotion?: EmotionHint;
 };
 
@@ -39,6 +43,8 @@ const defaultHints: SpeechSemanticHints = {
   question: 0,
   uncertainty: 0,
   explanation: 0,
+  attention: 0,
+  thinkingCue: 0,
 };
 
 let _embodimentState: EmbodimentState = {

@@ -29,14 +29,30 @@ function mulBoneEuler(
   finalPose.set(key, _qOut.clone());
 }
 
+export type ProceduralVrmaLifeOpts = {
+  /** Multiplies spine/chest/shoulder micro motion (default 1). */
+  intensityMul?: number;
+  /** Slow neck/head roll so the figure reads alive during VRMA + speech. */
+  neckSway?: boolean;
+};
+
 export function applyProceduralVrmaLifeOverlay(
   finalPose: BonePoseMap,
   t: number,
   _delta: number,
+  opts?: ProceduralVrmaLifeOpts,
 ): void {
+  const mul = Math.max(0.5, Math.min(2.4, opts?.intensityMul ?? 1));
   const { spineX, chestX, shoulderRoll } = vrmaMicroBreathEuler(t);
-  mulBoneEuler(finalPose, 'spine', spineX, 0, 0);
-  mulBoneEuler(finalPose, 'chest', chestX * 0.88, 0, 0);
-  mulBoneEuler(finalPose, 'leftShoulder', 0, 0, shoulderRoll);
-  mulBoneEuler(finalPose, 'rightShoulder', 0, 0, -shoulderRoll * 0.94);
+  mulBoneEuler(finalPose, 'spine', spineX * mul, 0, 0);
+  mulBoneEuler(finalPose, 'chest', chestX * 0.88 * mul, 0, 0);
+  mulBoneEuler(finalPose, 'leftShoulder', 0, 0, shoulderRoll * mul);
+  mulBoneEuler(finalPose, 'rightShoulder', 0, 0, -shoulderRoll * 0.94 * mul);
+
+  if (opts?.neckSway) {
+    const ny = Math.sin(t * 0.71) * 0.0042 * mul;
+    const nx = Math.sin(t * 0.53 + 0.2) * 0.0036 * mul;
+    mulBoneEuler(finalPose, 'neck', nx, ny, 0);
+    mulBoneEuler(finalPose, 'head', nx * 0.55, ny * 0.62, 0);
+  }
 }

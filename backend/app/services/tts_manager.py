@@ -31,7 +31,7 @@ class AgentTTSManager:
         client_pitch_scale: float,
         usage_user_id: Optional[uuid.UUID],
     ) -> Tuple[bytes, List[Dict[str, Any]], List[Dict[str, Any]], str]:
-        mp3_bytes, viseme_cues, word_cues, tts_provider = await edge_tts.synthesize(
+        mp3_bytes, viseme_cues, word_cues, tts_provider, _voice_label = await edge_tts.synthesize(
             dialogue,
             voice_name=voice_name,
             emotion=emotion,
@@ -40,10 +40,10 @@ class AgentTTSManager:
             client_pitch_scale=client_pitch_scale,
             usage_user_id=usage_user_id,
         )
-        if tts_provider != "edge":
-            raise RuntimeError(f"TTS integrity violation: expected Edge, got {tts_provider!r}")
+        if tts_provider not in ("edge", "local_piper", "local", "elevenlabs"):
+            raise RuntimeError(f"TTS integrity violation: unexpected provider {tts_provider!r}")
         if not mp3_bytes:
-            raise RuntimeError("Edge TTS returned empty audio")
+            raise RuntimeError("TTS returned empty audio")
         return mp3_bytes, viseme_cues, word_cues, tts_provider
 
     def repair_visemes_from_words(

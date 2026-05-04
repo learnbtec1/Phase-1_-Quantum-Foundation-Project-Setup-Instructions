@@ -39,6 +39,10 @@ function mapBrainModeToIntent(mode: BehaviorMotionMode): MotionIntentKind {
     case 'THINKING':
     case 'ANTICIPATING':
       return 'thinking';
+    case 'IDLE':
+      // Without a non-null intent, `intentMotorLayer` exits every frame (dead zone). A soft
+      // "listening" presence keeps subtle head/arm micro-motion between utterances — independent of TTS vendor.
+      return 'listening';
     default:
       return null;
   }
@@ -86,14 +90,17 @@ export function updateIntentFromBehaviorBrain(delta: number): void {
     if (intentState.activeIntent !== targetIntent) {
       intentState.activeIntent = targetIntent;
       intentState.startTime = perfNow();
-      intentState.intensity = Math.min(1, intentState.intensity + 0.18);
+      const idleCap = mode === 'IDLE' ? 0.24 : 1;
+      intentState.intensity = Math.min(idleCap, intentState.intensity + 0.18);
     } else {
       const targetI = 0.42 + bs.attentionLevel * 0.48;
-      intentState.intensity += (targetI - intentState.intensity) * Math.min(1, dt * 2.8);
+      const cappedTarget = mode === 'IDLE' ? Math.min(targetI, 0.26) : targetI;
+      intentState.intensity += (cappedTarget - intentState.intensity) * Math.min(1, dt * 2.8);
       intentState.intensity = Math.min(1, intentState.intensity);
     }
     intentState.intensity *= Math.pow(0.995, dt * 60);
-    intentState.intensity = Math.min(1, Math.max(0.04, intentState.intensity));
+    const floorI = mode === 'IDLE' ? 0.06 : 0.04;
+    intentState.intensity = Math.min(1, Math.max(floorI, intentState.intensity));
   } else {
     intentState.intensity *= decay;
     if (intentState.intensity < 0.055) {

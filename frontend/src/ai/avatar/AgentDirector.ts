@@ -18,6 +18,7 @@ import { PRIORITY, resolveEmotionGesturePlay } from '@/constants/gestures';
 import type { TeachingStrategy } from '@/ai/teaching/TeachingStrategyEngine';
 import { checkGestureCooldown, recordGestureLog, getLastGestureLog } from '@/ai/memory/store';
 import { dispatchAvatar }                    from '@/utils/events/normalizeAvatarEvents';
+import { motionTraceLog } from '@/lib/avatar/avatarMotionTrace';
 import { resetSpeechIntentHints, setSpeechIntentHintsFromText } from '@/lib/avatar/speechIntentHints';
 import { speakWithTTS, stopTTSGlobally, resolveSpeakRate, emitTtsFailureEmbodiment } from '@/ai/io/tts';
 import { COGNI_PERSONA, AVATAR_PERSONALITY } from '@/config/personality';
@@ -33,6 +34,10 @@ import {
   gesturePrerollMs,
 } from '@/utils/TimingUtils';
 import type { InteractionIntent } from '@/ai/avatar/avatarIntent';
+
+function wsAgentAudioEnvOn(): boolean {
+  return false;
+}
 
 declare global {
   interface Window {
@@ -115,6 +120,9 @@ function emit(name: string, detail: Record<string, unknown>): void {
     }
   }
   if (['avatar:gesture', 'avatar:emotion', 'avatar:listening', 'avatar:nod', 'avatar:headpose', 'avatar:speak:start', 'avatar:speak:end'].includes(name)) {
+    if (name === 'avatar:speak:start') {
+      motionTraceLog('AgentDirector.emit → dispatchAvatar(avatar:speak:start)', detail);
+    }
     dispatchAvatar(name as any, detail);
   } else {
     window.dispatchEvent(new CustomEvent(name, { detail }));
@@ -867,12 +875,14 @@ export class AgentDirector {
     if (!text?.trim()) return;
     const trimmed = text.trim();
     const now = masterClockNowMs();
-    if (
-      trimmed === this._lastScheduledTtsText
-      && now - this._lastScheduledTtsAt < 10_000
-    ) {
-      console.warn('[AgentDirector] scheduleTTS skipped — duplicate text within 10s');
-      return;
+    if (wsAgentAudioEnvOn()) {
+      if (
+        trimmed === this._lastScheduledTtsText
+        && now - this._lastScheduledTtsAt < 10_000
+      ) {
+        console.warn('[AgentDirector] scheduleTTS skipped — duplicate text within 10s');
+        return;
+      }
     }
     this._lastScheduledTtsText = trimmed;
     this._lastScheduledTtsAt = now;
@@ -901,13 +911,12 @@ export class AgentDirector {
             ...(COGNI_VOICE.pitchScale > 1.01 ? { pitch: '+2Hz' as const } : {}),
             arVoice: 'male',
             forceEdgeBff: ttsOpts?.forceEdgeBff,
-            onStart: () => {
-              emit('avatar:speak:start', {});
-            },
+            // speak:start / speak:end are owned by `speakWithTTS` (window events + cleanup).
+            // Duplicate emit here caused a second speak:end → ConversationManager "Ignored speak:end".
+            onStart: () => {},
             onEnd: () => {
               useBrainStore.getState().setTalking(false);
               resetSpeechIntentHints();
-              emit('avatar:speak:end', {});
               res();
             },
           });
@@ -915,7 +924,6 @@ export class AgentDirector {
             useBrainStore.getState().setTalking(false);
             resetSpeechIntentHints();
             emitTtsFailureEmbodiment('director_schedule_tts_null');
-            emit('avatar:speak:end', {});
             // eslint-disable-next-line no-console
             console.warn(
               '[AgentDirector] speakWithTTS failed — TTS API error, empty visemes/audio, or playback blocked (see [speakWithTTS] logs)',

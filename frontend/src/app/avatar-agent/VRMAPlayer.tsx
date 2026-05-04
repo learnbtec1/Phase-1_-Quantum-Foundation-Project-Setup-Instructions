@@ -650,50 +650,15 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
       vrmaRetryTimeoutsRef.current.push(tid);
     };
 
-    const onPlay = async (e: Event) => {
-      if (isVrmaPlaybackGloballyDisabled()) return;
-      const detail = (e as CustomEvent<VRMAPlayEventDetail>).detail;
-      if (!detail) {
-        motionDebug('VRMA IGNORED:', 'avatar:vrma:play-no-detail');
-        return;
-      }
-      const url = resolveVrmaPlayUrl(detail);
-      if (!url) {
-        motionDebug('VRMA IGNORED:', 'resolveVrmaPlayUrl-null', detail);
-        return;
-      }
-      const loop = detail.loop ?? false;
-      if (!VRMA_BASELINE_PLAYBACK_ENABLED && isBaselineIdleVrma(detail, url, loop)) {
-        motionDebug('VRMA IGNORED:', 'baseline-loop-not-loaded');
-        return;
-      }
-      const attempt = detail._retry ?? 0;
-      const clip = await tryLoadClip(url, vrm);
-      if (!clip) {
-        if (process.env.NODE_ENV === 'development') {
-          avatarDebug(
-            `[VRMAPlayer] VRMA load failed — retry in 1s: ${url} (attempt ${attempt})`,
-          );
-        }
-        motionDebug('VRMA IGNORED:', 'tryLoadClip-null', url, 'attempt', attempt);
-        scheduleRetry(detail, url, attempt);
-        return;
-      }
-      const durationMs =
-        detail.durationMs ??
-        (clip.duration > 0 ? clip.duration * 1050 : DEFAULT_DURATION_MS);
-      const tier = isBaselineIdleVrma(detail, url, loop) ? 'baseline' : 'full';
-      const ok = playClipRef.current(
-        clip,
-        durationMs,
-        loop,
-        tier,
-        detail.urgency,
-        detail.cognitiveLoad,
-      );
-      if (!ok) {
-        motionDebug('VRMA IGNORED:', 'playClip-false-after-load', clip.name, url);
-      }
+    /**
+     * HARDCODED KILL SWITCH — avatar:vrma:play is unconditionally blocked.
+     * The env-var policy (isVrmaPlaybackGloballyDisabled) proved unreliable due
+     * to Next.js build-time caching; this handler is the second layer of defence.
+     * To re-enable VRMA: restore the original handler body and revert vrmaPlaybackPolicy.ts.
+     */
+    const onPlay = (_e: Event): void => {
+      // eslint-disable-next-line no-console -- permanent kill-switch log (one line per blocked event)
+      console.log('[VRMA BLOCKED] avatar:vrma:play ignored — procedural-only mode active');
     };
 
     const onBargeIn = (): void => {
@@ -831,12 +796,15 @@ export function VRMAPlayer({ vrm, vrmaActiveRef, vrmaPoseRef }: VRMAPlayerProps)
       }
     }
 
+    const safeDelta = Math.min(delta, 0.1);
+    // Advance mixer clock every frame whenever the mixer exists — even with no active clip
+    // (baseline VRMA may be off; silence must not freeze internal mixer state).
     if (!isActive) {
       if (vrmaPoseRef) vrmaPoseRef.current = null;
+      mixer.update(safeDelta);
       return;
     }
 
-    const safeDelta = Math.min(delta, 0.1);
     const humanoid = vrm?.humanoid;
     if (vrmaPoseRef && humanoid) {
       const snap: BonePoseMap = new Map();

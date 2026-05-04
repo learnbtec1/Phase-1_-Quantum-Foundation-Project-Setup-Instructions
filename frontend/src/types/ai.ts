@@ -42,6 +42,9 @@ export interface PADVector {
 
 // ─── Agent frame (from WebSocket backend) ─────────────────────────────────────
 
+/** Drives formal vs celebratory persona before mood-only heuristics. */
+export type PersonaPedagogicalIntent = 'error' | 'correction' | 'success' | 'neutral';
+
 /** A single AI reply frame from the WebSocket backend. */
 export interface AgentFrame {
   /** Natural-language reply text (Arabic). */
@@ -88,6 +91,11 @@ export interface AgentFrame {
   cognitive_intent?: 'explaining' | 'thinking' | 'listening';
   cognitive_intensity?: number;
   cognitive_tone?: string;
+  /**
+   * Optional teaching beat for Cogni persona (takes priority over emotion-only mapping).
+   * Backend / LLM may set explicitly; otherwise derived heuristically from text + awareness_cues.
+   */
+  pedagogical_intent?: PersonaPedagogicalIntent;
 }
 
 // ─── Behavior output ───────────────────────────────────────────────────────────

@@ -72,6 +72,10 @@ import {
 } from '@/lib/avatar/motionDiagnosticsStore';
 import { startMotionDiagnosticReporting } from '@/lib/avatar/motionDiagnostics';
 import { startMotionScheduler } from '@/lib/avatar/motionScheduler';
+import { initAvatarOrchestratorListeners } from '@/lib/avatar/avatarOrchestratorState';
+import { initCogniPersonaStanceListeners } from '@/lib/avatar/cogniPersonaStance';
+import { initTtsSpeechMotionBridge } from '@/lib/avatar/ttsSpeechMotionBridge';
+import { motionTraceLog } from '@/lib/avatar/avatarMotionTrace';
 import {
   bumpIntentFromGesturePlayName,
   tryMotionIntentOnlyFromPlayName,
@@ -201,6 +205,10 @@ export function initGestureNormalizer(): void {
   initInternalThoughtLayer();
   startMotionDiagnosticReporting();
   startMotionScheduler();
+  initAvatarOrchestratorListeners();
+  initCogniPersonaStanceListeners();
+  motionTraceLog('UnifiedGestureEngine: initTtsSpeechMotionBridge()');
+  initTtsSpeechMotionBridge();
   devLog('info', 'capture normalizer attached');
 }
 

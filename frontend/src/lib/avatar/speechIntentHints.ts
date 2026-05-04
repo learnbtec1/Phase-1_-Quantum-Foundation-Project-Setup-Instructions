@@ -12,6 +12,8 @@ export type SpeechIntentHints = {
   question: boolean;
   /** Expository / causal / enumerative language. */
   explanation: boolean;
+  /** Brief “let me think” / hesitation cues in the assistant line. */
+  thinkingCue: boolean;
   /** 0–1 — hedging, ellipsis, “maybe” tone. */
   uncertainty: number;
   /** “Think with me” / imagine / consider — invites reflection. */
@@ -22,6 +24,7 @@ const DEFAULT_HINTS: SpeechIntentHints = {
   emphasis: 0.34,
   question: false,
   explanation: false,
+  thinkingCue: false,
   uncertainty: 0.1,
   inviteReflection: false,
 };
@@ -57,6 +60,10 @@ export function computeSpeechIntentHintsFromText(raw: string): SpeechIntentHints
     /\b(imagine|consider|think about|picture this|ask yourself|reflect)\b/i.test(lower)
     || /(تخيل|فكر معي|لاحظ أن|تأمل|جرب أن تفكر|ما رأيك)/u.test(t);
 
+  const thinkingCue =
+    /\b(let me think|hang on|one moment|hmm+)\b/i.test(lower)
+    || /(دعني أفكر|لحظة من فضلك|^مم+[\s،]|تأمل معي)/u.test(t);
+
   let emphasis = 0.32;
   const bangs = (t.match(/!/g) ?? []).length;
   if (bangs > 0) emphasis += Math.min(0.34, bangs * 0.09);
@@ -71,16 +78,35 @@ export function computeSpeechIntentHintsFromText(raw: string): SpeechIntentHints
   if (/[A-Z]{5,}/.test(t)) emphasis += 0.05;
   emphasis = Math.min(1, emphasis);
 
-  return { emphasis, question, explanation, uncertainty, inviteReflection };
+  return { emphasis, question, explanation, thinkingCue, uncertainty, inviteReflection };
+}
+
+/** Single primary intent for meaning-driven motion while speaking (priority order). */
+export type UtteranceSemanticIntent = 'question' | 'explain' | 'emphasize' | 'thinking';
+
+let currentUtteranceSemanticIntent: UtteranceSemanticIntent | null = null;
+
+export function resolveUtteranceSemanticIntent(h: Readonly<SpeechIntentHints>): UtteranceSemanticIntent | null {
+  if (h.question) return 'question';
+  if (h.explanation) return 'explain';
+  if (h.emphasis >= 0.56) return 'emphasize';
+  if (h.thinkingCue || h.inviteReflection || h.uncertainty >= 0.52) return 'thinking';
+  return null;
+}
+
+export function getUtteranceSemanticIntent(): UtteranceSemanticIntent | null {
+  return currentUtteranceSemanticIntent;
 }
 
 export function setSpeechIntentHintsFromText(raw: string): void {
   current = computeSpeechIntentHintsFromText(raw);
+  currentUtteranceSemanticIntent = resolveUtteranceSemanticIntent(current);
   setEmbodimentUtteranceTextForSemantics(raw);
 }
 
 export function resetSpeechIntentHints(): void {
   current = { ...DEFAULT_HINTS };
+  currentUtteranceSemanticIntent = null;
   setEmbodimentUtteranceTextForSemantics(undefined);
 }
 

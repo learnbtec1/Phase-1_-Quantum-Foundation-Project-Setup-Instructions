@@ -277,6 +277,56 @@ docker compose --profile chroma up -d chromadb
 - **Backend:** `cd backend && pytest tests/ -v`
 - **Frontend:** `cd frontend && npm test` (Jest)
 
+## Load testing (TTS pipeline)
+
+Automated probes against `POST /api/v1/tts-with-timing` (httpx + Locust). **Does not change backend code.**
+
+### Setup
+
+```bash
+make loadtest-install
+# or: python -m pip install -r scripts/requirements-loadtest.txt
+```
+
+- **Auth:** If the API does not have `COGNI_DEV_BYPASS_AUTH=true`, set a JWT: `export TTS_LOAD_TEST_TOKEN='…'`. The observability route `GET /api/v1/tts-observability` also requires a Bearer token (`monitor.sh` uses the same variable).
+- **Multi-user (recommended for “real” load):** Comma-separated JWTs bypass **per-user** TTS limits (≈3 req/s each).  
+  `export LOAD_TEST_TOKENS='jwt1,jwt2,jwt3'`  
+  httpx rotates `tokens[i % N]` per request; Locust picks a **random** token from the pool on each request.  
+  Optional shared headers: `LOAD_TEST_HEADERS='X-Custom:1'` or `python scripts/load_test_tts.py --header 'X-Debug:1'`.
+- **Metrics snapshot:** After a run,  
+  `python scripts/load_test_tts.py … --fetch-router-metrics`  
+  prints `router_metrics` from `/api/v1/tts-observability` (first token in the pool; server-wide, not just your run).
+- **Rate limit:** TTS allows about **3 requests per second per user**. With dev bypass, every unauthenticated load-test client shares **one** stub user, so aggressive concurrency produces many `429` responses. For a **single-user** baseline, use `--respect-backend-ratelimit`. For **capacity** testing, use **several JWTs** (`LOAD_TEST_TOKENS`).
+- **Shell:** `make test` / `run_tests.sh` / `monitor.sh` expect **bash** (Git Bash or WSL on Windows).
+
+### Recommended sequence
+
+1. **`make test-light`** — quick httpx batch (effective RPS, HTTP status mix, 429 %, provider mix from JSON, latency percentiles).
+2. **`make test`** — httpx stage then Locust headless (`1m`, 20 users, spawn rate 5). Set **`LOAD_TEST_TOKENS`** for multi-user runs.
+3. **`make test-heavy`** — longer Locust run (`2m`, 50 users). Use a **token pool** (`LOAD_TEST_TOKENS`) so 429s reflect capacity, not a single-user ceiling.
+
+### What to watch
+
+| Signal | Where |
+|--------|--------|
+| Effective RPS, ok / 429 / other % | httpx summary |
+| Latency (avg, p95, max) | httpx / Locust |
+| Per-provider counts (this run) | httpx `Providers:` line (from JSON) |
+| Failures / HTTP errors | script output; Locust *Failures* |
+| `router_metrics`, legacy counters | `GET /api/v1/tts-observability` (with Bearer) |
+| CPU / memory (containers) | `make monitor` → `docker stats` |
+
+### Commands reference
+
+| Target | Action |
+|--------|--------|
+| `make test` | `bash scripts/run_tests.sh` |
+| `make test-light` | httpx only (`--concurrency 10 --requests 50`) |
+| `make test-heavy` | Locust headless heavy profile |
+| `make monitor` | Docker snapshot + curl observability |
+
+Override base URL for httpx: `TTS_LOAD_TEST_URL`. Override Locust host: `LOCUST_HOST` or `-H` / `--host`.
+
 ## الميزات
 
 - تقييم معايير BTEC (P/M/D) باستخدام Claude مع سلم الدرجات (REFER → PASS → MERIT → DISTINCTION)

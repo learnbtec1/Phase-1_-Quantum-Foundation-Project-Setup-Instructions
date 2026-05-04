@@ -7,7 +7,7 @@
 export type SpeechEmotionSnapshot = {
   emotion: string;
   intensity: number;
-  /** Optional RMS 0–1 from analyser when available */
+  /** Unified motion energy 0–1 (from {@link tickUnifiedEnergy}); not raw RMS. */
   energy?: number;
 };
 
@@ -21,7 +21,7 @@ export function getSpeechEmotionSnapshot(): SpeechEmotionSnapshot | null {
   return snapshot;
 }
 
-/** Updates RMS-derived energy (0–1) for gesture coupling; no-op if not speaking. */
+/** Updates bridge energy from smoothed unified model — not raw analyser RMS. */
 export function patchSpeechEmotionEnergy(energy: number): void {
   if (!snapshot) return;
   const e = Math.min(1, Math.max(0, energy));

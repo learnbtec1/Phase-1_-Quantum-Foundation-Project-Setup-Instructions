@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { VRM } from '@pixiv/three-vrm';
 import { motionDebug } from '@/lib/avatar/motionDebug';
+import { isDebugMotion } from '@/lib/logging/runtimeLog';
 import { logFinalPoseApplyProbe } from '@/app/avatar-agent/motion/motionPipelineDebug';
 
 /** Canonical keys for composed avatar bones (normalized humanoid). */
@@ -187,9 +188,7 @@ export function applyFinalPoseToVrm(params: {
 }): void {
   const { finalPose, boneRefs, delta, humanoid, kinematicSnapKeys } = params;
   logFinalPoseApplyProbe(finalPose, delta);
-  const motionPoseDebug =
-    typeof process !== 'undefined' &&
-    process.env.NEXT_PUBLIC_DEBUG_MOTION === 'true';
+  const motionPoseDebug = isDebugMotion();
   if (
     motionPoseDebug &&
     typeof performance !== 'undefined'

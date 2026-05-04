@@ -46,6 +46,7 @@ import {
   applyHumanizationLayer,
   applyAttentionSeekingLayer,
 } from './motion/humanizationBoneApply';
+import { installVrmHumanoidBypassProbe } from '@/app/avatar-agent/motion/proceduralV2';
 import {
   tickHumanization,
   shouldTriggerBlinkEdge,
@@ -58,6 +59,9 @@ import {
   getPerceptionAttentionSeekingStrength,
 } from '@/store/usePerceptionStore';
 import { readAnalyserRms01 } from '@/lib/audio/audioEnergyExtractor';
+import { getGlobalFrame } from '@/app/avatar-agent/behavior/GlobalMindStore';
+import { tickUnifiedEnergy, getSmoothedUnifiedEnergy } from '@/lib/avatar/unifiedEnergyModel';
+import { patchSpeechEmotionEnergy } from '@/ai/voice/speechEmotionBridge';
 import { applyProceduralVrmaLifeOverlay } from './motion/proceduralVrmaLifeOverlay';
 import { applyCinematicMicroLayer } from './motion/cinematicMicroLayer';
 import { blendPoseInto, generateIntentPose } from './motion/intentPoseGenerator';
@@ -65,7 +69,13 @@ import { updateIntentFromBehaviorBrain } from '@/lib/avatar/motionIntentContinui
 import { deriveEmbodimentFromLLM, getCognitiveOrchestratorInputOverlay } from '@/lib/ai/cognitiveOrchestrator';
 import { getEmbodimentState, updateEmbodimentState } from '@/lib/avatar/embodimentState';
 import { motionDriver } from '@/lib/avatar/MotionDriver';
-import { getSpeechDriveSnapshot, updateSpeechDriveFromAnalyser } from '@/lib/avatar/speechDriveState';
+import { getSpeechDriveSnapshot } from '@/lib/avatar/speechDriveState';
+import { getCogniPersonaPerformanceScales } from '@/lib/avatar/cogniPersonaStance';
+import {
+  isAvatarMotionTraceOn,
+  motionTraceLog,
+  motionTraceStopAtGuard,
+} from '@/lib/avatar/avatarMotionTrace';
 import {
   deriveSpeechSemanticHints,
   getEmbodimentUtteranceTextForSemantics,
@@ -80,6 +90,7 @@ import { useBrainStore } from '@/store/useBrainStore';
 import { AVATAR_BEHAVIOR_SINGLE_CONTROLLER } from '@/config/avatar';
 import { nowMs as masterClockNowMs, sessionElapsedSec } from '@/lib/avatar/masterClock';
 import { recordActivity } from '@/lib/avatar/motionDiagnostics';
+import { isDebugMotion, logDebug, logDebugThrottledCallback } from '@/lib/logging/runtimeLog';
 import {
   attachMotionPipelineEventProbes,
   logMotionPipelineFrame,
@@ -88,7 +99,12 @@ import {
   readStabilizeMixFromWindow,
 } from '@/app/avatar-agent/motion/motionPipelineDebug';
 import { getBehaviorMotionState } from '@/lib/behavior/behaviorMotionBrain';
-import { isVrmaPlaybackGloballyDisabled } from '@/lib/avatar/vrmaPlaybackPolicy';
+import { isVrmaPlaybackGloballyDisabled, isProceduralOnlyMotion } from '@/lib/avatar/vrmaPlaybackPolicy';
+import {
+  initStudentAwarenessListeners,
+  tickAwareness,
+} from '@/lib/avatar/awareness/studentAwarenessEngine';
+import { assertNoVrmaLeak } from '@/lib/avatar/motionAuthority';
 
 const _VRMA_IDENTITY_REF = new THREE.Quaternion(0, 0, 0, 1);
 
@@ -136,8 +152,7 @@ const VRMA_ISOLATION_TEST = false;
 /** TEMP (debug): skip vrm.update + disable lookAt auto + spring bones. Keep false so humanoid/expressions/spring bones update. */
 const VRM_HARD_ISOLATION = false;
 
-/** Extra console logging for arm-fallback / VRMA blend keys (off by default — reduces chaos). */
-const DEBUG_MOTION = process.env.NEXT_PUBLIC_DEBUG_MOTION === 'true';
+/** Extra console logging for arm-fallback / VRMA blend keys (off unless `NEXT_PUBLIC_DEBUG_MOTION` or legacy `DEBUG_MOTION_DIAG`). */
 /** Re-enable periodic / failsafe `avatar:micro:gesture` nods during VRMA (default: off). */
 const VRMA_IDLE_MICRO_INJECT = process.env.NEXT_PUBLIC_VRMA_IDLE_MICRO_INJECT === 'true';
 
@@ -322,7 +337,7 @@ function mergeVrmaPoseWithArmFallback(
   if (hasRua && hasLua && hasRla && hasLla) return vrmaBonePose;
 
   if (
-    DEBUG_MOTION &&
+    isDebugMotion() &&
     typeof process !== 'undefined' &&
     process.env.NODE_ENV === 'development' &&
     typeof performance !== 'undefined'
@@ -1188,14 +1203,17 @@ export function VRMSkeletonManager({
   const generativeBlendRef  = useRef(0);
   /** Nodes for bones not covered by dedicated refs (legs, distal/intermediate phalanges). */
   const extraGenerativeNodesRef = useRef<Map<string, THREE.Object3D>>(new Map());
+  /** Buffer for {@link readAnalyserRms01} — sole motion-path ingress; fed into unified energy only. */
   const timeDomainBufRef    = useRef<Uint8Array | null>(null);
-  /** Last frame normalized RMS (time domain) — speech→motion + intent motor. */
-  const lastAnalyserRmsRef  = useRef(0);
   /** Voice-driven head offsets (smoothed; radians-scale). */
   const voiceHeadPitchSmRef = useRef(0);
   const voiceHeadYawSmRef   = useRef(0);
   const lastGestureFrameLogMsRef = useRef(0);
   const lastIdleZLogMsRef = useRef(0);
+  /** Throttled `NEXT_PUBLIC_DEBUG_TRACE` frame counter (useFrame). */
+  const motionTraceFrameRef = useRef(0);
+  /** Awareness tick throttle — last call timestamp (ms). 500ms cadence. */
+  const lastAwarenessTickMsRef = useRef(0);
   const testElbowLogMsRef = useRef(0);
   const waveOscLogMsRef = useRef(0);
   const prevMotionSourceRef = useRef<ProceduralMotionSource>('IDLE');
@@ -1400,6 +1418,8 @@ export function VRMSkeletonManager({
       avatarDebug('[VRMSkeletonManager] 🎉 All critical normalized bones found!');
     }
 
+    const uninstallBypassProbe = installVrmHumanoidBypassProbe(vrm);
+
     console.log('[VRMSkeletonManager] ✅ VRM ready, registering gesture handlers');
 
     // ── Global debug handles ──────────────────────────────────────────────────
@@ -1579,6 +1599,7 @@ export function VRMSkeletonManager({
     window.addEventListener('avatar:generative:gesture', onGenerative);
     window.addEventListener('avatar:generative:reset', onGenerativeReset);
     return () => {
+      uninstallBypassProbe();
       window.removeEventListener('avatar:generative:gesture', onGenerative);
       window.removeEventListener('avatar:generative:reset', onGenerativeReset);
       // __vrm / __cogniVRM cleanup is in the dedicated effect above
@@ -1797,18 +1818,23 @@ export function VRMSkeletonManager({
         || '';
       const kind = rawKind.toLowerCase().replace(/[-\s]/g, '_');
       const dur  = typeof detail.durationMs === 'number' && detail.durationMs > 0 ? detail.durationMs : 500;
+      const ampDetail = (detail as { amplitudeMul?: unknown }).amplitudeMul;
+      const ampMul =
+        typeof ampDetail === 'number' && Number.isFinite(ampDetail)
+          ? THREE.MathUtils.clamp(ampDetail, 0.25, 1.25)
+          : 1;
       if (!(kind in MICRO_PRESETS) && process.env.NODE_ENV === 'development') {
         console.warn(`[VRMSkeletonManager] micro:gesture unknown kind="${kind}" — using nod fallback`);
       }
       const preset = MICRO_PRESETS[kind] ?? MICRO_PRESETS['nod'];
       const mn = microNudgeRef.current;
-      mn.ruaX  = preset?.ruaX  ?? 0;
-      mn.ruaZ  = preset?.ruaZ  ?? 0;
-      mn.luaX  = preset?.luaX  ?? 0;
-      mn.luaZ  = preset?.luaZ  ?? 0;
-      mn.neckX = preset?.neckX ?? 0;
-      mn.neckY = preset?.neckY ?? 0;
-      mn.headX = preset?.headX ?? 0;
+      mn.ruaX  = (preset?.ruaX  ?? 0) * ampMul;
+      mn.ruaZ  = (preset?.ruaZ  ?? 0) * ampMul;
+      mn.luaX  = (preset?.luaX  ?? 0) * ampMul;
+      mn.luaZ  = (preset?.luaZ  ?? 0) * ampMul;
+      mn.neckX = (preset?.neckX ?? 0) * ampMul;
+      mn.neckY = (preset?.neckY ?? 0) * ampMul;
+      mn.headX = (preset?.headX ?? 0) * ampMul;
       mn.blend  = 1;
       mn.untilMs = masterClockNowMs() + dur;
     };
@@ -1885,6 +1911,8 @@ export function VRMSkeletonManager({
 
   useEffect(() => {
     attachMotionPipelineEventProbes();
+    // Idempotent — `initStudentAwarenessListeners` guards with internal flag.
+    initStudentAwarenessListeners();
   }, []);
 
   useEffect(() => {
@@ -1901,6 +1929,23 @@ export function VRMSkeletonManager({
 
   useFrame((_, delta) => {
     const safeDelta = Math.min(Math.max(delta, 0), TAB_SAFE_MAX_DELTA);
+    if (isAvatarMotionTraceOn()) {
+      motionTraceFrameRef.current += 1;
+    }
+    // Per-frame hard guard: evict VRMA authority in procedural-only mode.
+    assertNoVrmaLeak();
+
+    // ── Awareness tick (throttled ~500ms — does NOT run every frame) ──────────
+    {
+      const _awareNow = masterClockNowMs();
+      const _awareLast = lastAwarenessTickMsRef.current;
+      if (_awareLast === 0 || _awareNow - _awareLast >= 500) {
+        const _awareDtSec = _awareLast === 0 ? 0.5 : (_awareNow - _awareLast) / 1000;
+        lastAwarenessTickMsRef.current = _awareNow;
+        tickAwareness(_awareDtSec);
+      }
+    }
+
     updateIntentFromBehaviorBrain(safeDelta);
     const t = sessionElapsedSec();
     const m = bindRef.current;
@@ -1909,6 +1954,13 @@ export function VRMSkeletonManager({
     //     lacks humanoid). Still call vrm.update so expressions/morphs work,
     //     but skip all procedural bone manipulation to avoid null-ref spam.
     if (!ruaRef.current) {
+      if (isAvatarMotionTraceOn() && motionTraceFrameRef.current % 100 === 0) {
+        motionTraceStopAtGuard(
+          'frame-skeleton',
+          'ruaRef not cached — skip procedural bone stack (bones not ready)',
+          { frame: motionTraceFrameRef.current },
+        );
+      }
       if (!VRM_HARD_ISOLATION) {
         vrm.update(safeDelta);
       }
@@ -1943,22 +1995,61 @@ export function VRMSkeletonManager({
       localAxisCalibElapsedMs >= 0 && localAxisCalibElapsedMs < LOCAL_AXIS_CALIB_DURATION_MS;
 
     const analyserNode = analyserRef?.current ?? null;
-    let rms01: number | null = null;
-    if (speaking && analyserNode) {
-      rms01 = readAnalyserRms01(analyserNode, timeDomainBufRef);
-      lastAnalyserRmsRef.current = rms01;
-    } else {
-      lastAnalyserRmsRef.current = 0;
+    let audioRms01 = 0;
+    let audioRmsSource: 'analyser' | 'emergency' | 'silent' = 'silent';
+    // Read RMS any time the analyser exists (not only when speaking) so energy
+    // updates the moment audio begins, before the `speaking` flag propagates.
+    if (analyserNode) {
+      audioRms01 = readAnalyserRms01(analyserNode, timeDomainBufRef);
+      audioRmsSource = 'analyser';
+    } else if (speaking) {
+      // Emergency-only fallback: brain says we're speaking but the <audio> isn't wired
+      // to the analyser yet. Use a small constant (0.20) so motion isn't fully dead;
+      // real RMS takes over once the analyser hooks up (usually within 1–2 frames).
+      audioRms01 = 0.20;
+      audioRmsSource = 'emergency';
     }
-    updateSpeechDriveFromAnalyser({
+    const brainSnap = useBrainStore.getState();
+    const gf = getGlobalFrame();
+    const behaviorIntensity =
+      typeof gf?.intent?.intensity === 'number' && Number.isFinite(gf.intent.intensity)
+        ? gf.intent.intensity
+        : brainSnap.intentEnergy;
+    tickUnifiedEnergy({
+      intentEnergy: brainSnap.intentEnergy,
+      behaviorIntensity,
+      audioRms01,
       speaking,
-      volume01: rms01,
       delta: safeDelta,
     });
+    patchSpeechEmotionEnergy(getSmoothedUnifiedEnergy());
     const speechDriveSnap = getSpeechDriveSnapshot(speaking);
-    const brainSnap = useBrainStore.getState();
+    if (speaking) {
+      logDebugThrottledCallback('MOTION', 'motion-intensity', 800, () => {
+        logDebug('MOTION', '[MOTION_INTENSITY]', {
+          unifiedEnergy: getSmoothedUnifiedEnergy(),
+          speechDriveEnergy: speechDriveSnap.energy,
+        });
+      });
+      // [MOTION_AUDIO] — RMS → motion amplitude mapping (always-on, throttled 800ms).
+      logDebugThrottledCallback('MOTION', 'motion-audio', 800, () => {
+        // Map RMS → amplitude with a gentle expander so:
+        //   rms 0.0 → amp 0.30 (subtle baseline while speaking)
+        //   rms 0.2 → amp ~0.55
+        //   rms 0.5 → amp ~1.00
+        //   rms 1.0 → amp 1.40 (clamped expressive ceiling)
+        const amplitude = Math.min(1.4, 0.30 + audioRms01 * 1.4);
+        // eslint-disable-next-line no-console -- audio pipeline checkpoint (throttled 800ms)
+        console.log('[MOTION_AUDIO]', {
+          rms: Number(audioRms01.toFixed(3)),
+          amplitude: Number(amplitude.toFixed(3)),
+          source: audioRmsSource,
+          analyserWired: !!analyserNode,
+        });
+      });
+    }
     const motionBlend = brainSnap.behaviorMotionBlend;
-    const intentFallback = brainSnap.intentEnergy;
+    const intentFallback = getSmoothedUnifiedEnergy();
     let gestureAmp = speaking ? (motionBlend?.amplitude ?? 1) * motorMul : 1;
 
     if (AVATAR_BEHAVIOR_SINGLE_CONTROLLER) {
@@ -2002,7 +2093,9 @@ export function VRMSkeletonManager({
     }
 
     const vrmaPlaybackFrozen = isVrmaPlaybackGloballyDisabled();
-    const vrmaActiveEarly = (vrmaActiveRef?.current ?? false) && !vrmaPlaybackFrozen;
+    // vrmaActiveEarly must also respect the procedural-only flag — otherwise thinking gestures are blocked.
+    const _proceduralOnlyEarly = isProceduralOnlyMotion();
+    const vrmaActiveEarly = (vrmaActiveRef?.current ?? false) && !vrmaPlaybackFrozen && !_proceduralOnlyEarly;
     if (vrmaActiveEarly && gestureStateRef.current === 'think') {
       thinkGestureActiveRef.current = false;
       gestureStateRef.current = 'idle';
@@ -2050,17 +2143,21 @@ export function VRMSkeletonManager({
     }
 
     // ─── Gesture state machine + motion source (decision layer) ─────────────
-    const vrmaActive = (vrmaActiveRef?.current ?? false) && !vrmaPlaybackFrozen;
+    const proceduralOnly = isProceduralOnlyMotion();
+    const vrmaActive = (vrmaActiveRef?.current ?? false) && !vrmaPlaybackFrozen && !proceduralOnly;
     const rawG = gestureStateRef.current;
     let motionSource: ProceduralMotionSource = vrmaActive
       ? 'VRMA'
       : rawG !== 'idle'
         ? 'GESTURE'
         : 'IDLE';
-    if (VRMA_ISOLATION_TEST && !vrmaPlaybackFrozen) {
+    if (VRMA_ISOLATION_TEST && !vrmaPlaybackFrozen && !proceduralOnly) {
       motionSource = 'VRMA';
     }
     if (vrmaPlaybackFrozen && motionSource === 'VRMA') {
+      motionSource = rawG !== 'idle' ? 'GESTURE' : 'IDLE';
+    }
+    if (proceduralOnly && motionSource === 'VRMA') {
       motionSource = rawG !== 'idle' ? 'GESTURE' : 'IDLE';
     }
     const g = rawG;
@@ -2149,7 +2246,7 @@ export function VRMSkeletonManager({
       cbMot.personality.motionSignature,
     );
     const idMul =
-      (0.9 + 0.18 * (bsMot.intentEnergy ?? 0.5)) *
+      (0.9 + 0.18 * getSmoothedUnifiedEnergy()) *
       (bsMot.interactionIntent === 'emphasizing' ? 1.07 : 1);
     const pres = {
       ...presPersonality,
@@ -2532,6 +2629,14 @@ export function VRMSkeletonManager({
     const hpHeadX = headposePitchRef.current * hpB * 0.55;
     const hpHeadY = headposeYawRef.current * hpB * 0.55;
 
+    /** Brief `avatar:micro:gesture` offsets — amplitudeMul from TTS bridge; hard-capped so one event cannot own the head. */
+    const mz = microNudgeRef.current;
+    const mzb = mz.blend;
+    const MICRO_GESTURE_AXIS_CAP = 0.052;
+    const microNkX = THREE.MathUtils.clamp(mz.neckX * mzb, -MICRO_GESTURE_AXIS_CAP, MICRO_GESTURE_AXIS_CAP);
+    const microNkY = THREE.MathUtils.clamp(mz.neckY * mzb, -MICRO_GESTURE_AXIS_CAP, MICRO_GESTURE_AXIS_CAP);
+    const microHdX = THREE.MathUtils.clamp(mz.headX * mzb, -MICRO_GESTURE_AXIS_CAP, MICRO_GESTURE_AXIS_CAP);
+
     const neckBind = m.get('neck');
     const headNeckPose = isProceduralGestureFrame ? gesturePose : idlePose;
     if (neckRef.current && neckBind) {
@@ -2546,6 +2651,7 @@ export function VRMSkeletonManager({
           clapNkX +
           agreeNkX +
           hpNeckX +
+          microNkX +
           humanIdleNeckX +
           voiceHeadPitchSmRef.current,
         ny * NECK_SWAY_MUL +
@@ -2558,6 +2664,7 @@ export function VRMSkeletonManager({
           clapNkY +
           agreeNkY +
           hpNeckY +
+          microNkY +
           humanIdleNeckY +
           voiceHeadYawSmRef.current,
         nz * NECK_SWAY_MUL + thinkNkZ + waveNkZ + clapNkZ + agreeNkZ + humanIdleNeckZ,
@@ -2580,6 +2687,7 @@ export function VRMSkeletonManager({
           clapHdX +
           agreeHdX +
           hpHeadX +
+          microHdX +
           humanIdleNeckX * 0.85 +
           voiceHeadPitchSmRef.current * 1.08,
         ny * 1.05 +
@@ -3541,6 +3649,9 @@ export function VRMSkeletonManager({
     if (vrmaPlaybackFrozen) {
       vrmaLayerW = 0;
     }
+    if (proceduralOnly) {
+      vrmaLayerW = 0;
+    }
 
     /** Any generative target → global collision layer off (per-bone locks also zero VRMA/collision/idle/gesture). */
     const generativeExternalActive = genMix > 0.02;
@@ -3562,8 +3673,11 @@ export function VRMSkeletonManager({
       }
     }
 
-    /** VRMA clip active: procedural humanization / micro / cinematic must not stack on bones. */
-    const isolateVrmaLayers = motionSource === 'VRMA';
+    /**
+     * VRMA clip active: procedural humanization / micro / cinematic must not stack on bones.
+     * In procedural-only mode this is always false — we WANT the humanization layers to run.
+     */
+    const isolateVrmaLayers = !proceduralOnly && motionSource === 'VRMA';
 
     const vrmaForBlend = mergeVrmaPoseWithArmFallback(
       motionSource,
@@ -3756,17 +3870,59 @@ export function VRMSkeletonManager({
       nextIdleMicroInjectAtMsRef.current = 0;
     }
 
-    /** Phase 20 — micro breathing / sway on spine & shoulders on VRMA clips, **or** when VRMA playback is frozen (substitute clip life). */
+    /** Procedural sway — unified energy only (audio already in unified mix). */
+    const personaMotion = getCogniPersonaPerformanceScales();
+    const proceduralMul = speaking ? personaMotion.proceduralIntensityMul : 1;
+
+    logDebugThrottledCallback('MOTION', 'motion-source', 900, () => {
+      logDebug('MOTION', '[MOTION_SOURCE]', {
+        motionSource,
+        vrmaLayerW: Number(vrmaLayerW.toFixed(3)),
+        gestureLayerW: Number(gestureLayerW.toFixed(3)),
+        idleLayerW: Number(idleLayerW.toFixed(3)),
+        isolateVrmaLayers,
+        proceduralOnly,
+        proceduralApplied: !isolateVrmaLayers,
+      });
+    });
+
+    /** Phase 20 — micro breathing / sway on spine & shoulders on VRMA clips, **or** when VRMA playback is frozen (substitute clip life). While speaking, keep overlay on so “life” does not depend on vrma weight alone. */
     if (
       !FREEZE_IDLE_ANIMATIONS &&
       !VRMA_ISOLATION_TEST &&
-      ((motionSource === 'VRMA' && vrmaLayerW > 0.02) || vrmaPlaybackFrozen)
+      ((motionSource === 'VRMA' && vrmaLayerW > 0.02) || vrmaPlaybackFrozen || speaking)
     ) {
-      applyProceduralVrmaLifeOverlay(finalPose, t, safeDelta);
+      applyProceduralVrmaLifeOverlay(finalPose, t, safeDelta, {
+        intensityMul: proceduralMul,
+        neckSway: personaMotion.neckSway,
+      });
+    }
+
+    if (isAvatarMotionTraceOn() && motionTraceFrameRef.current % 100 === 0) {
+      const vrmaLifeIntensityMul = proceduralMul;
+      const vrmaLifeOverlayActive =
+        !FREEZE_IDLE_ANIMATIONS &&
+        !VRMA_ISOLATION_TEST &&
+        ((motionSource === 'VRMA' && vrmaLayerW > 0.02) || vrmaPlaybackFrozen || speaking);
+      motionTraceLog('VRMSkeletonManager useFrame [every 100 frames]', {
+        frame: motionTraceFrameRef.current,
+        clockSec: t,
+        speaking,
+        motionSource,
+        vrmaLayerW,
+        gestureLayerW,
+        idleLayerW,
+        vrmaLifeIntensityMul,
+        vrmaLifeOverlayActive,
+        speechDriveEnergy: speechDriveSnap.energy,
+        speechDriveActive: speechDriveSnap.active,
+        unifiedEnergySmoothed: getSmoothedUnifiedEnergy(),
+        analyserConnected: Boolean(analyserNode),
+      });
     }
 
     if (
-      DEBUG_MOTION &&
+      isDebugMotion() &&
       motionSource === 'VRMA' &&
       vrmaLayerW > 0 &&
       typeof process !== 'undefined' &&

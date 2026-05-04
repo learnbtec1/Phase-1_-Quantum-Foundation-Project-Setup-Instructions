@@ -24,6 +24,13 @@ let driverPhaseSec = 0;
 /** Scales continuous intent-shaped bone deltas (explaining / thinking / listening). */
 const DRIVER_GLOBAL_MUL = 1.0;
 
+/**
+ * Attenuates **speech-locked** head/neck beats (phrase / syllable / energy spikes) so
+ * expression-driven procedural head motion stays perceptible. Body/arm explain motion
+ * unchanged. ~30% reduction vs prior speech peaks.
+ */
+const SPEECH_HEAD_BEAT_ATTEN = 0.70;
+
 // ─── Variation memory: alternate styles when intent session changes (startTime) ───
 let lastExplainStart = -1;
 let lastThinkStart = -1;
@@ -192,9 +199,12 @@ export function applyMotionDriver(
     mulFirstPresent(finalPose, ['rla', 'rightLowerArm'], -foreR * 0.45, 0, -foreR * 0.4);
 
     const alignYaw = userFocus ? headBiasYaw * 0.35 : headBiasYaw;
+    const speakBeatYaw = speak
+      ? Math.sin(beat * 1.1 + 0.2) * 0.002 * e * phraseGate * m * spike * focusHead * SPEECH_HEAD_BEAT_ATTEN
+      : 0;
     const dynYaw =
       Math.sin(t * freqHead + CH_N) * 0.0028 * m * genMul * spike * focusNeck
-      + (speak ? Math.sin(beat * 1.1 + 0.2) * 0.002 * e * phraseGate * m * spike * focusHead : 0)
+      + speakBeatYaw
       + alignYaw
       + nDriver(t, 4, 1, 0.00035) * spike * (userFocus ? 0.55 : 1);
     const dynPitch =
@@ -266,7 +276,7 @@ export function applyMotionDriver(
         : 0;
     const nod =
       (Math.sin(t * 0.15 + CH_N * 0.2) + nDriver(t, 0.2, 0.8, 0.08)) * 0.0016 * m * focusNeck
-      + (speak ? Math.sin(beat * 0.65) * 0.0008 * e * m * spike * focusHead : 0)
+      + (speak ? Math.sin(beat * 0.65) * 0.0008 * e * m * spike * focusHead * SPEECH_HEAD_BEAT_ATTEN : 0)
       + agreeBeat;
     mulBoneDeltaEuler(finalPose, 'neck', drift * 0.35, nod * 0.55, drift * 0.2);
     mulBoneDeltaEuler(
