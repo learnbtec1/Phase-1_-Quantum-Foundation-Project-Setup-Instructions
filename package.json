@@ -14,6 +14,10 @@
     "test:integration": "cd frontend && npm run test:integration",
     "test:ci": "cd frontend && npm run test:ci",
     "test:e2e": "cd frontend && npm run test:e2e",
+    "check:dev-env": "node scripts/check-dev-env.mjs",
+    "recover:dev": "node scripts/recover-dev-env.js",
+    "recover:dev:fast": "node scripts/recover-dev-env.js --fast",
+    "clean:port": "npx kill-port 3000",
     "dev:root-legacy": "next dev",
     "build:root-legacy": "next build",
     "start:root-legacy": "next start"
@@ -55,6 +59,7 @@
     "autoprefixer": "^10.4.24",
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.18",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "ws": "^8.18.0"
   }
 }

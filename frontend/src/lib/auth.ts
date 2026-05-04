@@ -14,6 +14,17 @@ export const COGNI_ACCESS_TOKEN_KEY = 'cogni_access_token';
 const TOKEN_KEY = COGNI_ACCESS_TOKEN_KEY;
 
 /**
+ * True when WS/TTS are allowed without a browser JWT (must match compose + BFF bypass flags).
+ * In this mode an empty token is expected — do not spam `console.error` from {@link getAccessToken}.
+ */
+export function isCogniGuestBrowserMode(): boolean {
+  if (typeof process === 'undefined') return false;
+  const anon = process.env.NEXT_PUBLIC_COGNI_WS_ALLOW_ANONYMOUS?.trim().toLowerCase() ?? '';
+  const ok = process.env.NEXT_PUBLIC_COGNI_WS_GUEST_OK?.trim().toLowerCase() ?? '';
+  return anon === 'true' || anon === '1' || ok === 'true' || ok === '1';
+}
+
+/**
  * Dev-only: set `NEXT_PUBLIC_AUTH_DEV_INJECT=true` and optionally `NEXT_PUBLIC_DEV_AUTH_TOKEN`
  * (must match backend dev bypass if used). Never enable in production builds.
  */
@@ -89,7 +100,7 @@ export function getAccessToken(): string | null {
   const t = readRawTokenFromStorage();
   if (!t) {
     const now = Date.now();
-    if (now - _lastEmptyLogMs > 8000) {
+    if (!isCogniGuestBrowserMode() && now - _lastEmptyLogMs > 8000) {
       console.error('[Auth] ❌ Token missing or invalid', { reason: 'empty' });
       _lastEmptyLogMs = now;
     }

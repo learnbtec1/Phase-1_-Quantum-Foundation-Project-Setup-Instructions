@@ -36,12 +36,17 @@ export default function RootLayout({
   return (
     <html lang="ar" dir="rtl" className={`${cairo.variable} h-full`}>
       <body className="font-sans min-h-screen antialiased cognie dark">
-        <ServiceWorkerRegister />
-        <AuthBootstrap />
-        <DevLogFilter />
-        <ProgressProvider>
-          <LayoutSwitcher>{children}</LayoutSwitcher>
-        </ProgressProvider>
+        <div className="cognie-root relative isolate min-h-dvh w-full">
+          {/* HTML env backdrop — styles: cognie-html-env-bg + cognie-bg-overlay in globals.css */}
+          <div aria-hidden className="cognie-html-env-bg pointer-events-none absolute inset-0 -z-[1]" />
+          <div aria-hidden className="cognie-bg-overlay pointer-events-none absolute inset-0 -z-[1]" />
+          <ServiceWorkerRegister />
+          <AuthBootstrap />
+          <DevLogFilter />
+          <ProgressProvider>
+            <LayoutSwitcher>{children}</LayoutSwitcher>
+          </ProgressProvider>
+        </div>
       </body>
     </html>
   );

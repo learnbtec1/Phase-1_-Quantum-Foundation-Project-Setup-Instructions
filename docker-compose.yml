@@ -38,9 +38,44 @@ services:
       retries: 10
       start_period: 20s
 
+  # Self-hosted Piper TTS — two instances for horizontal scale (round-robin from backend).
+  # `local_tts` is a network alias for this container so backends can use http://local_tts:8080/synthesize.
+  local_tts_1:
+    build: ./local_tts
+    container_name: eduverse_local_tts_1
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+    environment:
+      # 1.0 = neutral Piper output (no ffmpeg pitch shift — avoids metallic / distorted timbre).
+      - PIPER_POST_PITCH_MULT=${PIPER_POST_PITCH_MULT:-1.0}
+      - PIPER_POST_EQ=${PIPER_POST_EQ:-false}
+    networks:
+      default:
+        aliases:
+          - local_tts
+
+  local_tts_2:
+    build: ./local_tts
+    container_name: eduverse_local_tts_2
+    ports:
+      - "8082:8080"
+    restart: unless-stopped
+    environment:
+      - PIPER_POST_PITCH_MULT=${PIPER_POST_PITCH_MULT:-1.0}
+      - PIPER_POST_EQ=${PIPER_POST_EQ:-false}
+
   backend:
     build: ./backend
     container_name: eduverse_backend
+    # Apply migrations before uvicorn — register/login require `users.hashed_password` etc.
+    # Set SKIP_ALEMBIC=1 on the backend service only to skip (debug).
+    command:
+      [
+        "/bin/sh",
+        "-c",
+        'if [ -z "$${SKIP_ALEMBIC}" ]; then alembic upgrade head; fi && exec uvicorn app.main:app --host 0.0.0.0 --port 8000',
+      ]
     # Shared memory for faster-whisper / onnxruntime (avoids mmap issues under load).
     shm_size: "1g"
     # PHASE 18 — inject voice + JWT explicitly (compose interpolation reads project `.env`; no env_file on backend).
@@ -61,15 +96,22 @@ services:
       - LC_ALL=C.UTF-8
       - SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
       - SSL_CERT_DIR=/etc/ssl/certs
-      - TTS_ARABIC_VOICE=ar-JO-TaimNeural
-      - COGNI_ARABIC_TTS_VOICE_LOCKED=ar-JO-TaimNeural
+      # Edge fallback voice (male JO neural). Piper microservice ignores this; uses kareem ONNX in image.
+      - TTS_ARABIC_VOICE=${TTS_ARABIC_VOICE:-ar-JO-TaimNeural}
+      - COGNI_ARABIC_TTS_VOICE_LOCKED=${COGNI_ARABIC_TTS_VOICE_LOCKED:-ar-JO-TaimNeural}
+      - TTS_FORCE_JORDANIAN=${TTS_FORCE_JORDANIAN:-true}
       - TTS_AZURE_ONLY=false
       - TTS_DISABLE_NON_AZURE_FALLBACK=true
-      - TTS_PROVIDER=elevenlabs
-      - EDGE_TTS_VOICE=ar-JO-TaimNeural
-      # ElevenLabs server-side TTS (optional if Edge-only). Empty string is allowed for local Edge dev.
-      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
-      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID:-}
+      - TTS_PROVIDER=${TTS_PROVIDER:-local}
+      - EDGE_TTS_VOICE=${EDGE_TTS_VOICE:-ar-JO-TaimNeural}
+      # Local Piper: primary URL uses service alias `local_tts` → local_tts_1 (see networks.aliases).
+      - LOCAL_TTS_URLS=${LOCAL_TTS_URLS:-http://local_tts:8080/synthesize,http://local_tts_2:8080/synthesize}
+      - LOCAL_TTS_URL=${LOCAL_TTS_URL:-http://local_tts:8080/synthesize}
+      # Default chain is Piper-only; set TTS_FALLBACK_CHAIN in `.env` to add edge/elevenlabs when keys exist.
+      - TTS_FALLBACK_CHAIN=${TTS_FALLBACK_CHAIN:-local_piper}
+      - LOCAL_TTS_TIMEOUT=${LOCAL_TTS_TIMEOUT:-30}
+      # Bust stale TTS cache when switching Piper / voice (v2 cache key includes this tag).
+      - TTS_CACHE_MODEL_TAG=${TTS_CACHE_MODEL_TAG:-piper_ar_jo_kareem}
       - COGNI_WS_ALLOW_ANONYMOUS=true
       - COGNI_DEV_BYPASS_AUTH=true
       - LOCAL_RAG_ENABLED=true
@@ -91,6 +133,10 @@ services:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      local_tts_1:
+        condition: service_healthy
+      local_tts_2:
         condition: service_healthy
 
     restart: always
@@ -124,13 +170,8 @@ services:
     command: ["python", "avatar_brain.py"]
     restart: always
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import os,socket; p=int(os.environ.get('AVATAR_BRAIN_PORT','8001')); s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1',p)); s.close()",
-        ]
+      # Full WS handshake — raw TCP probes close before HTTP line and trigger websockets EOFError noise.
+      test: ["CMD", "python", "/app/avatar_brain_healthcheck.py"]
       interval: 20s
       timeout: 5s
       retries: 3
@@ -181,11 +222,8 @@ services:
       # Browser on host: published avatar_brain port (compose maps host 8011 → container 8001). SSR does not open this socket.
       NEXT_PUBLIC_GENERATIVE_GESTURE_WS: ${NEXT_PUBLIC_GENERATIVE_GESTURE_WS:-ws://127.0.0.1:8011}
 
-      # Align client BFF with backend primary TTS (rebuild frontend image if you change this).
-      NEXT_PUBLIC_TTS_PROVIDER: ${NEXT_PUBLIC_TTS_PROVIDER:-elevenlabs}
-      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
-      ELEVENLABS_VOICE_ID: ${ELEVENLABS_VOICE_ID:-}
-      ELEVENLABS_MODEL_ID: ${ELEVENLABS_MODEL_ID:-}
+      # REST-only avatar audio: do not play WS speech_data MP3 (Piper/Edge); AgentDirector uses /api/tts-with-timing.
+      NEXT_PUBLIC_USE_WS_AGENT_AUDIO: "false"
 
     ports:
       - "3000:3000"

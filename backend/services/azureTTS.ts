@@ -20,7 +20,7 @@ export type AzureTtsResult = {
 
 export type SynthesizeAzureTtsOptions = {
   text: string;
-  /** e.g. en-US-JennyNeural, ar-JO-TaimNeural */
+  /** e.g. en-US-JennyNeural, ar-SA-ZariyahNeural */
   voiceName?: string;
   region?: string;
   key?: string;

@@ -22,14 +22,8 @@ export function visemeEventsToCues(
     } else {
       const v = Number(e.t ?? 0);
       if (!Number.isFinite(v)) continue;
-      // Legacy payloads used `t` for milliseconds (0, 140, 280…). Values ≤300 were mis-read as seconds.
-      // Azure-style cues use seconds, often as small floats (e.g. 0.05). Integers 1–299 are almost always ms here.
-      if (Number.isInteger(v) && v > 0 && v < 300) {
-        tSec = v / 1000;
-      } else {
-        tSec = v > 300 ? v / 1000 : v;
-      }
-      tSec = Math.max(0, tSec);
+      /** `t` field is treated as seconds. Use explicit `offset_ms` / `time_ms` when the API sends millis. */
+      tSec = Math.max(0, v);
     }
     const id = Number(e.viseme_id ?? e.id ?? e.visemeId ?? 0);
     cues.push({
@@ -40,6 +34,20 @@ export function visemeEventsToCues(
   cues.sort((a, b) => a.t - b.t);
   return cues;
 }
+
+/**
+ * Agent bridge `agent:speak` payloads: `t` values are **seconds** unless `NEXT_PUBLIC_AGENT_VISEMES_T_UNIT=ms`.
+ */
+export function coerceBridgeVisemeTToSeconds(rawT: number): number {
+  if (!Number.isFinite(rawT)) return 0;
+  const unit =
+    typeof process !== 'undefined'
+      ? String(process.env.NEXT_PUBLIC_AGENT_VISEMES_T_UNIT ?? '').trim().toLowerCase()
+      : '';
+  if (unit === 'ms') return Math.max(0, rawT / 1000);
+  return Math.max(0, rawT);
+}
+
 
 /** Match lip timeline span to decoded `audio.duration` (Edge / ElevenLabs drift). */
 const STRETCH_SCALE_CLAMP = { min: 0.52, max: 1.48 } as const;
@@ -71,4 +79,37 @@ export function stretchVisemeCuesToDuration(
     if (out[i]!.t < out[i - 1]!.t) out[i]!.t = out[i - 1]!.t;
   }
   return out;
+}
+
+export type VisemeStretchMode = 'fallback' | 'always' | 'never';
+
+export function getVisemeStretchMode(): VisemeStretchMode {
+  if (typeof process === 'undefined') return 'fallback';
+  const raw = String(process.env.NEXT_PUBLIC_TTS_VISEME_STRETCH ?? '').trim().toLowerCase();
+  if (raw === 'always' || raw === 'on' || raw === '1' || raw === 'true') return 'always';
+  if (raw === 'never' || raw === 'off' || raw === '0' || raw === 'false') return 'never';
+  return 'fallback';
+}
+
+/**
+ * Linear remap of cue times to decoded duration (`stretchVisemeCuesToDuration`):
+ * - `always` — same as unconditional stretch helper (historical behaviour).
+ * - `never` — never stretch (sample-accuracy path; timelines must match decoded audio length).
+ * - `fallback` (default) — only stretch when cue span vs decoded duration differs meaningfully,
+ *    so corrections are occasional, not the primary synchronisation primitive.
+ */
+export function stretchVisemeCuesToDurationIfFallback(
+  cues: VisemeCue[],
+  durationSec: number,
+): VisemeCue[] {
+  const mode = getVisemeStretchMode();
+  if (mode === 'never') return cues;
+  if (mode === 'always') return stretchVisemeCuesToDuration(cues, durationSec);
+  if (!cues.length || !Number.isFinite(durationSec) || durationSec < 0.12) return cues;
+  const maxT = cues[cues.length - 1]!.t;
+  if (maxT < 0.02) return cues;
+  const deltaSec = Math.abs(durationSec - maxT);
+  const ratioDelta = Math.abs(1 - durationSec / maxT);
+  if (deltaSec < 0.08 && ratioDelta < 0.04) return cues;
+  return stretchVisemeCuesToDuration(cues, durationSec);
 }

@@ -15,7 +15,7 @@
  *  - window event "officeSet:loaded" is dispatched.
  *
  * Props:
- *   url      — GLB path (default `OFFICE_GLB_PUBLIC_PATH` → `/models/office/office.glb`)
+ *   url      — GLB path (default `OFFICE_GLB_PUBLIC_PATH` → `/models/office.glb`)
  *   targetZ  — world Z for the office group (default 0.9)
  *   scaleFix — uniform scale multiplier (1 = meters, 0.01 = centimetres)
  *   debug    — log details to console

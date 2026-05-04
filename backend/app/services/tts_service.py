@@ -19,6 +19,8 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from xml.sax.saxutils import escape as _xml_sax_escape
 
+from app.services.audio_ffmpeg import get_audio_duration_ms
+
 # Import once at load: drives Edge fallback in tts_timing / agent_ws when EL fails or TTS_PROVIDER=edge.
 try:
     import edge_tts  # noqa: F401
@@ -32,6 +34,9 @@ except ImportError:
     )
 
 logger = logging.getLogger(__name__)
+
+# Free-tier-safe default voice (avoid library-only IDs that trigger HTTP 402 on starter keys).
+FALLBACK_ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
 
 def _elevenlabs_error_message_from_body(status: int, raw: str) -> str:
@@ -124,29 +129,25 @@ def _elevenlabs_stdout_error_body(status: int, raw: str) -> None:
     print(f"[ElevenLabs ERROR] HTTP {status}\n{out}", flush=True)
 
 
-async def synthesize_elevenlabs_async(text: str) -> bytes:
-    """
-    ElevenLabs Multilingual v2, MP3 44.1kHz @ 128kbps (mp3_44100_128).
-    Requires ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID when TTS_PROVIDER=elevenlabs.
-    """
+def _retry_elevenlabs_after_voice_error(exc: RuntimeError) -> bool:
+    msg = str(exc).lower()
+    return any(
+        k in msg
+        for k in (
+            "402",
+            "payment required",
+            "free users",
+            "library voice",
+            "library voices",
+            "subscription",
+        )
+    )
+
+
+async def _synthesize_elevenlabs_stream_voice(text: str, api_key: str, voice_id: str) -> bytes:
+    """One ElevenLabs /stream POST; raises RuntimeError on non-200 or invalid audio."""
     import httpx
 
-    if not (os.getenv("ELEVENLABS_API_KEY") or "").strip():
-        print("ELEVENLABS_API_KEY=MISSING_KEY", flush=True)
-    api_key = _elevenlabs_api_key()
-    voice_id = _elevenlabs_voice_id()
-    if not api_key or not voice_id:
-        missing: List[str] = []
-        if not api_key:
-            missing.append("ELEVENLABS_API_KEY")
-        if not voice_id:
-            missing.append("ELEVENLABS_VOICE_ID")
-        raise RuntimeError(
-            "ElevenLabs env not set — missing: "
-            + ", ".join(missing)
-            + " (required when TTS_PROVIDER=elevenlabs)",
-        )
-    # Phase 22 — `/stream` + minimal headers (avoid conflicting UA / extra headers vs binary MP3 response).
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
     params = {"output_format": "mp3_44100_128"}
     body: Dict[str, Any] = {
@@ -190,20 +191,55 @@ async def synthesize_elevenlabs_async(text: str) -> bytes:
         print(f"DEBUG_ELEVENLABS: {raw}", flush=True)
         _elevenlabs_stdout_error_body(r.status_code, raw)
         extracted = _elevenlabs_error_message_from_body(r.status_code, raw)
-        logger.critical(
-            "ElevenLabs TTS rejected | status=%s | voice_id=%s | api_message=%s | raw_body=%s",
+        logger.warning(
+            "ElevenLabs TTS rejected | status=%s | voice_id=%s | api_message=%s",
             r.status_code,
             voice_id,
-            extracted,
-            (raw[:2000] if raw else ""),
+            extracted[:500],
         )
         raise RuntimeError(
             f"ElevenLabs HTTP {r.status_code}: {extracted}",
         )
+
     data = r.content
     if not data or len(data) < 32:
         raise RuntimeError("ElevenLabs returned empty or invalid audio")
     return data
+
+
+async def synthesize_elevenlabs_async(text: str) -> bytes:
+    """
+    ElevenLabs Multilingual v2, MP3 44.1kHz @ 128kbps (mp3_44100_128).
+    On HTTP 402 (voice/plan restricted), retries once with a free-tier default voice.
+    """
+    if not (os.getenv("ELEVENLABS_API_KEY") or "").strip():
+        print("ELEVENLABS_API_KEY=MISSING_KEY", flush=True)
+    api_key = _elevenlabs_api_key()
+    if not api_key:
+        raise RuntimeError(
+            "ElevenLabs env not set — missing: ELEVENLABS_API_KEY "
+            "(required when TTS_PROVIDER=elevenlabs)",
+        )
+
+    primary = (_elevenlabs_voice_id() or FALLBACK_ELEVENLABS_VOICE_ID).strip()
+    voices_ordered: List[str] = []
+    for v in (primary, FALLBACK_ELEVENLABS_VOICE_ID):
+        if v not in voices_ordered:
+            voices_ordered.append(v)
+
+    for i, vid in enumerate(voices_ordered):
+        try:
+            return await _synthesize_elevenlabs_stream_voice(text, api_key, vid)
+        except RuntimeError as e:
+            if i >= len(voices_ordered) - 1:
+                raise
+            if not _retry_elevenlabs_after_voice_error(e):
+                raise
+            logger.warning(
+                "ElevenLabs voice/plan rejection — retrying with fallback voice=%s (%s)",
+                FALLBACK_ELEVENLABS_VOICE_ID,
+                str(e)[:200],
+            )
 
 
 def is_edge_tts_failure(exc: BaseException) -> bool:
@@ -234,37 +270,42 @@ is_azure_tts_auth_failure = is_edge_tts_failure
 
 
 def edge_tts_voice_name() -> str:
-    """Neural voice id (e.g. ar-JO-TaimNeural). Override with EDGE_TTS_VOICE."""
-    v = (os.getenv("EDGE_TTS_VOICE") or os.getenv("TTS_ARABIC_VOICE") or "ar-JO-TaimNeural").strip()
+    """Neural voice id (Edge). Override with EDGE_TTS_VOICE / TTS_ARABIC_VOICE."""
+    v = (
+        os.getenv("EDGE_TTS_VOICE")
+        or os.getenv("TTS_ARABIC_VOICE")
+        or "ar-JO-TaimNeural"
+    ).strip()
     return v or "ar-JO-TaimNeural"
 
 
 def _locked_jordanian_male_voice(requested: Optional[str]) -> str:
     """
-    Cogni policy: locked male Jordanian neural when TTS_FORCE_JORDANIAN is True.
-    Synthesis uses edge_tts_voice_name() by default.
+    When TTS_FORCE_JORDANIAN is True, only ar-JO* neural voices are accepted; else use COGNI_ARABIC_TTS_VOICE_LOCKED.
+    When False, pass through the requested voice, or locked if empty.
     """
     try:
         from app.core.config import settings as _cfg
 
-        locked = str(getattr(_cfg, "COGNI_ARABIC_TTS_VOICE_LOCKED", "ar-JO-TaimNeural") or "ar-JO-TaimNeural")
-        force_jo = bool(getattr(_cfg, "TTS_FORCE_JORDANIAN", True))
+        locked = str(
+            getattr(_cfg, "COGNI_ARABIC_TTS_VOICE_LOCKED", "ar-JO-TaimNeural")
+            or "ar-JO-TaimNeural"
+        )
+        force_jo = bool(getattr(_cfg, "TTS_FORCE_JORDANIAN", False))
     except Exception:
         locked = "ar-JO-TaimNeural"
-        force_jo = True
+        force_jo = False
     r = (requested or "").strip()
     if not force_jo:
         return r or locked
+    if r and "ar-JO" in r:
+        return r
     if r and "ar-JO" not in r:
         logger.warning(
-            "[TTS] Non-Jordanian voice %r rejected — using locked Jordanian %s",
+            "[TTS] Non-Jordanian voice %r rejected — using locked %s",
             r,
             locked,
         )
-        r = ""
-    eff = r or locked
-    if eff != locked:
-        logger.warning("[TTS] Voice %r overridden — Cogni uses locked male Jordanian %s", eff, locked)
     return locked
 
 
@@ -468,6 +509,9 @@ async def synthesize_edge_tts_async(text: str, voice: Optional[str] = None) -> b
                 or "invalid response status" in low
                 or "wsserverhandshake" in type(exc).__name__.lower()
             ):
+                from app.services.tts_edge_circuit import tts_cb_record_edge_forbidden
+
+                tts_cb_record_edge_forbidden()
                 raise RuntimeError(
                     "[edge_forbidden] Microsoft Edge TTS rejected the WebSocket handshake (often HTTP 403). "
                     "Cloud/datacenter IPs are frequently blocked — set TTS_PROVIDER=elevenlabs with valid keys, "
@@ -515,15 +559,6 @@ async def generate_cogni_voice(
     return output_path
 
 
-def estimate_mp3_duration_ms(mp3_bytes: bytes) -> int:
-    """Rough audio length from MP3 payload size (~128 kbps effective; clamped)."""
-    if not mp3_bytes or len(mp3_bytes) < 32:
-        return 800
-    n = len(mp3_bytes)
-    est = int(n * 1000 / 16000)
-    return min(180_000, max(400, est))
-
-
 def stub_viseme_timeline_for_text(
     text: str,
     duration_ms: Optional[int] = None,
@@ -531,7 +566,7 @@ def stub_viseme_timeline_for_text(
     """Synthetic viseme markers for clients that require a non-empty timeline.
 
     Uses ``offset_ms`` + ``viseme_id`` so the BFF/client parser never confuses ms with seconds.
-    When ``duration_ms`` is set (e.g. from MP3 byte size), the stub matches clip length better.
+    When ``duration_ms`` is set (e.g. from ffprobe on decoded MP3), the stub matches clip length better.
     """
     nchars = len((text or "").strip())
     text_guess_ms = min(180_000, max(800, nchars * 45 + 600))
@@ -554,6 +589,45 @@ def stub_viseme_timeline_for_text(
     return out
 
 
+def stub_word_timings_for_text(text: str, duration_ms: int) -> List[Dict[str, Any]]:
+    """Spread words across ``duration_ms`` (ms) for clients that expect non-empty ``word_timings``."""
+
+    raw = (text or "").strip()
+    if not raw:
+        return []
+
+    words = [w for w in raw.split() if w]
+    if not words:
+        words = [raw]
+
+    dur = max(400, min(180_000, int(duration_ms)))
+    total_chars = sum(max(1, len(w)) for w in words)
+
+    out: List[Dict[str, Any]] = []
+    t = 0.0
+    for w in words:
+        span_frac = max(1, len(w)) / float(total_chars)
+        span_ms = max(40.0, span_frac * dur * 0.995)
+        out.append(
+            {
+                "word": w,
+                "start_time": t,
+                "end_time": t + span_ms,
+            }
+        )
+        t += span_ms
+
+    if t > 0 and out:
+        scale = dur / t
+        acc = 0.0
+        for item in out:
+            wdur = (item["end_time"] - item["start_time"]) * scale
+            item["start_time"] = acc
+            acc += wdur
+            item["end_time"] = acc
+    return out
+
+
 def synthesize_edge_tts(text: str, voice: Optional[str] = None) -> bytes:
     """
     Synchronous Edge TTS — wraps ``synthesize_edge_tts_async`` via ``asyncio.run``.
@@ -563,7 +637,7 @@ def synthesize_edge_tts(text: str, voice: Optional[str] = None) -> bytes:
 
 
 class EdgeTTSService:
-    """Microsoft Edge online TTS — returns MP3, empty viseme/word lists, provider id ``edge``."""
+    """TTS via the shared router (Edge, local Piper, ElevenLabs, …); MP3 + stub word timings."""
 
     def __init__(
         self,
@@ -590,7 +664,7 @@ class EdgeTTSService:
         client_voice_rate: float = 1.0,
         client_pitch_scale: float = 1.0,
         usage_user_id: Optional[uuid.UUID] = None,
-    ) -> Tuple[bytes, List[Dict[str, Any]], List[Dict[str, Any]], str]:
+    ) -> Tuple[bytes, List[Dict[str, Any]], List[Dict[str, Any]], str, str]:
         raw_in = (text or "").strip()
         try:
             from app.archive.dialect_corrector import maybe_correct_egyptian_for_tts
@@ -602,17 +676,54 @@ class EdgeTTSService:
         if not cleaned:
             raise ValueError("TTS text cannot be empty after cleanup")
 
-        if not _EDGE_TTS_AVAILABLE:
-            raise RuntimeError("edge-tts is not installed. Run: pip install edge-tts")
+        import os as _os
+
+        from app.services.tts_context import SynthesisContext
+        from app.services.tts_exceptions import AllTTSProvidersFailedError, FatalTTSError
+        from app.services.tts_router import default_chain_for_mode, get_tts_router
+
+        env_prov = (_os.getenv("TTS_PROVIDER") or "edge").lower().strip()
+        if env_prov not in ("edge", "auto", "elevenlabs", "local"):
+            env_prov = "edge"
+        allow_edge_fb = (_os.getenv("TTS_EDGE_FALLBACK_AFTER_ELEVENLABS", "true") or "").strip().lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        chain = default_chain_for_mode(
+            env_prov,
+            payload_forces_edge=False,
+            payload_forces_local=False,
+            allow_edge_after_elevenlabs=allow_edge_fb,
+        )
 
         voice = _locked_jordanian_male_voice(voice_name or self._default_voice)
-
         timeout_val = timeout if timeout is not None else self._timeout
 
-        mp3_b = await asyncio.wait_for(
-            synthesize_edge_tts_async(cleaned, voice),
-            timeout=timeout_val,
+        ctx = SynthesisContext(
+            allow_elevenlabs_fallback=(
+                (_os.getenv("TTS_ALLOW_FALLBACK", "true") or "").strip().lower() in ("true", "1", "yes")
+            ),
+            edge_voice=voice,
+            elevenlabs_voice_id=(_elevenlabs_voice_id() or FALLBACK_ELEVENLABS_VOICE_ID).strip(),
+            elevenlabs_timeout_sec=float(_os.getenv("ELEVENLABS_TTS_TIMEOUT_SEC", "120")),
+            edge_timeout_sec=float(timeout_val),
+            local_timeout_sec=float(_os.getenv("LOCAL_TTS_TIMEOUT", _os.getenv("LOCAL_TTS_TIMEOUT_SEC", "30"))),
+            request_id=None,
         )
+
+        try:
+            result = await get_tts_router().synthesize(cleaned, ctx, chain)
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
+        except FatalTTSError as e:
+            raise RuntimeError(e.detail) from e
+        except AllTTSProvidersFailedError as e:
+            raise RuntimeError(str(e)) from e
+
+        mp3_b = result.audio_mp3
+        if not mp3_b:
+            raise RuntimeError("TTS returned empty audio")
         if usage_user_id:
             try:
                 from app.services.usage_service import log_tts_usage
@@ -620,7 +731,10 @@ class EdgeTTSService:
                 log_tts_usage(usage_user_id, len(cleaned))
             except Exception:
                 pass
-        return mp3_b, [], [], "edge"
+        _dur_ms = get_audio_duration_ms(mp3_b)
+        _words = stub_word_timings_for_text(cleaned, _dur_ms)
+        voice_out = (result.voice_label or "").strip() or voice
+        return mp3_b, [], _words, result.provider_id, voice_out
 
     async def reload_credentials(self) -> None:
         """Edge TTS uses no local credential file."""
@@ -658,7 +772,7 @@ def synthesize(text: str) -> str:
 
     async def _once() -> Tuple[bytes, int, int]:
         svc = EdgeTTSService()
-        mp3_b, v_cues, w_cues, _ = await svc.synthesize(t, voice_name=edge_tts_voice_name())
+        mp3_b, v_cues, w_cues, _, _ = await svc.synthesize(t, voice_name=edge_tts_voice_name())
         return mp3_b, len(w_cues), len(v_cues)
 
     try:

@@ -6,7 +6,7 @@ payload = {
 }
 
 try:
-    resp = requests.post("http://localhost:3011/api/evaluate", json=payload, timeout=300)
+    resp = requests.post("http://localhost:3000/api/evaluate", json=payload, timeout=300)
     print("Status:", resp.status_code)
     data = resp.json()
     print("Keys:", list(data.keys()))

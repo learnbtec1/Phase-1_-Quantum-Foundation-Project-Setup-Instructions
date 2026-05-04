@@ -47,6 +47,8 @@ export default function ConversationManager({
   const hasInteractedRef = useRef(false);
   /** True after `avatar:speak:start` until `avatar:speak:end` — detects cleanup-only end events. */
   const avatarSpeakActiveRef = useRef(false);
+  /** Throttle noisy speak:end-without-start logs when TTS never starts (e.g. Edge 403 / BFF 502). */
+  const speakEndIgnoredLogAtRef = useRef(0);
 
   // ── Initialize AudioContext on first user gesture ──────────────────────
   const initializeAudio = async () => {
@@ -86,9 +88,16 @@ export default function ConversationManager({
 
     const onAvatarSpeakEnd = () => {
       if (!avatarSpeakActiveRef.current) {
-        console.warn(
-          '[ConversationManager] ⚠️ Ignored speak:end — no speak:start (no audible TTS / false positive blocked)',
-        );
+        const now = Date.now();
+        if (
+          process.env.NODE_ENV === 'development' &&
+          now - speakEndIgnoredLogAtRef.current > 5000
+        ) {
+          speakEndIgnoredLogAtRef.current = now;
+          console.warn(
+            '[ConversationManager] ⚠️ Ignored speak:end — no speak:start (no audible TTS / false positive blocked)',
+          );
+        }
         return;
       }
       avatarSpeakActiveRef.current = false;

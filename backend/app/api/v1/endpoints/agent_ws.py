@@ -1271,8 +1271,8 @@ async def agent_ws(websocket: WebSocket):
                             exc_info=True,
                         )
                         try:
+                            from app.services.audio_ffmpeg import get_audio_duration_ms, normalize_mp3_to_24k_hz
                             from app.services.tts_service import (
-                                estimate_mp3_duration_ms as _est_mp3_ms,
                                 stub_viseme_timeline_for_text,
                                 synthesize_edge_tts_async,
                             )
@@ -1287,8 +1287,9 @@ async def agent_ws(websocket: WebSocket):
                                         "[AgentWS] TTS USING EDGE FALLBACK synthesize_edge_tts_async | bytes=%d",
                                         len(mp3_bytes),
                                     )
+                                    mp3_bytes = normalize_mp3_to_24k_hz(mp3_bytes)
                                     audio_b64 = base64.b64encode(mp3_bytes).decode("ascii")
-                                    _dur_fb = int(_est_mp3_ms(mp3_bytes))
+                                    _dur_fb = int(get_audio_duration_ms(mp3_bytes))
                                     viseme_cues = stub_viseme_timeline_for_text(
                                         _d_fb, duration_ms=_dur_fb
                                     )
@@ -1300,9 +1301,9 @@ async def agent_ws(websocket: WebSocket):
                                 exc_info=True,
                             )
 
-                from app.services.tts_service import estimate_mp3_duration_ms
+                from app.services.audio_ffmpeg import get_audio_duration_ms
 
-                _duration_ms = int(estimate_mp3_duration_ms(mp3_bytes)) if mp3_bytes else 0
+                _duration_ms = int(get_audio_duration_ms(mp3_bytes)) if mp3_bytes else 0
 
                 def _dedupe_tts_dialogue_outbound(raw: str) -> str:
                     d = (raw or "").strip()
@@ -1954,8 +1955,14 @@ async def agent_ws(websocket: WebSocket):
                 )
 
             if msg_type == "ping":
-                # v1.1: echo back the id so client can correlate heartbeat latency
-                await send({"type": "pong", "id": msg.get("id", "pong")})
+                pong_out = {"type": "pong", "v": 1.1}
+                ts = msg.get("timestamp")
+                if ts is not None:
+                    pong_out["timestamp"] = ts
+                _pid = msg.get("id")
+                if _pid is not None:
+                    pong_out["id"] = _pid
+                await send(pong_out)
 
             elif msg_type == "pong":
                 # Client acknowledging our heartbeat — nothing to do besides log

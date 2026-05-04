@@ -15,6 +15,8 @@ import {
 import { getStudentIdForEvaluation } from '@/lib/studentDeviceId';
 import { authHeaders } from '@/lib/auth';
 import BusinessSubjectChips from '@/components/student/BusinessSubjectChips';
+import { useAssessment } from '@/hooks/useAssessment';
+import { GlassPanel } from '@/components/cognie/GlassPanel';
 
 // --- Interfaces ---
 
@@ -85,6 +87,10 @@ interface HistoryEntry { subject: string; grade: string; similarity: number; ts:
 
 // --- المكون الرئيسي (يجب أن يكون Default Export) ---
 export default function AssessmentPage() {
+  const USE_NEW_ENGINE = true;
+
+  const { submitAssessment, loading: newLoading } = useAssessment();
+
   // State
   const [selectedClass, setSelectedClass] = useState('');
   const [selectedSection, setSelectedSection] = useState('');
@@ -92,6 +98,8 @@ export default function AssessmentPage() {
 
   const [studentAnswer, setStudentAnswer] = useState('');
   const [studentSolutions, setStudentSolutions] = useState<StudentSolutionFile[]>([]);
+  /** Original `File` blobs for unified engine (`useAssessment`); legacy flow still uses extracted `studentSolutions`. */
+  const [studentSubmissionFiles, setStudentSubmissionFiles] = useState<File[]>([]);
   const [assignmentContext, setAssignmentContext] = useState('');
   const [filesCount, setFilesCount] = useState(0);
 
@@ -251,6 +259,7 @@ export default function AssessmentPage() {
     let combined = isStudent ? (studentAnswer || "") : "";
     let count = 0;
     const parsedStudentFiles: StudentSolutionFile[] = [];
+    const retainedStudentFiles: File[] = [];
 
     for (const file of files) {
       try {
@@ -271,6 +280,7 @@ export default function AssessmentPage() {
             file_label: file.name,
             file_content: normalizedText,
           });
+          retainedStudentFiles.push(file);
           count++;
         } else {
           setAssignmentContext(txt);
@@ -287,6 +297,7 @@ export default function AssessmentPage() {
       }
       setStudentAnswer(combined);
       setStudentSolutions(prev => [...prev, ...parsedStudentFiles]);
+      setStudentSubmissionFiles(prev => [...prev, ...retainedStudentFiles]);
       setFilesCount(prev => prev + count);
     }
   };
@@ -296,6 +307,7 @@ export default function AssessmentPage() {
     if (confirm("هل أنت متأكد؟ سيتم مسح البيانات للبدء من جديد.")) {
       setStudentAnswer("");
       setStudentSolutions([]);
+      setStudentSubmissionFiles([]);
       setFilesCount(0);
       setResult(null);
       setPlagiarismResult(null);
@@ -309,6 +321,7 @@ export default function AssessmentPage() {
     setAssignmentContext(DEMO_ASSIGNMENT);
     setStudentAnswer(DEMO_STUDENT);
     setStudentSolutions([{ file_label: 'demo.txt', file_content: DEMO_STUDENT }]);
+    setStudentSubmissionFiles([]);
     setFilesCount(1);
     setSelectedSubject('4. خطة التسويق');
     setSelectedClass('الصف العاشر');
@@ -373,11 +386,54 @@ export default function AssessmentPage() {
       return;
     }
 
+    const assignmentBrief = `${selectedSubject}\n${assignmentContext}`;
+
+    if (USE_NEW_ENGINE) {
+      setResult(null);
+      try {
+        const engineResult = await submitAssessment({
+          btecUnit: selectedSubject.trim() || '—',
+          studentWork: studentAnswer.trim(),
+          assignmentCriteria: assignmentContext.trim(),
+          submissionFiles: studentSubmissionFiles.length ? studentSubmissionFiles : undefined,
+          /** Explicit: grade from uploads when present; otherwise from textarea (no mixed `effective`). */
+          contentSource: studentSubmissionFiles.length > 0 ? 'files' : 'text',
+          acknowledgeHighSimilarity: true,
+          subjectLabel: selectedSubject || '—',
+          persistCoaching: false,
+        });
+        console.log('NEW ENGINE RESULT:', engineResult);
+
+        if (!engineResult.ok) {
+          const hint =
+            engineResult.policy?.reasons?.join('\n') ||
+            (engineResult.reason === 'locked' ? 'عملية تقييم أخرى قيد التشغيل.' : '') ||
+            'تعذر التقييم. تحقق من تسجيل الدخول والاتصال بالخادم.';
+          alert(hint);
+          return;
+        }
+
+        const evalResult = engineResult.normalizedEvaluation;
+        setResult(evalResult);
+        const sim = jaccardSim(
+          buildNgrams(studentAnswer || studentSolutions.map((f) => f.file_content).join(' ')),
+          buildNgrams(assignmentBrief),
+        );
+        setLocalSimilarity(sim);
+        setComplianceVerdict(
+          computeCompliance(studentAnswer || studentSolutions.map((f) => f.file_content).join(' '), sim),
+        );
+        saveToHistory(evalResult.data.final_grade || 'PENDING', sim);
+        saveLastGrade(evalResult);
+      } catch (e: unknown) {
+        alert(getErrorMessage(e));
+      }
+      return;
+    }
+
     setLoading(true); setResult(null);
 
     try {
-      const assignmentBrief = `${selectedSubject}\n${assignmentContext}`;
-
       if (studentSolutions.length > 0) {
         const res = await fetch('/api/evaluate-multi-file', {
           method: 'POST',
@@ -489,7 +545,11 @@ export default function AssessmentPage() {
         <div className="absolute bottom-[-10%] right-[-10%] w-[600px] h-[600px] bg-blue-600/20 rounded-full blur-[120px] animate-pulse delay-1000"></div>
       </div>
 
-      <div className="max-w-7xl mx-auto p-8 relative z-10">
+      <GlassPanel
+        variant="neon"
+        glowColor="cyan"
+        className="max-w-7xl mx-auto my-4 p-8 relative z-10 border border-white/15 text-white shadow-2xl"
+      >
 
         {/* Header */}
         <header className="mb-12 text-center transform hover:scale-105 transition duration-500 cursor-default">
@@ -601,13 +661,13 @@ export default function AssessmentPage() {
           <button
             type="button"
             onClick={handleEvaluate}
-            disabled={loading}
-            className="relative group px-10 py-4 rounded-2xl bg-gray-800 border border-green-500/30 overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed transition-all hover:border-green-400 hover:shadow-[0_0_30px_rgba(34,197,94,0.3)]"
+            disabled={loading || newLoading}
+            className="btn-glow relative group px-10 py-4 rounded-2xl bg-gray-800 border border-green-500/30 overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed transition-all hover:border-green-400 hover:shadow-[0_0_30px_rgba(34,197,94,0.3)]"
           >
             <div className="absolute inset-0 bg-green-600/10 group-hover:bg-green-600/20 transition"></div>
             <div className="relative flex items-center gap-3 text-green-400 font-bold text-lg">
-              {loading ? <div className="w-6 h-6 border-2 border-green-400 border-t-transparent rounded-full animate-spin"></div> : <FileText />}
-              <span>{loading ? "جاري التحليل..." : "بدء التقييم الشامل"}</span>
+              {loading || newLoading ? <div className="w-6 h-6 border-2 border-green-400 border-t-transparent rounded-full animate-spin"></div> : <FileText />}
+              <span>{loading || newLoading ? "جاري التحليل..." : "بدء التقييم الشامل"}</span>
             </div>
           </button>
 
@@ -720,7 +780,7 @@ export default function AssessmentPage() {
             </div>
           </div>
         )}
-      </div>
+      </GlassPanel>
     </div>
   );
 }

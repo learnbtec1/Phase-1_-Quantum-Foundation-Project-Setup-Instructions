@@ -25,6 +25,7 @@ export function getSharedAudioContext(): AudioContext | null {
 export async function resumeSharedAudioContext(): Promise<AudioContext | null> {
   const ctx = getSharedAudioContext();
   if (!ctx) return null;
+  const wasSuspended = ctx.state === 'suspended';
   if (ctx.state === 'suspended') {
     try {
       await ctx.resume();
@@ -34,6 +35,16 @@ export async function resumeSharedAudioContext(): Promise<AudioContext | null> {
       }
     }
   }
+  const stateAfterResume = ctx.state;
+  if (
+    wasSuspended &&
+    stateAfterResume === 'running' &&
+    typeof process !== 'undefined' &&
+    process.env.NODE_ENV === 'development'
+  ) {
+    // eslint-disable-next-line no-console
+    console.log('[Audio] unlocked — AudioContext running (browser autoplay policy)');
+  }
   return ctx;
 }
 
@@ -41,7 +52,8 @@ let _userGestureUnlockInstalled = false;
 
 /**
  * Browser autoplay policy: resume AudioContext on first user gesture.
- * Idempotent — safe to call from LipSyncManager / AvatarCanvas mount.
+ * Covers tap (pointer/touch), full click activation (mobile Safari quirks), and keyboard.
+ * Idempotent — safe to call from AvatarAgentClient layout and LipSyncManager mount.
  */
 export function installUserGestureAudioUnlock(): void {
   if (typeof window === 'undefined' || _userGestureUnlockInstalled) return;
@@ -49,7 +61,10 @@ export function installUserGestureAudioUnlock(): void {
   const unlock = (): void => {
     void resumeSharedAudioContext();
   };
-  window.addEventListener('pointerdown', unlock, { passive: true });
-  window.addEventListener('touchstart', unlock, { passive: true });
-  window.addEventListener('keydown', unlock);
+  /** `capture` so unlock still runs when inner handlers call stopPropagation on bubble phase. */
+  const cap = true;
+  window.addEventListener('pointerdown', unlock, { passive: true, capture: cap });
+  window.addEventListener('touchstart', unlock, { passive: true, capture: cap });
+  window.addEventListener('click', unlock, { capture: cap });
+  window.addEventListener('keydown', unlock, { capture: cap });
 }

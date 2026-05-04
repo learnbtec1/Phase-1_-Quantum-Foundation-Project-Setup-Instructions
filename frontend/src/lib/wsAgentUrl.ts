@@ -63,3 +63,31 @@ export function buildDefaultWsAgentUrl(): string {
   if (typeof process === 'undefined') return 'ws://127.0.0.1:8000/ws/agent';
   return buildWsAgentUrlFromEnv((k) => process.env[k]);
 }
+
+/** Close code used when the client aborts a stuck CONNECTING handshake (must be 4000–4999). */
+export const WS_CLIENT_OPEN_TIMEOUT_CODE = 4408;
+
+const DEFAULT_WS_CONNECT_TIMEOUT_MS = 8000;
+
+/**
+ * Milliseconds to wait for `WebSocket` to reach OPEN before closing the socket.
+ * Set `NEXT_PUBLIC_WS_CONNECT_TIMEOUT_MS` (e.g. 3000 for faster fail when backend is down).
+ */
+export function readWsConnectTimeoutMs(): number {
+  if (typeof process === 'undefined') return DEFAULT_WS_CONNECT_TIMEOUT_MS;
+  const raw = process.env.NEXT_PUBLIC_WS_CONNECT_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_WS_CONNECT_TIMEOUT_MS;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n)) return DEFAULT_WS_CONNECT_TIMEOUT_MS;
+  return Math.min(120_000, Math.max(1_500, n));
+}
+
+/**
+ * When `NEXT_PUBLIC_SKIP_AGENT_WS` is true/1/yes, the client must not open `/ws/agent`
+ * (avoids a stuck handshake when no backend is intended).
+ */
+export function agentWsSkippedByEnv(): boolean {
+  if (typeof process === 'undefined') return false;
+  const v = process.env.NEXT_PUBLIC_SKIP_AGENT_WS?.trim().toLowerCase() ?? '';
+  return v === '1' || v === 'true' || v === 'yes';
+}

@@ -60,9 +60,17 @@ const EMOTION_AMBIENT_INTENSITY: Record<string, number> = {
 
 interface ComfortLightingRigProps {
   emotion?: string;
+  /** When a custom equirect `scene.environment` is provided (e.g. Cogni studio), skip drei's preset HDR. */
+  skipEnvironmentMap?: boolean;
+  /** HDR env off + closed box — bump ambient / fill so avatar + walls read clearly. */
+  roomInteriorBoost?: boolean;
 }
 
-export default function ComfortLightingRig({ emotion = 'neutral' }: ComfortLightingRigProps) {
+export default function ComfortLightingRig({
+  emotion = 'neutral',
+  skipEnvironmentMap = false,
+  roomInteriorBoost = false,
+}: ComfortLightingRigProps) {
   const keyLightRef  = useRef<THREE.DirectionalLight>(null);
   const ambientRef   = useRef<THREE.AmbientLight>(null);
   const targetKeyClr = useRef(new THREE.Color('#fff5e0'));
@@ -73,11 +81,14 @@ export default function ComfortLightingRig({ emotion = 'neutral' }: ComfortLight
   useEffect(() => {
     const kc = EMOTION_KEY_COLOR[emotion]    ?? '#fff5e0';
     const ac = EMOTION_AMBIENT_COLOR[emotion] ?? '#ffe8d6';
-    const ai = EMOTION_AMBIENT_INTENSITY[emotion] ?? 0.12;
+    let ai = EMOTION_AMBIENT_INTENSITY[emotion] ?? 0.12;
+    if (roomInteriorBoost) {
+      ai = Math.max(ai, 0.26);
+    }
     targetKeyClr.current.set(kc);
     targetAmbClr.current.set(ac);
     targetAmbInt.current = ai;
-  }, [emotion]);
+  }, [emotion, roomInteriorBoost]);
 
   // Smoothly lerp lights toward target each frame (no re-render, pure ref mutation)
   useFrame((_, delta) => {
@@ -94,16 +105,26 @@ export default function ComfortLightingRig({ emotion = 'neutral' }: ComfortLight
   return (
     <>
       {/* ── Ambient — warm natural base, bright enough to lift shadows */}
-      <ambientLight ref={ambientRef} intensity={0.55} color="#fff8f0" />
+      <ambientLight
+        ref={ambientRef}
+        intensity={roomInteriorBoost ? 0.68 : 0.55}
+        color={roomInteriorBoost ? '#fffaf5' : '#fff8f0'}
+      />
 
       {/* ── Hemisphere — warm sky / warm ground bounce (no more dark base) */}
-      <hemisphereLight args={['#ffe8d0', '#c8a87a', 0.65]} />
+      <hemisphereLight
+        args={
+          roomInteriorBoost
+            ? (['#fff2e8', '#d8b890', 0.9] as const)
+            : (['#ffe8d0', '#c8a87a', 0.65] as const)
+        }
+      />
 
       {/* ── Key light: warm-white studio, upper-left-front, casts shadow */}
       <directionalLight
         ref={keyLightRef}
         position={[-2.5, 5.5, 3.0]}
-        intensity={3.2}
+        intensity={roomInteriorBoost ? 3.6 : 3.2}
         color="#fff5e0"
         castShadow
         shadow-mapSize-width={2048}
@@ -122,7 +143,7 @@ export default function ComfortLightingRig({ emotion = 'neutral' }: ComfortLight
       {/* ── Fill light: soft warm, right side — reduces harsh shadow contrast */}
       <directionalLight
         position={[3.5, 2.5, 2.0]}
-        intensity={1.6}
+        intensity={roomInteriorBoost ? 1.95 : 1.6}
         color="#ffe4c0"
         castShadow={false}
       />
@@ -130,7 +151,7 @@ export default function ComfortLightingRig({ emotion = 'neutral' }: ComfortLight
       {/* ── Front fill: straight-on soft light eliminates flat dark areas */}
       <directionalLight
         position={[0, 2.5, 4.0]}
-        intensity={1.2}
+        intensity={roomInteriorBoost ? 1.45 : 1.2}
         color="#fff8f4"
         castShadow={false}
       />
@@ -138,7 +159,7 @@ export default function ComfortLightingRig({ emotion = 'neutral' }: ComfortLight
       {/* ── Rim light: subtle warm-white edge from behind */}
       <directionalLight
         position={[0.5, 3.5, -4.5]}
-        intensity={1.0}
+        intensity={roomInteriorBoost ? 1.2 : 1.0}
         color="#ffe8d0"
         castShadow={false}
       />
@@ -146,14 +167,16 @@ export default function ComfortLightingRig({ emotion = 'neutral' }: ComfortLight
       {/* ── Face-level point: warm natural bounce from below */}
       <pointLight
         position={[0, 1.0, 1.8]}
-        intensity={1.2}
+        intensity={roomInteriorBoost ? 1.45 : 1.2}
         color="#ffe8c8"
         distance={4.0}
         decay={2}
       />
 
-      {/* ── PBR env map: apartment preset — warmer, more natural than city */}
-      <Environment preset="apartment" background={false} environmentIntensity={1.1} />
+      {/* ── PBR env map: apartment preset — skipped when equirect studio drives scene.environment */}
+      {!skipEnvironmentMap && (
+        <Environment preset="apartment" background={false} environmentIntensity={1.1} />
+      )}
     </>
   );
 }

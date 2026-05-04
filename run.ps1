@@ -8,7 +8,7 @@ $LogPath          = Join-Path $ProjectRoot "run.log"
 
 $FrontendHealthCandidates = @(
     "http://127.0.0.1:3000/api/health",
-    "http://127.0.0.1:3011/api/health"
+    "http://localhost:3000/api/health"
 )
 
 $BackendHealthCandidates = @(

@@ -21,7 +21,7 @@ import sys
 from typing import Any, Mapping, TypedDict, cast
 
 import websockets.exceptions
-from websockets.exceptions import InvalidMessage
+from websockets.exceptions import InvalidHandshake, InvalidMessage
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +187,11 @@ def _install_asyncio_handshake_noise_filter() -> None:
         context: dict[str, Any],
     ) -> None:
         exc = context.get("exception")
-        if isinstance(exc, (EOFError, InvalidMessage)):
+        # Probes that close before the HTTP upgrade line (and some library chains) surface as these types.
+        if isinstance(exc, (EOFError, InvalidMessage, InvalidHandshake)):
+            return
+        cause = getattr(exc, "__cause__", None)
+        if isinstance(cause, (EOFError, InvalidMessage, InvalidHandshake)):
             return
         loop_ref.default_exception_handler(context)
 

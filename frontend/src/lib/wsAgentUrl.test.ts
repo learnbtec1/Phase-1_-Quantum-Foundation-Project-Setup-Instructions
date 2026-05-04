@@ -5,8 +5,10 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   agentApiHealthUrlFromWsAgentUrl,
+  agentWsSkippedByEnv,
   buildWsAgentUrlFromEnv,
   ipv4LoopbackWsUrl,
+  readWsConnectTimeoutMs,
 } from './wsAgentUrl.ts';
 
 describe('ipv4LoopbackWsUrl', () => {
@@ -97,5 +99,31 @@ describe('agentApiHealthUrlFromWsAgentUrl edge', () => {
       agentApiHealthUrlFromWsAgentUrl('not-a-valid-url'),
       'http://127.0.0.1:8000/api/health',
     );
+  });
+});
+
+describe('readWsConnectTimeoutMs', () => {
+  it('clamps parsed env values', () => {
+    const prev = process.env.NEXT_PUBLIC_WS_CONNECT_TIMEOUT_MS;
+    process.env.NEXT_PUBLIC_WS_CONNECT_TIMEOUT_MS = '2500';
+    assert.equal(readWsConnectTimeoutMs(), 2500);
+    process.env.NEXT_PUBLIC_WS_CONNECT_TIMEOUT_MS = '500000';
+    assert.equal(readWsConnectTimeoutMs(), 120000);
+    process.env.NEXT_PUBLIC_WS_CONNECT_TIMEOUT_MS = '500';
+    assert.equal(readWsConnectTimeoutMs(), 1500);
+    if (prev === undefined) delete process.env.NEXT_PUBLIC_WS_CONNECT_TIMEOUT_MS;
+    else process.env.NEXT_PUBLIC_WS_CONNECT_TIMEOUT_MS = prev;
+  });
+});
+
+describe('agentWsSkippedByEnv', () => {
+  it('recognizes common truthy strings', () => {
+    const prev = process.env.NEXT_PUBLIC_SKIP_AGENT_WS;
+    process.env.NEXT_PUBLIC_SKIP_AGENT_WS = 'true';
+    assert.equal(agentWsSkippedByEnv(), true);
+    process.env.NEXT_PUBLIC_SKIP_AGENT_WS = '0';
+    assert.equal(agentWsSkippedByEnv(), false);
+    if (prev === undefined) delete process.env.NEXT_PUBLIC_SKIP_AGENT_WS;
+    else process.env.NEXT_PUBLIC_SKIP_AGENT_WS = prev;
   });
 });

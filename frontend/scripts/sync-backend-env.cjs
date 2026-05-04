@@ -1,26 +1,37 @@
 #!/usr/bin/env node
 /**
- * Probes FastAPI backend at 8000 and 8001, picks first responding port,
- * updates .env.local with NEXT_PUBLIC_API_URL, CHAT_BACKEND_URL, TTS_BACKEND_URL.
+ * Probes FastAPI via GET `http://127.0.0.1:<port>/api/health` (canonical dev port **8000**),
+ * updates `.env.local` with NEXT_PUBLIC_API_URL, CHAT_BACKEND_URL, TTS_BACKEND_URL.
  * Preserves existing keys (ELEVENLABS, OPENAI, etc.); only updates backend URLs.
+ *
+ * Default Compose publishes the agent API on host **8000** (`backend` → `8000:8000`).
  */
 const fs = require('fs');
 const path = require('path');
 
-const PORTS = [8000, 8001];
-const PROBE_PATHS = ['/', '/docs', '/api/v1/chat'];
+const PORTS = [8000];
 const TIMEOUT_MS = 2000;
 
 function probe(port) {
   return new Promise((resolve) => {
     const http = require('http');
-    const opts = { hostname: '127.0.0.1', port, path: '/', method: 'GET', timeout: TIMEOUT_MS };
+    const opts = {
+      hostname: '127.0.0.1',
+      port,
+      path: '/api/health',
+      method: 'GET',
+      timeout: TIMEOUT_MS,
+    };
     const req = http.request(opts, (res) => {
-      if (res.statusCode >= 200 && res.statusCode < 500) resolve(port);
+      res.resume();
+      if (res.statusCode === 200) resolve(port);
       else resolve(null);
     });
     req.on('error', () => resolve(null));
-    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
     req.setTimeout(TIMEOUT_MS);
     req.end();
   });
@@ -32,7 +43,7 @@ async function main() {
     port = await probe(p);
     if (port) break;
   }
-  port = port || 8001;
+  port = port || 8000;
   const base = `http://127.0.0.1:${port}`;
   const envPath = path.join(__dirname, '..', '.env.local');
   let content = '';

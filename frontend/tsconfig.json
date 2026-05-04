@@ -46,6 +46,7 @@
   ],
   "exclude": [
     "node_modules",
+    "src/components/cognie-vision-main",
     "src/__tests__",
     "src/app.txt",
     "**/__tests__/**",

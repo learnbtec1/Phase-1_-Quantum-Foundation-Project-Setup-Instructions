@@ -8,7 +8,7 @@ export default defineConfig({
   testDir: './tests/e2e',
   fullyParallel: false,
   use: {
-    baseURL: process.env.PW_BASE_URL || 'http://127.0.0.1:3011',
+    baseURL: process.env.PW_BASE_URL || 'http://127.0.0.1:3000',
     trace: 'retain-on-failure',
     video: 'retain-on-failure',
   },
@@ -16,8 +16,8 @@ export default defineConfig({
     ? {}
     : {
         webServer: {
-          command: 'npm run dev -- -p 3011',
-          url: 'http://127.0.0.1:3011',
+          command: 'npm run dev',
+          url: 'http://127.0.0.1:3000',
           timeout: 120_000,
           reuseExistingServer: !process.env.CI,
           env: { PW_MODE },

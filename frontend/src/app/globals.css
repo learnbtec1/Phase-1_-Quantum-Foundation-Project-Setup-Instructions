@@ -1,81 +1,354 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@import "tw-animate-css";
+@import url("https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500;700;900&family=Cairo:wght@300;400;600;800&display=swap");
 
-/* [COPILOT_CURSOR_FIX] Prevent browsers hiding cursor over WebGL canvas */
-canvas { cursor: default !important; }
+/* Next.js app + components (Tailwind v4 scan) */
+@source "../**/*.{js,ts,jsx,tsx,mdx}";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Cognie Vision design system — merged from `cognie-vision-main/src/styles.css`.
+ * An older Eduverse `@theme` block was removed to avoid conflicting custom tokens.
+ */
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+  --font-sans: var(--font-cairo), "Tajawal", "Cairo", ui-sans-serif, system-ui, sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ring-offset-background: var(--background);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
 
 :root {
-  --color-primary: #06b6d4;
-  --color-background: #030712;
-  --color-foreground: #f9fafb;
-  --color-glass-bg: #0f172a;
-  --color-glass-border: #334155;
-  --color-midnight: #020617;
-  --color-cyan-500: #06b6d4;
-  --color-emerald-500: #10b981;
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.129 0.042 264.695);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.129 0.042 264.695);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.129 0.042 264.695);
+  --primary: oklch(0.208 0.042 265.755);
+  --primary-foreground: oklch(0.984 0.003 247.858);
+  --secondary: oklch(0.968 0.007 247.896);
+  --secondary-foreground: oklch(0.208 0.042 265.755);
+  --muted: oklch(0.968 0.007 247.896);
+  --muted-foreground: oklch(0.554 0.046 257.417);
+  --accent: oklch(0.968 0.007 247.896);
+  --accent-foreground: oklch(0.208 0.042 265.755);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.984 0.003 247.858);
+  --border: oklch(0.929 0.013 255.508);
+  --input: oklch(0.929 0.013 255.508);
+  --ring: oklch(0.704 0.04 256.788);
+  --chart-1: oklch(0.646 0.222 41.116);
+  --chart-2: oklch(0.6 0.118 184.704);
+  --chart-3: oklch(0.398 0.07 227.392);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.769 0.188 70.08);
+  --sidebar: oklch(0.984 0.003 247.858);
+  --sidebar-foreground: oklch(0.129 0.042 264.695);
+  --sidebar-primary: oklch(0.208 0.042 265.755);
+  --sidebar-primary-foreground: oklch(0.984 0.003 247.858);
+  --sidebar-accent: oklch(0.968 0.007 247.896);
+  --sidebar-accent-foreground: oklch(0.208 0.042 265.755);
+  --sidebar-border: oklch(0.929 0.013 255.508);
+  --sidebar-ring: oklch(0.704 0.04 256.788);
 }
 
+/* Cognie — cyberpunk neon theme (Amman 2035) */
+.cognie {
+  --background: oklch(0.16 0.03 250);
+  --foreground: oklch(0.96 0.02 200);
+  --card: oklch(0.22 0.04 250);
+  --card-foreground: oklch(0.96 0.02 200);
+  --muted: oklch(0.28 0.04 250);
+  --muted-foreground: oklch(0.75 0.04 220);
+  --border: oklch(0.4 0.05 220 / 30%);
+  --neon-cyan: oklch(0.85 0.18 200);
+  --neon-emerald: oklch(0.78 0.2 160);
+  --neon-amber: oklch(0.85 0.18 80);
+  --glass-bg: oklch(1 0 0 / 5%);
+  --glass-border: oklch(1 0 0 / 12%);
+  --gradient-aurora: linear-gradient(
+    135deg,
+    oklch(0.85 0.18 200 / 0.4),
+    oklch(0.78 0.2 160 / 0.3),
+    oklch(0.85 0.18 80 / 0.25)
+  );
+  font-family: "Tajawal", "Cairo", var(--font-cairo), system-ui, sans-serif;
+}
+
+.dark {
+  --background: oklch(0.129 0.042 264.695);
+  --foreground: oklch(0.984 0.003 247.858);
+  --card: oklch(0.208 0.042 265.755);
+  --card-foreground: oklch(0.984 0.003 247.858);
+  --popover: oklch(0.208 0.042 265.755);
+  --popover-foreground: oklch(0.984 0.003 247.858);
+  --primary: oklch(0.929 0.013 255.508);
+  --primary-foreground: oklch(0.208 0.042 265.755);
+  --secondary: oklch(0.279 0.041 260.031);
+  --secondary-foreground: oklch(0.984 0.003 247.858);
+  --muted: oklch(0.279 0.041 260.031);
+  --muted-foreground: oklch(0.704 0.04 256.788);
+  --accent: oklch(0.279 0.041 260.031);
+  --accent-foreground: oklch(0.984 0.003 247.858);
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.984 0.003 247.858);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.551 0.027 264.364);
+  --chart-1: oklch(0.488 0.243 264.376);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --sidebar: oklch(0.208 0.042 265.755);
+  --sidebar-foreground: oklch(0.984 0.003 247.858);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.984 0.003 247.858);
+  --sidebar-accent: oklch(0.279 0.041 260.031);
+  --sidebar-accent-foreground: oklch(0.984 0.003 247.858);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.551 0.027 264.364);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans), "Tajawal", "Cairo", system-ui, sans-serif;
+  }
+}
+
+/* RTL utilities & neon flourishes (Cognie Vision) */
+[dir="rtl"] .flip-x {
+  transform: scaleX(-1);
+}
+
+@keyframes neon-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 12px var(--neon-cyan), 0 0 24px color-mix(in oklab, var(--neon-cyan) 40%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 20px var(--neon-cyan), 0 0 40px color-mix(in oklab, var(--neon-cyan) 60%, transparent);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes float-y {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes spin-slow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-float-y {
+  animation: float-y 4s ease-in-out infinite;
+}
+.animate-spin-slow {
+  animation: spin-slow 18s linear infinite;
+}
+.animate-neon-pulse {
+  animation: neon-pulse 2.4s ease-in-out infinite;
+}
+
+/* WebGL: keep default cursor above canvas */
+canvas {
+  cursor: default !important;
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * cognie-vision-main/src/styles.css — full file NOT appended here:
+ * That source starts with duplicate @import "tailwindcss"; re-including it
+ * would break the build. Tokens, .cognie, keyframes (shimmer, neon-pulse, …)
+ * are already mirrored above ("Cognie Vision design system" comment).
+ * Below: safe extracts + helpers not present in upstream (e.g. .btn-glow).
+ * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+/*
+ * Scoped namespace: wrap NeonButton / GlassPanel when not under .cognie.
+ * Mirrors .cognie cyberpunk tokens (styles.css § Cognie theme).
+ */
+/* Let html/body show the same ambience when stacks are transparent (Cognie shell, avatar page). */
 html {
-  color-scheme: dark;
+  background-color: oklch(0.14 0.03 250);
+}
+body.cognie {
+  background-color: transparent;
 }
 
-body {
-  background-color: var(--color-background);
-  color: var(--color-foreground);
-  direction: rtl;
-  font-family: "Cairo", "Inter", sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+.cognie-root {
+  --background: oklch(0.16 0.03 250);
+  --foreground: oklch(0.96 0.02 200);
+  --card: oklch(0.22 0.04 250);
+  --card-foreground: oklch(0.96 0.02 200);
+  --muted: oklch(0.28 0.04 250);
+  --muted-foreground: oklch(0.75 0.04 220);
+  --border: oklch(0.4 0.05 220 / 30%);
+  --neon-cyan: oklch(0.85 0.18 200);
+  --neon-emerald: oklch(0.78 0.2 160);
+  --neon-amber: oklch(0.85 0.18 80);
+  --glass-bg: oklch(1 0 0 / 5%);
+  --glass-border: oklch(1 0 0 / 12%);
+  --gradient-aurora: linear-gradient(
+    135deg,
+    oklch(0.85 0.18 200 / 0.4),
+    oklch(0.78 0.2 160 / 0.3),
+    oklch(0.85 0.18 80 / 0.25)
+  );
+  font-family: "Tajawal", "Cairo", var(--font-sans), system-ui, sans-serif;
+  color: var(--foreground);
 }
 
-.glass-eduverse {
-  background: linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(0, 0, 0, 0.8));
-  -webkit-backdrop-filter: blur(20px);
-  backdrop-filter: blur(20px);
-  border: 1px solid rgba(6, 182, 212, 0.2);
-  border-radius: 1.5rem;
+/* Full-app Cognie backdrop (new_env.png) — stable parallax-ish alignment + tall-screen tweak */
+.cognie-html-env-bg {
+  background-image: url("/models/images/new_env.png");
+  background-size: cover;
+  background-position: 50% 60%;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
 }
 
-.card-eduverse {
-  background: linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(0, 0, 0, 0.8));
-  -webkit-backdrop-filter: blur(20px);
-  backdrop-filter: blur(20px);
-  border: 1px solid rgba(6, 182, 212, 0.2);
-  border-radius: 1.5rem;
-  padding: 1.5rem;
-  transition: all 0.2s ease;
+@media (min-height: 800px) {
+  .cognie-root > .cognie-html-env-bg {
+    background-position: 50% 58%;
+  }
 }
 
-.card-eduverse:hover {
-  transform: scale(1.02);
+/* Readability vignette over photo background — keeps GlassPanel / neon readable */
+.cognie-bg-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    circle at center,
+    rgba(0, 0, 0, 0) 30%,
+    rgba(0, 0, 0, 0.35) 100%
+  );
 }
 
-.text-gradient {
-  background: linear-gradient(to right, var(--color-cyan-500), var(--color-emerald-500));
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
+/* Fallbacks on :root so var(--neon-*) resolves without .cognie / .cognie-root ancestor */
+:root {
+  --neon-cyan: oklch(0.85 0.18 200);
+  --neon-emerald: oklch(0.78 0.2 160);
+  --neon-amber: oklch(0.85 0.18 80);
+  --glass-bg: oklch(1 0 0 / 5%);
+  --glass-border: oklch(1 0 0 / 12%);
 }
 
-.custom-scrollbar::-webkit-scrollbar {
-  width: 8px;
-}
+/* ── NeonButton / NeonButton internals use name "shimmer" (already defined above). ── */
 
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-}
-
-/* صفحة التقييم — خلفية شركة احترافية (BTEC) */
-.evaluate-company-bg {
+/* ── UploadGlowButton: class was referenced but never shipped in upstream styles.css ── */
+.btn-glow {
+  --glow: var(--neon-cyan, oklch(0.85 0.18 200));
   position: relative;
-  background: #0c1222;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  border-radius: 0.75rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: oklch(0.96 0.02 200);
+  background: color-mix(in oklab, var(--glow) 14%, oklch(0.14 0.03 250 / 0.85));
+  border: 1px solid color-mix(in oklab, var(--glow) 45%, transparent);
+  box-shadow:
+    0 0 20px -4px color-mix(in oklab, var(--glow) 55%, transparent),
+    inset 0 1px 0 color-mix(in oklab, white 12%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: transform 150ms ease, box-shadow 200ms ease, border-color 200ms ease;
 }
 
-.evaluate-screen-frame {
+.btn-glow:hover {
+  transform: translateY(-1px) scale(1.01);
   box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.06),
-    0 25px 50px -12px rgba(0, 0, 0, 0.5),
-    0 0 80px -20px rgba(6, 182, 212, 0.12);
+    0 0 28px -2px color-mix(in oklab, var(--glow) 65%, transparent),
+    inset 0 1px 0 color-mix(in oklab, white 18%, transparent);
 }
+
+.btn-glow:active {
+  transform: translateY(0) scale(0.99);
+}
+
+/* Optional semantic aliases (minimal; NeonButton/GlassPanel are mostly inline/CSS vars) */
+.cognie-root .neon-outline,
+.cognie .neon-outline {
+  outline: 2px solid color-mix(in oklab, var(--neon-cyan) 50%, transparent);
+  outline-offset: 2px;
+}
+
+.cognie-root .glass-chip,
+.cognie .glass-chip {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-radius: 0.5rem;
+}
+

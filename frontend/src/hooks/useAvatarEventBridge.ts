@@ -19,6 +19,8 @@ import { dispatchAvatar } from '@/utils/events/normalizeAvatarEvents';
 import type { VisemeCue } from '@/app/avatar-agent/LipSyncManager';
 import { resetSpeechIntentHints, setSpeechIntentHintsFromText } from '@/lib/avatar/speechIntentHints';
 import { buildDefaultWsAgentUrl } from '@/lib/wsAgentUrl';
+import { patchTimelineCues, clearVisemeTimelineCues } from '@/lib/avatar/audioTimeline';
+import { coerceBridgeVisemeTToSeconds } from '@/lib/audio/visemeCueFromApi';
 // ─── Incoming message types (عقد JSON من الخادم أو اختبار) ───────────────────
 
 export type AgentSpeakMessage = {
@@ -114,24 +116,27 @@ function visemeEntryToCue(
   row: [number, string | number] | { t: number; id?: number; viseme?: string },
 ): VisemeCue | null {
   if (Array.isArray(row)) {
-    const t = row[0];
+    const tRaw = row[0];
     const v = row[1];
-    if (typeof t !== 'number' || !Number.isFinite(t)) return null;
-    if (typeof v === 'number' && Number.isFinite(v)) return { t, id: Math.max(0, Math.floor(v)) };
+    if (typeof tRaw !== 'number' || !Number.isFinite(tRaw)) return null;
+    const tSec = coerceBridgeVisemeTToSeconds(tRaw);
+    if (typeof v === 'number' && Number.isFinite(v))
+      return { t: tSec, id: Math.max(0, Math.floor(v)) };
     if (typeof v === 'string') {
       const id = LETTER_TO_AZURE[v] ?? LETTER_TO_AZURE[v.charAt(0)] ?? 0;
-      return { t, id };
+      return { t: tSec, id };
     }
     return null;
   }
-  const t = row.t;
-  if (typeof t !== 'number' || !Number.isFinite(t)) return null;
-  if (typeof row.id === 'number') return { t, id: row.id };
+  const tRaw = row.t;
+  if (typeof tRaw !== 'number' || !Number.isFinite(tRaw)) return null;
+  const tSec = coerceBridgeVisemeTToSeconds(tRaw);
+  if (typeof row.id === 'number') return { t: tSec, id: row.id };
   if (typeof row.viseme === 'string') {
     const id = LETTER_TO_AZURE[row.viseme] ?? 0;
-    return { t, id };
+    return { t: tSec, id };
   }
-  return { t, id: 0 };
+  return { t: tSec, id: 0 };
 }
 
 function parseVisemeCues(raw: AgentSpeakMessage['visemes']): VisemeCue[] {
@@ -231,7 +236,15 @@ export function useAvatarEventBridge({
           '[AvatarEventBridge] Ignoring embedded message audio — use speakWithTTS → /api/tts-with-timing only',
         );
       }
+      patchTimelineCues(cues, 'bridge');
       visemeCueQueueRef.current = cues;
+      if (cues.length > 0 && typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('avatar:visemes:timeline', {
+            detail: { cues: [...cues], source: 'bridge' as const },
+          }),
+        );
+      }
       setSpeechIntentHintsFromText((msg.text ?? '').trim());
       window.dispatchEvent(new CustomEvent('avatar:speak:start', { detail: {} }));
       isTalkingRef.current = true;
@@ -418,6 +431,7 @@ export function useAvatarEventBridge({
   useEffect(() => {
     if (!enabled || typeof window === 'undefined') return;
     const onClear = () => {
+      clearVisemeTimelineCues();
       visemeCueQueueRef.current = [];
     };
     window.addEventListener('avatar:visemes:clear', onClear);

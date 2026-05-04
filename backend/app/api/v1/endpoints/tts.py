@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 TTS endpoint: POST /api/v1/tts/generate
-Generate Arabic speech (MP3) using Microsoft Edge TTS (edge-tts).
+
+Streams MP3 from the shared TTS router (Edge, local Piper, ElevenLabs, etc. per env).
 """
 from __future__ import annotations
 
-import io
 import asyncio
+import io
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -28,7 +29,7 @@ class TTSRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=5000, description="Arabic text to speak")
     voice_name: Optional[str] = Field(
         None,
-        description="Ignored — use EDGE_TTS_VOICE / TTS_ARABIC_VOICE env.",
+        description="Voice hint — may be constrained by EDGE_TTS_VOICE / TTS_ARABIC_VOICE env.",
     )
 
 
@@ -49,23 +50,19 @@ async def generate_tts(
     _auth: User = Depends(gate_tts_user),
     service: EdgeTTSService = Depends(get_tts_service),
 ) -> StreamingResponse:
-    """Synthesize *text* to MP3 using Edge TTS."""
+    """Synthesize *text* to MP3 via the configured TTS router."""
     if not _EDGE_TTS_AVAILABLE:
-        raise HTTPException(
-            status_code=503,
-            detail="edge-tts is not installed.",
+        logger.warning(
+            "[TTS generate] edge-tts package not installed — other providers may still work."
         )
 
     try:
-        mp3_bytes, _v, _w, _prov = await service.synthesize(
+        mp3_bytes, _v, _w, provider_used, voice_label = await service.synthesize(
             text=body.text,
             voice_name=body.voice_name,
         )
-        if _prov != "edge":
-            logger.error("[TTS endpoint] unexpected provider returned: %s", _prov)
-            raise HTTPException(status_code=502, detail="TTS integrity: expected Edge provider only.")
         if not mp3_bytes:
-            raise HTTPException(status_code=502, detail="Edge TTS returned empty audio.")
+            raise HTTPException(status_code=502, detail="TTS returned empty audio.")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except asyncio.TimeoutError:
@@ -78,11 +75,11 @@ async def generate_tts(
         else:
             status = 500
         raise HTTPException(status_code=status, detail=err)
-    except Exception as exc:
+    except Exception:
         logger.exception("[TTS endpoint] unexpected error")
         raise HTTPException(status_code=500, detail="TTS synthesis failed unexpectedly")
 
-    used_voice = service._default_voice or "unknown"
+    used_voice = (voice_label or "").strip() or (service._default_voice or "unknown")
 
     return StreamingResponse(
         io.BytesIO(mp3_bytes),
@@ -91,6 +88,7 @@ async def generate_tts(
             "Content-Length": str(len(mp3_bytes)),
             "Cache-Control": "no-store",
             "X-Voice": used_voice,
+            "X-TTS-Provider": provider_used,
         },
     )
 
@@ -112,6 +110,6 @@ async def tts_info(
     return {
         "sdk_available": _EDGE_TTS_AVAILABLE,
         "default_voice": service._default_voice,
-        "provider": "edge-tts",
+        "provider": "router",
         "env_TTS_ARABIC_VOICE": settings.TTS_ARABIC_VOICE,
     }

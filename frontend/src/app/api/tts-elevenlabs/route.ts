@@ -21,10 +21,14 @@ import {
   resolveUpstreamErrorStatus,
   truncateUpstreamDetail,
 } from '@/lib/server/bffProxy';
+import { isTtsUpstreamProviderOk } from '@/lib/server/ttsUpstreamIntegrity';
 
 const MAX_TEXT_LENGTH = 5000;
 
 const ARABIC_RE = /[\u0600-\u06FF]/;
+
+/** Free-tier default (Rachel) — used when `.env` voice is unset or returns HTTP 402. */
+const ELEVENLABS_FALLBACK_VOICE_ID = '21m00Tcm4TlvDq8ikWAM';
 
 function ttsProxyTimeoutMs(): number {
   const raw = process.env.TTS_PROXY_TIMEOUT_MS;
@@ -93,7 +97,7 @@ export async function POST(req: NextRequest) {
     const apiKey = (process.env.ELEVENLABS_API_KEY ?? '').trim();
     const voiceIdEnv = (process.env.ELEVENLABS_VOICE_ID ?? '').trim();
     const defaultArabicVoice =
-      process.env.TTS_ARABIC_VOICE?.trim() || 'ar-JO-TaimNeural';
+      process.env.TTS_ARABIC_VOICE?.trim() || 'ar-SA-ZariyahNeural';
 
     const modelId =
       (process.env.ELEVENLABS_MODEL_ID ?? '').trim() || 'eleven_multilingual_v2';
@@ -107,14 +111,16 @@ export async function POST(req: NextRequest) {
         ? (AbortSignal as any).any([controller.signal, req.signal])
         : controller.signal;
 
-    const useDirectElevenLabs = Boolean(apiKey && voiceIdEnv);
+    const voicesToTry = Array.from(
+      new Set([
+        (voiceIdEnv || ELEVENLABS_FALLBACK_VOICE_ID).trim(),
+        ELEVENLABS_FALLBACK_VOICE_ID.trim(),
+      ]),
+    );
+
+    const useDirectElevenLabs = Boolean(apiKey);
 
     if (useDirectElevenLabs) {
-      const url = new URL(
-        `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceIdEnv)}`,
-      );
-      url.searchParams.set('output_format', 'mp3_44100_128');
-
       const body: Record<string, unknown> = {
         text,
         model_id: modelId,
@@ -123,40 +129,59 @@ export async function POST(req: NextRequest) {
         body.language_code = 'ar';
       }
 
-      // eslint-disable-next-line no-console
-      console.log(`[BFF] Calling ElevenLabs API directly for voice: ${voiceIdEnv}`);
+      let res: Response | undefined;
+      let voiceUsed = ELEVENLABS_FALLBACK_VOICE_ID;
 
-      let res: Response;
-      try {
-        res = await fetch(url.toString(), {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'audio/mpeg',
-            'xi-api-key': apiKey,
-            'X-Request-ID': reqId,
-          },
-          body: JSON.stringify(body),
-          signal: upstreamSignal,
-        });
-      } catch (fetchErr) {
-        clearTimeout(timeoutId);
-        console.error('[tts-elevenlabs] ElevenLabs unreachable:', fetchErr);
-        return NextResponse.json(
-          {
-            error: 'ElevenLabs unreachable',
-            detail: truncateUpstreamDetail(String(fetchErr)),
-            reqId,
-          },
-          { status: 503, headers: traceHeaders },
+      outer: for (let vi = 0; vi < voicesToTry.length; vi++) {
+        const voiceTry = voicesToTry[vi];
+        const url = new URL(
+          `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceTry)}`,
         );
-      }
+        url.searchParams.set('output_format', 'mp3_44100_128');
 
-      clearTimeout(timeoutId);
+        // eslint-disable-next-line no-console
+        console.log(`[BFF] Calling ElevenLabs API directly for voice: ${voiceTry}`);
 
-      if (!res.ok) {
+        try {
+          res = await fetch(url.toString(), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'audio/mpeg',
+              'xi-api-key': apiKey,
+              'X-Request-ID': reqId,
+            },
+            body: JSON.stringify(body),
+            signal: upstreamSignal,
+          });
+        } catch (fetchErr) {
+          clearTimeout(timeoutId);
+          console.error('[tts-elevenlabs] ElevenLabs unreachable:', fetchErr);
+          return NextResponse.json(
+            {
+              error: 'ElevenLabs unreachable',
+              detail: truncateUpstreamDetail(String(fetchErr)),
+              reqId,
+            },
+            { status: 503, headers: traceHeaders },
+          );
+        }
+
+        if (res.ok) {
+          voiceUsed = voiceTry;
+          break outer;
+        }
+
         const msg = await res.text().catch(() => '');
         const detail = extractUpstreamDetail(msg);
+        if (res.status === 402 && vi < voicesToTry.length - 1) {
+          // eslint-disable-next-line no-console
+          console.warn(`[tts-elevenlabs] ElevenLabs 402 for voice ${voiceTry} — retrying fallback`);
+          continue;
+        }
+
+        clearTimeout(timeoutId);
+
         if (res.status === 429) {
           return NextResponse.json(
             {
@@ -166,6 +191,17 @@ export async function POST(req: NextRequest) {
               reqId,
             },
             { status: 429, headers: traceHeaders },
+          );
+        }
+        if (res.status === 402) {
+          return NextResponse.json(
+            {
+              error: 'ElevenLabs voice or subscription not allowed for this API key',
+              detail,
+              code: 'elevenlabs_402',
+              reqId,
+            },
+            { status: 402, headers: traceHeaders },
           );
         }
         if (res.status === 401 || res.status === 403) {
@@ -182,6 +218,15 @@ export async function POST(req: NextRequest) {
         return NextResponse.json(
           { error: 'ElevenLabs error', detail, reqId },
           { status: outStatus, headers: traceHeaders },
+        );
+      }
+
+      clearTimeout(timeoutId);
+
+      if (!res?.ok) {
+        return NextResponse.json(
+          { error: 'ElevenLabs error', detail: 'no successful response', reqId },
+          { status: 502, headers: traceHeaders },
         );
       }
 
@@ -229,7 +274,7 @@ export async function POST(req: NextRequest) {
         format: 'mp3',
         timing_mode,
         provider: 'elevenlabs',
-        voice: voiceIdEnv,
+        voice: voiceUsed,
       };
 
       return NextResponse.json(responsePayload, {
@@ -240,7 +285,7 @@ export async function POST(req: NextRequest) {
     // ── Fallback: FastAPI has ELEVENLABS_* when TTS_PROVIDER=elevenlabs ─────────
     // eslint-disable-next-line no-console
     console.warn(
-      '[BFF] ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID not set on Next.js — proxying to FastAPI /api/v1/tts-with-timing (configure keys in backend .env or add them to frontend .env.local).',
+      '[BFF] ELEVENLABS_API_KEY not set on Next.js — proxying to FastAPI /api/v1/tts-with-timing (voice id optional here; Rachel fallback applies on direct ElevenLabs path only).',
     );
 
     const upstream =
@@ -359,13 +404,7 @@ export async function POST(req: NextRequest) {
     const audio =
       typeof data?.audio_base64 === 'string' ? data.audio_base64 : '';
 
-    const providerOk =
-      !provider ||
-      provider === 'azure' ||
-      provider === 'edge' ||
-      provider === 'auto' ||
-      provider === 'elevenlabs';
-    if (!providerOk) {
+    if (!isTtsUpstreamProviderOk(provider)) {
       return NextResponse.json(
         {
           error: 'TTS integrity',
@@ -375,6 +414,12 @@ export async function POST(req: NextRequest) {
         { status: 502, headers: traceHeaders },
       );
     }
+    const acceptedProviderLabel =
+      (typeof providerRaw === 'string' && providerRaw.trim() !== '')
+        ? providerRaw.trim()
+        : (provider || '(empty)');
+    // eslint-disable-next-line no-console -- intentional observability
+    console.log('[TTS] provider accepted:', acceptedProviderLabel);
 
     if (!audio) {
       return NextResponse.json(

@@ -25,7 +25,7 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 
 # ── Alembic identity ──────────────────────────────────────────────────────────
 revision = "0002"
-down_revision = "0001"   # set to the actual revision id of your 0001 migration
+down_revision = "0001b_convert_legacy_uuids"
 branch_labels = None
 depends_on = None
 

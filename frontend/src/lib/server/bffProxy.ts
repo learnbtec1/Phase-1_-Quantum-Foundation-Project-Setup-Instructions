@@ -26,6 +26,12 @@ export function extractUpstreamDetail(bodyText: string): string {
     };
     if (typeof j.detail === 'string') {
       detail = truncateUpstreamDetail(j.detail);
+    } else if (j.detail != null && typeof j.detail === 'object') {
+      try {
+        detail = truncateUpstreamDetail(JSON.stringify(j.detail));
+      } catch {
+        detail = truncateUpstreamDetail(String(j.detail));
+      }
     } else if (j.detail != null) {
       detail = truncateUpstreamDetail(String(j.detail));
     } else if (typeof j.message === 'string') {

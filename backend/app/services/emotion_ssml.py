@@ -2,7 +2,7 @@
 """
 Emotion → Azure Neural SSML: express-as style + prosody (rate / pitch / volume).
 
-Styles must be supported by the target neural voice (ar-JO-TaimNeural supports a subset).
+Styles must be supported by the target neural voice (e.g. ar-SA-ZariyahNeural supports a subset).
 See: https://learn.microsoft.com/azure/ai-services/speech-service/speech-synthesis-markup-voice-styles
 """
 from __future__ import annotations

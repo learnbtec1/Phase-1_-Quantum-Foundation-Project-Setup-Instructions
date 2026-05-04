@@ -58,7 +58,7 @@ If these are not installed, the app still runs: STT falls back to Web Speech API
 
 ```bash
 cd backend
-uvicorn app.main:app --reload --port 8001
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 ### 3. Run Frontend
@@ -83,7 +83,7 @@ npm run dev
 
 ## Environment
 
-- `NEXT_PUBLIC_API_URL` – Backend base URL (default: `http://localhost:8001`)
+- `NEXT_PUBLIC_API_URL` – Backend base URL (canonical: `http://127.0.0.1:8000` — must match Compose / `docker-compose.yml`)
 - `ELEVENLABS_API_KEY` – For fallback TTS when Kokoro is not used
 
 ---

@@ -1,5 +1,6 @@
 /**
- * V121 foot–floor lock — world floor only (`getWorldFloorY()`).
+ * V121 foot–floor lock — default target `getWorldFloorY()`; optional `footTargetWorldY`
+ * for bounded-room alignment to `ROOM_BOUNDS.floorY` (+ sole gap).
  * Vertical correction applies ONLY to `liftNode.position.y` (not avatar root XZ).
  */
 import * as THREE from 'three';
@@ -53,13 +54,14 @@ export function createLiftNode(vrm: VRM): THREE.Group {
 }
 
 /**
- * Snap soles to world floor Y = `getWorldFloorY()` (no model / rug / ROOM_BOUNDS floor probe).
+ * Snap averaged foot‑bone world Y toward `footTargetWorldY`, or else `getWorldFloorY()`.
  */
 export function applyFootFloorCalib({
   vrm,
   liftNode,
   group,
   force: _force = false,
+  footTargetWorldY,
 }: {
   vrm: VRM;
   liftNode: THREE.Group;
@@ -67,11 +69,16 @@ export function applyFootFloorCalib({
   carpetName?: string;
   gap?: number;
   force?: boolean;
+  /** When set (e.g. ROOM_BOUNDS.floorY + sole gap), overrides `getWorldFloorY()` for bounded room. */
+  footTargetWorldY?: number;
 }): void {
   void _force;
   if (!vrm.humanoid || !liftNode.parent) return;
 
-  const targetFloorY = getWorldFloorY();
+  const targetFloorY =
+    typeof footTargetWorldY === 'number' && Number.isFinite(footTargetWorldY)
+      ? footTargetWorldY
+      : getWorldFloorY();
   const avgFeetY = getAvgFeetWorldY(vrm, group, liftNode);
   if (avgFeetY === null) return;
 
@@ -104,14 +111,18 @@ export function applyFootFloorCalib({
   }
 }
 
-/** Each frame: if feet drift below world floor, lift only (never push down here). */
+/** Each frame: if feet drift below target floor Y, lift only (never push down here). */
 export function runWorldFloorAntiDriftFrame(
   vrm: VRM,
   liftNode: THREE.Group,
   group: THREE.Group,
+  footTargetWorldY?: number,
 ): void {
   if (!vrm.humanoid || !liftNode.parent) return;
-  const floorY = getWorldFloorY();
+  const floorY =
+    typeof footTargetWorldY === 'number' && Number.isFinite(footTargetWorldY)
+      ? footTargetWorldY
+      : getWorldFloorY();
   const avg = getAvgFeetWorldY(vrm, group, liftNode);
   if (avg === null) return;
   if (avg < floorY - 1e-6) {

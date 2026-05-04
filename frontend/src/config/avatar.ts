@@ -17,8 +17,8 @@ import {
 
 export { FLOOR_SOURCE, WORLD_FLOOR_Y, getWorldFloorY, warnModelFloorAxisMisuse };
 
-/** Office GLB under `public/models/office/` — must be a browser-safe URL, never a Windows path. */
-export const OFFICE_GLB_PUBLIC_PATH = '/models/office/office.glb' as const;
+/** Office room GLB served from `public/models/` — browser URL (not a filesystem path). */
+export const OFFICE_GLB_PUBLIC_PATH = '/models/office.glb' as const;
 
 /**
  * Base office room root (metres, Y-up) — pre–Blender-lock layout.
@@ -39,6 +39,88 @@ export function getRoomGroupPosition(): [number, number, number] {
 
 /** Background mesh stays outside `RoomContentEdit` (name as in GLB / office_scene.default.json). */
 export const OFFICE_BACKGROUND_MESH_NAME = 'Minimalistic_Modern_Office_Background_0' as const;
+
+/**
+ * Presentation: hide desk / workspace tabletop meshes inside the GLB (collisions unchanged).
+ * Set `NEXT_PUBLIC_SHOW_OFFICE_DESK=1` to render them again.
+ */
+export function showOfficeDeskMeshes(): boolean {
+  const v =
+    typeof process !== 'undefined' && process.env.NEXT_PUBLIC_SHOW_OFFICE_DESK != null
+      ? String(process.env.NEXT_PUBLIC_SHOW_OFFICE_DESK).trim().toLowerCase()
+      : '';
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+/**
+ * Presentation: clear the WebGL buffer with alpha so the HTML background (`layout` + `new_env.png`) shows through empties.
+ * Set `NEXT_PUBLIC_COGNIE_HTML_BG_OFF=1` for an opaque `#1a1a2e` canvas again (legacy).
+ */
+export function useCognieHtmlBackdropUnderCanvas(): boolean {
+  const v =
+    typeof process !== 'undefined' && process.env.NEXT_PUBLIC_COGNIE_HTML_BG_OFF != null
+      ? String(process.env.NEXT_PUBLIC_COGNIE_HTML_BG_OFF).trim().toLowerCase()
+      : '';
+  if (v === '1' || v === 'true' || v === 'yes') return false;
+  return true;
+}
+
+/** Panorama underlay (2:1 equirect PNG) — same asset as HTML `.cognie-html-env-bg` when used. */
+export const AVATAR_EQUIRECT_ENV_PUBLIC_PATH = '/models/images/new_env.png' as const;
+
+/**
+ * When true (default), AvatarCanvas loads the equirect as `scene.background` + PMREM `scene.environment`
+ * so orbit does not reveal black void; turquoise studio light affects PBR materials.
+ * Set `NEXT_PUBLIC_AVATAR_EQUIRECT_BG_OFF=1` to use transparent canvas + HTML backdrop only (legacy).
+ */
+export function useAvatarEquirectSceneBackground(): boolean {
+  const v =
+    typeof process !== 'undefined' && process.env.NEXT_PUBLIC_AVATAR_EQUIRECT_BG_OFF != null
+      ? String(process.env.NEXT_PUBLIC_AVATAR_EQUIRECT_BG_OFF).trim().toLowerCase()
+      : '';
+  if (v === '1' || v === 'true' || v === 'yes') return false;
+  return true;
+}
+
+/**
+ * When true (default): avatar canvas uses a real **6 m × 6 m** footprint box room (**4 m** ceiling) instead of equirect / HTML‑only backdrop.
+ * Set `NEXT_PUBLIC_AVATAR_BOUNDED_ROOM=0` | `false` | `off` to restore panorama / layered backdrop behaviour.
+ */
+export function useAvatarBoundedRoomScene(): boolean {
+  const v =
+    typeof process !== 'undefined' && process.env.NEXT_PUBLIC_AVATAR_BOUNDED_ROOM != null
+      ? String(process.env.NEXT_PUBLIC_AVATAR_BOUNDED_ROOM).trim().toLowerCase()
+      : '';
+  if (v === '0' || v === 'false' || v === 'off' || v === 'no') return false;
+  return true;
+}
+
+/**
+ * نسبة ارتفاع أطلس `new_env.png` المخصّصة لشريط الأرضية (‎v ∈ [0, cut]) لتلاقي قطاع الجدران عند boundary واحد مع الشبكة 3D.
+ * جرّب 0.30–0.42 إن ظهر خط فاصل بين «أرضية الصورة» وخط المشهد؛ يتطلّب إعادة بناء عند NEXT_PUBLIC_*.
+ */
+export function readBoundedRoomAtlasFloorVMaxEnv(): number {
+  if (typeof process === 'undefined') return 0.34;
+  const raw = process.env.NEXT_PUBLIC_BOUNDED_ATLAS_FLOOR_V_MAX ?? '';
+  if (!raw.trim()) return 0.34;
+  const v = parseFloat(raw.trim().replace(',', '.'));
+  if (!Number.isFinite(v) || v <= 0.08 || v >= 0.6) return 0.34;
+  return v;
+}
+
+/**
+ * Bounded mini-room: world Y target for average foot‑bone snap = `ROOM_BOUNDS.floorY` **plus** this offset.
+ * Many VRMs place `leftFoot`/`rightFoot` above the visible sole (~8–11 cm); default **0.10 m** when unset.
+ * Set `NEXT_PUBLIC_BOUNDED_FOOT_CALIB_Y_OFFSET=0` to lock bones to the exact floor plane.
+ */
+export function readBoundedFootCalibYOffsetM(): number {
+  if (typeof process === 'undefined') return 0.1;
+  const raw = process.env.NEXT_PUBLIC_BOUNDED_FOOT_CALIB_Y_OFFSET ?? '';
+  if (!raw.trim()) return 0.1;
+  const v = parseFloat(raw.trim().replace(',', '.'));
+  if (!Number.isFinite(v) || v < 0 || v > 0.5) return 0.1;
+  return v;
+}
 
 /** Same as `WORLD_FLOOR_Y` / `getWorldFloorY()` — kept for older imports. */
 export const MANUAL_FLOOR_Y = WORLD_FLOOR_Y;
@@ -513,7 +595,7 @@ export type ActiveEnvKey = 'DEFAULT' | 'OFFICE';
 
 /**
  * Registry for floor GLB + physics alignment.
- * DEFAULT and OFFICE both use the shipped office shell (`/models/office/office.glb`); legacy carpet GLBs were archived.
+ * DEFAULT and OFFICE both use the shipped office shell (`/models/office.glb`); legacy carpet GLBs were archived.
  */
 export const ENV_MODELS: Record<
   ActiveEnvKey,

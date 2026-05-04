@@ -14,6 +14,7 @@ import {
   resolveUpstreamErrorStatus,
   truncateUpstreamDetail,
 } from '@/lib/server/bffProxy';
+import { isTtsUpstreamProviderOk } from '@/lib/server/ttsUpstreamIntegrity';
 
 const MAX_TEXT_LENGTH = 5000;
 
@@ -62,7 +63,7 @@ export async function POST(req: NextRequest) {
       `${base}/api/v1/tts-with-timing`;
 
     const defaultArabicVoice =
-      process.env.TTS_ARABIC_VOICE?.trim() || 'ar-JO-TaimNeural';
+      process.env.TTS_ARABIC_VOICE?.trim() || 'ar-SA-ZariyahNeural';
 
     // ⏱ TIMEOUT CONTROL
     const controller = new AbortController();
@@ -90,7 +91,10 @@ export async function POST(req: NextRequest) {
         headers: upstreamHeaders,
         body: JSON.stringify({
           text,
-          provider: 'edge',
+          provider:
+            (typeof requestPayload?.provider === 'string'
+              ? requestPayload.provider
+              : 'edge') || 'edge',
           voice: requestPayload?.voice ?? defaultArabicVoice,
           speed: requestPayload?.speed ?? 0.85,
           emotion: requestPayload?.emotion ?? 'neutral',
@@ -186,13 +190,7 @@ export async function POST(req: NextRequest) {
 
     const visemes = data?.viseme_events;
 
-    const providerOk =
-      !provider ||
-      provider === 'azure' ||
-      provider === 'edge' ||
-      provider === 'auto' ||
-      provider === 'elevenlabs';
-    if (!providerOk) {
+    if (!isTtsUpstreamProviderOk(provider)) {
       return NextResponse.json(
         {
           error: 'TTS integrity',
@@ -202,6 +200,12 @@ export async function POST(req: NextRequest) {
         { status: 502, headers: traceHeaders }
       );
     }
+    const acceptedProviderLabel =
+      (typeof providerRaw === 'string' && providerRaw.trim() !== '')
+        ? providerRaw.trim()
+        : (provider || '(empty)');
+    // eslint-disable-next-line no-console -- intentional observability
+    console.log('[TTS] provider accepted:', acceptedProviderLabel);
 
     if (!audio) {
       return NextResponse.json(

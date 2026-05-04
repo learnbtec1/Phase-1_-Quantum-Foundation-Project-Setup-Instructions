@@ -20,7 +20,11 @@ def upgrade() -> None:
     # ── users ─────────────────────────────────────────────────────────────────
     op.create_table(
         "users",
-        sa.Column("id",         sa.String(36),   nullable=False),
+        sa.Column(
+            "id",
+            postgresql.UUID(as_uuid=True),
+            nullable=False,
+        ),
         sa.Column("name",       sa.String(120),  nullable=False),
         sa.Column("email",      sa.String(255),  nullable=False),
         sa.Column("role",       sa.Enum("student", "teacher", name="user_role"), nullable=False),
@@ -32,8 +36,8 @@ def upgrade() -> None:
     # ── assignments ───────────────────────────────────────────────────────────
     op.create_table(
         "assignments",
-        sa.Column("id",            sa.String(36),  nullable=False),
-        sa.Column("student_id",    sa.String(36),  nullable=False),
+        sa.Column("id",            postgresql.UUID(as_uuid=True),  nullable=False),
+        sa.Column("student_id",    postgresql.UUID(as_uuid=True),  nullable=False),
         sa.Column("title",         sa.String(255), nullable=False),
         sa.Column("original_text", sa.Text(),      nullable=True),
         sa.Column("file_path",     sa.String(512), nullable=True),
@@ -46,9 +50,9 @@ def upgrade() -> None:
     # ── evaluations ───────────────────────────────────────────────────────────
     op.create_table(
         "evaluations",
-        sa.Column("id",               sa.String(36),  nullable=False),
-        sa.Column("assignment_id",    sa.String(36),  nullable=False),
-        sa.Column("student_id",       sa.String(36),  nullable=True),
+        sa.Column("id",               postgresql.UUID(as_uuid=True),  nullable=False),
+        sa.Column("assignment_id",    postgresql.UUID(as_uuid=True),  nullable=False),
+        sa.Column("student_id",       postgresql.UUID(as_uuid=True),  nullable=True),
         sa.Column("title",            sa.String(255), nullable=False, server_default=""),
         sa.Column("original_text",    sa.Text(),      nullable=True),
         sa.Column("status",           sa.String(32),  nullable=False, server_default="evaluated"),

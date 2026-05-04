@@ -14,15 +14,21 @@ from app.core.config import settings
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
+def _plaintext_within_bcrypt_limit(plain: str) -> str:
+    """BCrypt rejects inputs longer than 72 bytes — truncate UTF-8 safely before hash/verify."""
+    return plain.encode("utf-8")[:72].decode("utf-8", errors="ignore")
+
+
 def hash_password(plain: str) -> str:
-    return pwd_context.hash(plain)
+    return pwd_context.hash(_plaintext_within_bcrypt_limit(plain))
 
 
 def verify_password(plain: str, hashed: Optional[str]) -> bool:
     if not hashed:
         return False
     try:
-        return pwd_context.verify(plain, hashed)
+        safe = _plaintext_within_bcrypt_limit(plain)
+        return pwd_context.verify(safe, hashed)
     except Exception:
         return False
 

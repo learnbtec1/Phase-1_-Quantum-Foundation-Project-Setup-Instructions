@@ -17,7 +17,7 @@
  *   showFloor / showBackWall / showSideWalls â€” toggle parts (e.g. side walls only when GLB supplies floor/back).
  *
  * Ù„Ø¶Ø¨Ø· Ø­Ø¬Ù… Ø§Ù„ØºØ±ÙØ© Ù…Ø¹ Ø§Ù„ÙÙŠØ²ÙŠØ§Ø¡: Ù…Ø±Ù‘Ø± Ø§Ù„Ø£Ø¨Ø¹Ø§Ø¯ Ù…Ù† `ROOM_BOUNDS` ÙƒÙ…Ø§ ÙÙŠ AvatarCanvas
- * (width = maxXâˆ’minXØŒ zNear/maxZØŒ zFar/minZØŒ height = ceilYâˆ’floorY).
+ * (width = maxX−minX, z-span = maxZ−minZ, height = ceilY−floorY = ROOM_INTERIOR_HEIGHT_M).
  */
 import React, { useMemo } from 'react';
 import * as THREE from 'three';
@@ -229,6 +229,9 @@ export type RoomBounds = {
   minZ: number; maxZ: number;
 };
 
+/** Clear interior height (BoundedMiniRoom + ceiling colliders). Matches product spec (4 m ceiling). */
+export const ROOM_INTERIOR_HEIGHT_M = 4;
+
 /** Immutable snapshot â€” never changes at runtime (reset / default target). */
 export const ROOM_BOUNDS_DEFAULT = {
   /**
@@ -236,18 +239,23 @@ export const ROOM_BOUNDS_DEFAULT = {
    * (`readFloorBaselineOffsetEnv`). Never derived from GLB Box3.
    */
   floorY: getWorldFloorY(),
-  ceilY: 5.0,
+  ceilY:  getWorldFloorY() + ROOM_INTERIOR_HEIGHT_M,
   minX:   -3.0,  maxX:  3.0,
-  minZ:   -5.0,  maxZ:  3.0,
+  minZ:   -3.0,  maxZ:  3.0,
 } as const;
 
-/** Mutable live bounds — `floorY` is world floor + env offset (`AvatarCanvas` may re-sync after load). */
-export const ROOM_BOUNDS: RoomBounds = {
-  floorY: ROOM_BOUNDS_DEFAULT.floorY + readFloorBaselineOffsetEnv(),
-  ceilY: 5.0,
-  minX:   -3.0,  maxX:  3.0,
-  minZ:   -5.0,  maxZ:  3.0,
-};
+/** Mutable live bounds — floor + ceil track env offset (`AvatarCanvas` may re-sync after load). */
+export const ROOM_BOUNDS: RoomBounds = (() => {
+  const fy = ROOM_BOUNDS_DEFAULT.floorY + readFloorBaselineOffsetEnv();
+  return {
+    floorY: fy,
+    ceilY: fy + ROOM_INTERIOR_HEIGHT_M,
+    minX: -3.0,
+    maxX: 3.0,
+    minZ: -3.0,
+    maxZ: 3.0,
+  };
+})();
 
 /** Default avatar XZ standing position. */
 export function getDefaultStandXZ(bounds: RoomBounds = ROOM_BOUNDS): { x: number; z: number } {
