@@ -108,6 +108,9 @@ import {
   detectVrmOverride,
   tickFreezeDetector,
   logRootMotion,
+  beginFrameTraceGroup,
+  endFrameTraceGroup,
+  emitRootCauseIfAny,
   TRACKED_POSE_KEYS,
   TRACKED_HUMANOID_NAMES,
 } from './motion/__boneAuthority';
@@ -2213,6 +2216,12 @@ export function VRMSkeletonManager({
       }
       return;
     }
+
+    // ── BONE AUTHORITY: open the per-frame trace group ────────────────────────
+    // Lazy-open: only fires on log frames (every 20th frame, gated by
+    // AVATAR_DEBUG).  Always paired with endFrameTraceGroup() at the bottom
+    // of useFrame so we never leak nested console groups.
+    beginFrameTraceGroup();
 
     // ── Speaking source: parent-managed ref OR local event-driven ref ─────────
     // The local ref keeps speaking=true for the dispatched `durationMs` even if
@@ -5410,6 +5419,13 @@ export function VRMSkeletonManager({
     }
 
     prevMotionSourceRef.current = motionSource;
+
+    // ── BONE AUTHORITY: end-of-frame root-cause emit + close trace group ──────
+    // emitRootCauseIfAny is rate-limited internally (≥90 frames between logs)
+    // and only logs when the diagnostic summary contains an actual problem.
+    // Always called so window.__avatarRootCause() returns up-to-date data.
+    emitRootCauseIfAny();
+    endFrameTraceGroup();
   }, 0);
 
   return null;

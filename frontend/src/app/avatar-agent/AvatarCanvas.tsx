@@ -45,6 +45,7 @@ import type { BonePoseMap } from './motion/PoseComposer';
 import { GenerativeGestureManager } from './GenerativeGestureManager';
 import { BehaviorBrainHost } from './behavior';
 import { MotionTraceOverlay } from './MotionTraceOverlay';
+import AvatarDebugOverlay from '@/components/avatar-debug-overlay';
 import { useAvatarEventBridge } from '@/hooks/useAvatarEventBridge';
 import { initGestureNormalizer } from '@/lib/gestureNormalizer';
 import { GestureCalibrator } from './GestureCalibrator';
@@ -878,6 +879,7 @@ export default function AvatarCanvas({
   return (
     <div ref={r3fEventSourceRef} className="relative h-full w-full bg-transparent">
       <MotionTraceOverlay />
+      <AvatarDebugOverlay />
       <ObservabilityOverlay />
       {showGestureCalibrationUi() && (
         <>

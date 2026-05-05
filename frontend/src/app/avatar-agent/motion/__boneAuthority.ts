@@ -881,5 +881,8 @@ if (typeof window !== 'undefined') {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const w = window as any;
   w.__STRICT_BONE_AUTHORITY = w.__STRICT_BONE_AUTHORITY ?? false;
+  w.__AVATAR_DEBUG_OVERLAY  = w.__AVATAR_DEBUG_OVERLAY  ?? false;
   w.__avatarAuthorityReport = getAuthorityReport;
+  w.__avatarFrameSummary    = getFrameDiagnosticSummary;
+  w.__avatarRootCause       = (): RootCause => detectRootCause(getFrameDiagnosticSummary());
 }
