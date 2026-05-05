@@ -805,10 +805,18 @@ export default function AvatarCanvas({
       const emotion = typeof d.emotion === 'string' ? d.emotion : '';
       const gesture = typeof d.gesture === 'string' ? d.gesture : '';
 
-      // Arm gestures from agent bridge disabled until recalibration
-      // if (gesture) {
-      //   dispatchAvatar('avatar:gesture', { type: gesture, duration: 2 });
-      // }
+      // ─────────────────────────────────────────────────────────────────────
+      // GESTURE PATH POLICY — read before re-enabling.
+      // Arm gestures arrive on TWO independent code paths:
+      //   1.  useAgentAgent.ts → unifiedGestureEngine.play(...) + structured
+      //       performance[] / gestures[] from agent_ws.py.   ← canonical path.
+      //   2.  This handler (cogni-agent-bridge / agent:message → "gesture").
+      // Re-dispatching `avatar:gesture` here would fire the same gesture twice
+      // (once via the engine, once raw), causing visible double-triggering and
+      // race conditions in gesture timing.  This branch is therefore muted.
+      // If you need to re-enable it, route through unifiedGestureEngine.play
+      // with an idempotency key, NOT raw dispatchAvatar('avatar:gesture').
+      // ─────────────────────────────────────────────────────────────────────
       void gesture;
       if (emotion) {
         dispatchAvatar('avatar:emotion', { emotion, strength: 0.58 });

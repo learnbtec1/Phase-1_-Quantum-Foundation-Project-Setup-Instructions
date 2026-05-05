@@ -4819,7 +4819,10 @@ export function VRMSkeletonManager({
     const _diagNow  = typeof performance !== 'undefined' ? performance.now() : 0;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const _diagLast = (globalThis as any).__diagSnapshotLastMs ?? 0;
-    const _doDiagSnap = _diagNow - _diagLast > 1000;
+    // BEFORE_VRM / AFTER_VRM / PIPELINE_BREAK / PHASE_4 are debug-only now.
+    // The vrm.update() override they used to surface has been resolved (we apply
+    // finalPose AFTER vrm.update()), so these logs are pure noise outside debugging.
+    const _doDiagSnap = AVATAR_DEBUG && (_diagNow - _diagLast > 1000);
 
     // ── Bone-read helpers ────────────────────────────────────────────────────
     const _readRot = (node: THREE.Object3D | null) => {
@@ -4953,7 +4956,10 @@ export function VRMSkeletonManager({
     const _fp3Now  = typeof performance !== 'undefined' ? performance.now() : 0;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const _fp3Last = (globalThis as any).__fp3LogLastMs ?? 0;
-    const _doFp3   = _fp3Now - _fp3Last > 250;
+    // FINAL_POSE_BEFORE/AFTER and PHASE_3 are diagnostic-only; gated behind
+    // AVATAR_DEBUG so production runtime is silent.  Throttle stays at 250ms
+    // when active so authors get a useful sample rate, not per-frame spam.
+    const _doFp3 = AVATAR_DEBUG && (_fp3Now - _fp3Last > 250);
     const _fp3ReadQ = (key: string): { x: number; y: number; z: number; w: number } | null => {
       const q = finalPose.get(key);
       if (!q) return null;
@@ -5020,29 +5026,63 @@ export function VRMSkeletonManager({
       } catch { /* ignore — humanoid.update() not public in all versions */ }
     }
 
-    // TASK 3 (FIX): Apply motionState deltas directly via vrm.humanoid.getNormalizedBoneNode.
-    // This is a failsafe layer: even if applyFinalPoseToVrm missed a bone, these
-    // minimal additive deltas (headNod, openGesture) will be applied.
-    if (vrm.humanoid) {
+    // ── REMOVED: post-VRM "failsafe" direct bone writes (`+=` block) ─────────
+    // Rationale (architectural critique, no patching):
+    //   The previous block resolved head / neck / leftUpperArm / rightUpperArm
+    //   via vrm.humanoid.getNormalizedBoneNode AFTER applyFinalPoseToVrm and
+    //   added _ms.headNod * _postAmp ON TOP of whatever the slerp had just
+    //   written, using `+=`.  This was wrong on three independent axes:
+    //     1.  Triple amplification — _motionState was already amplified ×3 in
+    //         _ampedMotionState, then ×2 inside applyIntentMotionState for the
+    //         head; adding raw _ms × 3 on top produced jitter / drift.
+    //     2.  Frame-to-frame accumulation — `+=` does not reset to baseline,
+    //         so slerp pulled the bone back toward finalPose while this block
+    //         kept pushing it forward, producing oscillation.
+    //     3.  Dual-source authority — applyFinalPoseToVrm IS the single bone
+    //         writer; bypassing the pose pipeline silently breaks PoseComposer
+    //         weights, kinematic locks, and per-bone overrides.
+    //   The motion that this block was "failsafing" is already applied through
+    //   the canonical path:  applyIntentMotionState → finalPose → applyFinalPoseToVrm.
+    //   If you need to inspect the raw bones for debugging, set
+    //   `window.__directBoneOverride = true` in the console; this opt-in path
+    //   uses absolute assignment (`=`), reads the *amped* motionState, and is
+    //   strictly diagnostic.
+    if (
+      typeof window !== 'undefined' &&
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__directBoneOverride === true &&
+      vrm.humanoid
+    ) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const _ms = (globalThis as any).__cogniMotionState as
-        { headNod?: number; headTilt?: number; openGesture?: number } | undefined;
+        | { headNod?: number; headTilt?: number; openGesture?: number }
+        | undefined;
       if (_ms) {
         try {
           const _hNode = vrm.humanoid.getNormalizedBoneNode('head' as never);
           const _lNode = vrm.humanoid.getNormalizedBoneNode('leftUpperArm' as never);
           const _rNode = vrm.humanoid.getNormalizedBoneNode('rightUpperArm' as never);
           const _nNode = vrm.humanoid.getNormalizedBoneNode('neck' as never);
-          const _postAmp = 3.0;
-          if (_hNode && _ms.headNod)     _hNode.rotation.x += _ms.headNod   * _postAmp;
-          if (_hNode && _ms.headTilt)    _hNode.rotation.z += _ms.headTilt  * _postAmp;
-          if (_nNode && _ms.headNod)     _nNode.rotation.x += _ms.headNod   * _postAmp * 0.3;
-          if (_lNode && _ms.openGesture) _lNode.rotation.z += _ms.openGesture * _postAmp * 0.45;
-          if (_rNode && _ms.openGesture) _rNode.rotation.z -= _ms.openGesture * _postAmp * 0.45;
-          // Re-propagate after delta writes
+          const _hn = (_ms.headNod ?? 0) * 0.6;
+          const _ht = (_ms.headTilt ?? 0) * 0.6;
+          const _og = (_ms.openGesture ?? 0) * 0.6;
+          if (_hNode) {
+            _hNode.rotation.x = _hn;
+            _hNode.rotation.z = _ht;
+          }
+          if (_nNode) _nNode.rotation.x = _hn * 0.3;
+          if (_lNode) _lNode.rotation.z =  _og * 0.45;
+          if (_rNode) _rNode.rotation.z = -_og * 0.45;
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           (vrm.humanoid as any).update?.();
-        } catch { /* ignore */ }
+          if (AVATAR_DEBUG) {
+            console.log('[DIRECT_BONE_OVERRIDE] enabled — bypassing pose pipeline', {
+              hn: _hn.toFixed(3),
+              ht: _ht.toFixed(3),
+              og: _og.toFixed(3),
+            });
+          }
+        } catch { /* humanoid api shape varies */ }
       }
     }
 
@@ -5106,7 +5146,9 @@ export function VRMSkeletonManager({
     }
 
     // ── [PHASE_5] [BONE_CHECK] — bone reference validity (throttled 1s) ─────
-    if (typeof performance !== 'undefined') {
+    // Debug-only: pure diagnostic.  Errors and warnings still print
+    // unconditionally below when a real failure is detected.
+    if (AVATAR_DEBUG && typeof performance !== 'undefined') {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const _p5Last = (globalThis as any).__phase5LogLastMs ?? 0;
       const _p5Now  = performance.now();
