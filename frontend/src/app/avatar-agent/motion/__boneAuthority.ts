@@ -393,6 +393,34 @@ export function readLiveBoneSnapshot(
   return out;
 }
 
+// ── Frame trace group (PART 7 — log cleanup) ──────────────────────────────
+// All structured logs that fire on a "log frame" (every 20 frames) are
+// emitted inside a collapsed console group so the console stays scannable.
+// Lazy open: the first emitter that runs opens the group; the explicit
+// `endFrameTraceGroup()` call at end-of-frame closes it.
+
+let _frameTraceGroupOpen = false;
+
+function _ensureFrameTraceGroup(): void {
+  if (_frameTraceGroupOpen) return;
+  if (!shouldLogThisFrame(20)) return;
+  console.groupCollapsed(`[AVATAR_FRAME ${_state.frame}]`);
+  _frameTraceGroupOpen = true;
+}
+
+/** Open the group eagerly (called once near the top of useFrame). */
+export function beginFrameTraceGroup(): void {
+  _ensureFrameTraceGroup();
+}
+
+/** Close the group at end-of-frame.  Always safe to call. */
+export function endFrameTraceGroup(): void {
+  if (_frameTraceGroupOpen) {
+    console.groupEnd();
+    _frameTraceGroupOpen = false;
+  }
+}
+
 // ── Trace emitters (Part 3) ────────────────────────────────────────────────
 
 export function traceInput(payload: {
@@ -404,6 +432,7 @@ export function traceInput(payload: {
   speaking?:        boolean;
 }): void {
   if (!shouldLogThisFrame(20)) return;
+  _ensureFrameTraceGroup();
   console.log('[TRACE_INPUT]', {
     frame:          _state.frame,
     gestures:       payload.gestures        ?? null,
@@ -420,6 +449,7 @@ export function tracePoseComposer(params: {
   weights:   Record<string, number>;
 }): void {
   if (!shouldLogThisFrame(20)) return;
+  _ensureFrameTraceGroup();
   const { finalPose, weights } = params;
   const samplePoseKeys = [...finalPose.keys()].slice(0, 30);
   console.log('[TRACE_POSE_COMPOSER]', {
@@ -441,6 +471,7 @@ export function traceBeforeApply(params: {
   liveBones: LiveBoneSnapshot;
 }): void {
   if (!shouldLogThisFrame(20)) return;
+  _ensureFrameTraceGroup();
   console.log('[TRACE_BEFORE_APPLY]', {
     frame:    _state.frame,
     pose: {
@@ -455,6 +486,7 @@ export function traceBeforeApply(params: {
 
 export function traceAfterApply(liveBones: LiveBoneSnapshot): void {
   if (!shouldLogThisFrame(20)) return;
+  _ensureFrameTraceGroup();
   console.log('[TRACE_AFTER_APPLY]', {
     frame:     _state.frame,
     liveBones,
@@ -463,6 +495,7 @@ export function traceAfterApply(liveBones: LiveBoneSnapshot): void {
 
 export function traceAfterVrmUpdate(liveBones: LiveBoneSnapshot): void {
   if (!shouldLogThisFrame(20)) return;
+  _ensureFrameTraceGroup();
   console.log('[TRACE_AFTER_VRM_UPDATE]', {
     frame:     _state.frame,
     liveBones,
@@ -477,6 +510,7 @@ export function traceFinalFrame(payload: {
   hipsLocal?:    { x: number; y: number; z: number };
 }): void {
   if (!shouldLogThisFrame(20)) return;
+  _ensureFrameTraceGroup();
   console.log('[TRACE_FINAL_FRAME]', {
     frame:          _state.frame,
     head:           payload.liveBones?.['head']         ?? null,
@@ -489,7 +523,8 @@ export function traceFinalFrame(payload: {
     hipsLocal:      payload.hipsLocal                   ?? null,
     authorityCount: _state.perBoneAuthority.size,
     conflicts:      _state.conflictsThisFrame,
-    health:         _state.conflictsThisFrame === 0 ? 'OK' : 'DEGRADED',
+    rejections:     _state.rejectionsThisFrame,
+    health:         (_state.conflictsThisFrame + _state.rejectionsThisFrame) === 0 ? 'OK' : 'DEGRADED',
   });
 }
 
@@ -566,16 +601,29 @@ export function logRootMotion(
   externalRoot: { x: number; z: number },
   vrmRoot:      { x: number; y: number; z: number },
 ): void {
+  // ── Update frame summary every frame (overlay reads this) ─────────────────
+  if (_frameDiag.hasExternalRoot) {
+    const dx = Math.abs(externalRoot.x - _frameDiag.prevExternalX);
+    const dz = Math.abs(externalRoot.z - _frameDiag.prevExternalZ);
+    _frameDiag.rootMotion = (dx + dz) > 1e-4;
+  }
+  _frameDiag.prevExternalX  = externalRoot.x;
+  _frameDiag.prevExternalZ  = externalRoot.z;
+  _frameDiag.hasExternalRoot = true;
+
+  // ── Console log throttled to every 60 frames ──────────────────────────────
   if (!shouldLogThisFrame(60)) return;
   // vrmRoot is *expected* to be (0,0,0) — locomotion lives on the outer
   // <group ref={groupRef} name="AvatarRoot"> in AvatarCanvas.tsx.
   // We log both so a future regression that lets vrm.scene drift is visible.
   const vrmDrifted = Math.hypot(vrmRoot.x, vrmRoot.y, vrmRoot.z) > 1e-4;
+  _ensureFrameTraceGroup();
   console.log('[ROOT_MOTION]', {
     frame:        _state.frame,
     externalRoot,
     vrmRoot,
     vrmDrifted,
+    rootMoving:   _frameDiag.rootMotion,
     note:         vrmDrifted
       ? '⚠ vrm.scene.position non-zero — enforceAvatarRootStability did not run or was bypassed'
       : 'OK — vrm root stable, locomotion handled on outer AvatarRoot',
@@ -599,8 +647,10 @@ export function detectPoseLoss(finalPose: Map<string, THREE.Quaternion>): void {
   for (const [canonical, aliases] of POSE_LOSS_REQUIREMENTS) {
     if (!aliases.some((a) => finalPose.has(a))) missing.push(canonical);
   }
+  // Always feed the frame summary (overlay reads this) — not throttled.
+  _frameDiag.missingPose = missing;
   if (missing.length === 0) return;
-  // Always log pose loss (it's a real failure), but rate-limit to ~1 / 2 s.
+  // Console-error rate-limited to ~1 / 2 s to avoid log spam.
   if (_state.frame - _lastPoseLossReportFrame < 120) return;
   _lastPoseLossReportFrame = _state.frame;
   console.error('[POSE_LOSS]', { frame: _state.frame, missing });
@@ -617,8 +667,8 @@ export function detectVrmOverride(
   before: LiveBoneSnapshot,
   after:  LiveBoneSnapshot,
 ): void {
-  if (!AVATAR_DEBUG) return;
-  if (_state.frame - _lastVrmOverrideReportFrame < 30) return;
+  // Always compute overrides for the frame summary, even when AVATAR_DEBUG is
+  // off — the overlay must remain useful in production-debug builds.
   const overrides: Array<{ bone: string; before: unknown; after: unknown; delta: number }> = [];
   for (const name in before) {
     const b = before[name];
@@ -629,8 +679,12 @@ export function detectVrmOverride(
       overrides.push({ bone: name, before: b, after: a, delta: +d.toFixed(4) });
     }
   }
+  _frameDiag.overrides = overrides.map((o) => o.bone);
+  if (!AVATAR_DEBUG) return;
   if (overrides.length === 0) return;
+  if (_state.frame - _lastVrmOverrideReportFrame < 30) return;
   _lastVrmOverrideReportFrame = _state.frame;
+  _ensureFrameTraceGroup();
   console.warn('[VRM_OVERRIDE]', {
     frame:     _state.frame,
     overrides,
@@ -671,6 +725,112 @@ export function trackGestureDispatch(gestureKey: string | undefined | null): boo
     return true;
   }
   return false;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PART 3+4 — Frame summary + Root cause detector
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface FrameDiagnosticSummary {
+  frame:        number;
+  conflicts:    number;
+  rejections:   number;
+  frozenBones:  string[];
+  overrides:    string[];
+  missingPose:  string[];
+  rootMotion:   boolean;
+  hasExternalRoot: boolean;
+}
+
+export interface RootCause {
+  cause:      string;
+  confidence: 'high' | 'medium' | 'low';
+}
+
+/** Snapshot the current frame's diagnostic state.  Pure read — never mutates. */
+export function getFrameDiagnosticSummary(): FrameDiagnosticSummary {
+  const frozenBones = [..._frozenLookup.entries()]
+    .filter(([, v]) => v.framesFrozen >= FREEZE_FRAMES)
+    .map(([n]) => n);
+  return {
+    frame:           _state.frame,
+    conflicts:       _state.conflictsThisFrame,
+    rejections:      _state.rejectionsThisFrame,
+    frozenBones,
+    overrides:       [..._frameDiag.overrides],
+    missingPose:     [..._frameDiag.missingPose],
+    rootMotion:      _frameDiag.rootMotion,
+    hasExternalRoot: _frameDiag.hasExternalRoot,
+  };
+}
+
+/**
+ * Heuristic root-cause classifier.  Examines the summary in a deterministic
+ * priority order — most specific failure wins.
+ *
+ * Confidence is `high` when a clear single-cause signal is present and
+ * `medium` for inconclusive but suggestive states (e.g. avatar standing
+ * still on purpose vs locomotion broken — looks the same from this layer).
+ */
+export function detectRootCause(summary: FrameDiagnosticSummary): RootCause {
+  // 1. Pose loss is always the most specific failure: PoseComposer broke.
+  if (summary.missingPose.length > 0) {
+    return {
+      cause:      'PoseComposer failure: missing critical pose keys (' + summary.missingPose.join(', ') + ')',
+      confidence: 'high',
+    };
+  }
+  // 2. VRM internals (lookAt / animationManager) are stomping our writes.
+  if (summary.overrides.length > 0) {
+    return {
+      cause:      'VRM override conflict on ' + summary.overrides.join(', '),
+      confidence: 'high',
+    };
+  }
+  // 3. Arm-related bones frozen → upstream signal not reaching the layers.
+  const armPattern = /(upperArm|lowerArm|hand|shoulder)$/i;
+  const armFrozen = summary.frozenBones.filter((b) => armPattern.test(b));
+  if (armFrozen.length > 0) {
+    return {
+      cause:      'No upstream motion input — arm bones frozen: ' + armFrozen.join(', '),
+      confidence: 'high',
+    };
+  }
+  // 4. Generic freeze — something is not animating, but we don't know what.
+  if (summary.frozenBones.length > 0) {
+    return {
+      cause:      'Frozen bones detected: ' + summary.frozenBones.join(', '),
+      confidence: 'medium',
+    };
+  }
+  // 5. Locomotion check is the most ambiguous: avatar may be intentionally
+  //    standing still.  Flag medium confidence so it doesn't dominate.
+  if (summary.hasExternalRoot && !summary.rootMotion) {
+    return {
+      cause:      'Locomotion system inactive — AvatarRoot has not translated recently',
+      confidence: 'medium',
+    };
+  }
+  return { cause: 'No issues detected', confidence: 'high' };
+}
+
+let _lastRootCauseLogFrame = -Infinity;
+
+/**
+ * Side-effecting helper: compute summary + root cause and log once per
+ * 90-frame window (≈1.5 s).  Suppressed when nothing is wrong.
+ */
+export function emitRootCauseIfAny(): RootCause {
+  const summary = getFrameDiagnosticSummary();
+  const rc      = detectRootCause(summary);
+  if (rc.cause === 'No issues detected') return rc;
+  if (_state.frame - _lastRootCauseLogFrame < 90) return rc;
+  _lastRootCauseLogFrame = _state.frame;
+  if (AVATAR_DEBUG) {
+    _ensureFrameTraceGroup();
+    console.warn('[ROOT_CAUSE]', { cause: rc.cause, confidence: rc.confidence });
+  }
+  return rc;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
