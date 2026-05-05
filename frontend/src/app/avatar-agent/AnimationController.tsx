@@ -836,7 +836,8 @@ export function AnimationController({
       group.getWorldPosition(_avatarWorldScratch);
       _toCamScratch.copy(camera.position).sub(_avatarWorldScratch);
       if (_toCamScratch.lengthSq() > 1e-8) _toCamScratch.normalize();
-      else _toCamScratch.set(0, 0, 1);
+      // Canonical framing: camera on world −Z → avatar→camera ≈ −Z (matches AvatarCanvas az − offset).
+      else _toCamScratch.set(0, 0, -1);
       _camAnchorScratch.copy(_avatarWorldScratch).addScaledVector(_toCamScratch, 2.2);
       _camAnchorScratch.y += 0.12;
 

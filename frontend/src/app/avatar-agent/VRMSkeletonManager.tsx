@@ -35,6 +35,7 @@ import {
   type PerBonePoseBlendWeights,
 } from './motion/PoseComposer';
 import { expandGenerativeSuppressedKeys } from './motion/generativeProceduralMask';
+import { applyUpperArmGestureCalib } from './motion/gestureWorldCalibration';
 import { clampGenerativeEulerYXZ } from './motion/jointEulerLimits';
 import { runWithProceduralSuppression } from './motion/proceduralSuppressionContext';
 import { applyPresenceFromEmbodiment } from './motion/presenceLayer';
@@ -121,6 +122,11 @@ import {
   applyBehaviorSyncModifiers,
   checkSyncAlignment,
   checkFreezeVsSpeech,
+  enforceHardSyncGuarantee,
+  validateEmotionEffect,
+  validateIntentEffect,
+  validateAvatarPipeline,
+  mergeBehaviorEngineMotionScalars,
 } from './motion/__behaviorSync';
 import { blendPoseInto, generateIntentPose } from './motion/intentPoseGenerator';
 import { updateIntentFromBehaviorBrain } from '@/lib/avatar/motionIntentContinuity';
@@ -322,9 +328,9 @@ const NECK_SWAY_MUL    = 0.58;
 
 // ═══════════════════════════════════════════════════════
 // ★ SOURCE OF TRUTH — normalized rightUpperArm (YXZ) — see armGestureReference.ts
-//   RIGHT: Forward = −X, Up = −Z, Down = +Z. Primary reach is NOT on Y.
-//   LEFT:  Forward = +X (mirror); Z mirrors idle hang.
-//   Generative / semantic arms: collision weight capped while overlay active (see useFrame).
+//   Bone-local only (NOT world +Z): RIGHT Forward = −X, Up = −Z, Down = +Z.
+//   LEFT: Forward = +X (mirror); Z mirrors idle hang.
+//   World/scene forward remains +Z — see `config/avatar.ts`.
 // ═══════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3086,6 +3092,9 @@ export function VRMSkeletonManager({
       const map = useIdlePose ? idlePose : gesturePose;
       SK_E.set(ex, ey, ez, 'YXZ');
       SK_Q.setFromEuler(SK_E);
+      if (!useIdlePose && (key === 'rua' || key === 'lua')) {
+        applyUpperArmGestureCalib(SK_Q);
+      }
       map.set(key, SK_Q.clone());
     };
 
@@ -4176,6 +4185,82 @@ export function VRMSkeletonManager({
     const behaviorPayload = brainSnap.behaviorContractPayload;
     let humSnap: HumanizationSnapshot | null = null;
 
+    // ── ROOT-CAUSE FIX (PART 1) ──────────────────────────────────────────────
+    // motionState computation must happen UNCONDITIONALLY — before any
+    // `if (!isolateVrmaLayers)` gate.  Previously it lived inside the
+    // procedural block and was skipped during VRMA playback, which left
+    // `motionState.headNod` / `motionState.openGesture` at zero while
+    // speaking.  That zero state is what the behavior-sync layer detected
+    // and "fixed" with `[SYNC_FORCE_INJECTION]`.  Eliminating the gate
+    // eliminates the artificial injection.
+    //
+    // The intent classifier, gesture-timing tick, and speech-rhythm baseline
+    // all run here.  `applyIntentMotionState` itself still runs inside the
+    // procedural block at full weight (existing behaviour), and an additional
+    // reduced-weight invocation runs in the VRMA branch below so the speech-
+    // driven head/arm motion is visible during clip playback as well.
+    const _llmIntent = embFrame.intent.activeIntent ?? '';
+    let _activeIntent = _llmIntent;
+    if (!_activeIntent) {
+      const _utter = getEmbodimentUtteranceTextForSemantics() ?? '';
+      const _detected = detectIntent(_utter);
+      if (_detected !== 'neutral') _activeIntent = _detected;
+    }
+    const _timingWeight = tickGestureTiming(_activeIntent);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const _motionState = ((globalThis as any).__cogniMotionState ??= {
+      openGesture: 0, headTilt: 0, headNod: 0,
+    });
+    _motionState.openGesture =
+      _activeIntent === 'explaining' || _activeIntent === 'emphasizing' ? 1 : 0;
+    _motionState.headTilt =
+      _activeIntent === 'thinking'    ? 0.05 :
+      _activeIntent === 'questioning' ? 0.08 : 0;
+    _motionState.headNod =
+      _activeIntent === 'confirming' || _activeIntent === 'agreeing' ? 0.10 : 0;
+
+    // SPEECH-RHYTHM BASELINE — non-zero motion whenever the avatar speaks,
+    // regardless of intent classification or VRMA state.
+    if (speaking) {
+      const _tSpeech = (typeof performance !== 'undefined' ? performance.now() : 0) * 0.0012;
+      if (_motionState.headNod === 0) {
+        _motionState.headNod = Math.abs(Math.sin(_tSpeech)) * 0.12;
+      }
+      if (_motionState.openGesture === 0) {
+        _motionState.openGesture = 0.25 + Math.abs(Math.sin(_tSpeech * 0.7)) * 0.25;
+      }
+    }
+
+    // Behavior Engine — multiplicative bias on motionState (does not replace baseline).
+    mergeBehaviorEngineMotionScalars(_motionState, {
+      speaking,
+      intent: _activeIntent,
+      emotion: behaviorPayload?.emotion ?? 'neutral',
+      intensity: embFrame.intent.intensity ?? 0,
+    });
+
+    // Optional forced-motion override (debug-only diagnostic flag).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if ((typeof window !== 'undefined') && (window as any).__forceMotionState) {
+      const _ft6 = performance.now() * 0.002;
+      _motionState.headNod     = Math.sin(_ft6) * 0.3;
+      _motionState.headTilt    = Math.cos(_ft6) * 0.2;
+      _motionState.openGesture = 1.0;
+    }
+
+    // Visibility amplification (tight clamps prevent cinematic distortion).
+    const _VIS_AMP = 3.0;
+    const _ampedMotionState = {
+      headNod:     Math.max(-0.3, Math.min(0.3,  _motionState.headNod     * _VIS_AMP)),
+      headTilt:    Math.max(-0.3, Math.min(0.3,  _motionState.headTilt    * _VIS_AMP)),
+      openGesture: Math.max(0,    Math.min(0.8,  _motionState.openGesture * _VIS_AMP)),
+    };
+    // Expose timing weight to presence/idle layers (priority attenuation).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).__intentAttenuation = _timingWeight;
+    // ── END root-cause hoist ─────────────────────────────────────────────────
+
     runWithProceduralSuppression(proceduralSuppressionKeys, () => {
       if (!isolateVrmaLayers) {
         safeCall('presenceLayer', () => applyPresenceFromEmbodiment(finalPose, embFrame, {
@@ -4241,44 +4326,9 @@ export function VRMSkeletonManager({
         diffAndRegisterAuthority(BoneAuthority.MICRO, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
 
         // ── New motion layers (biomechanical + finger + gaze + timing) ────────
-        // 1) LLM intent wins if provided; otherwise rule-based classifier runs on
-        //    the current utterance text (same source used by semantic hints).
-        const _llmIntent = embFrame.intent.activeIntent ?? '';
-        let _activeIntent = _llmIntent;
-        if (!_activeIntent) {
-          const _utter = getEmbodimentUtteranceTextForSemantics() ?? '';
-          const _detected = detectIntent(_utter);
-          if (_detected !== 'neutral') _activeIntent = _detected;
-        }
-        const _timingWeight = tickGestureTiming(_activeIntent);
-
-        // Simple motion-state hooks (body/gaze layers below also read _activeIntent directly).
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const _motionState = ((globalThis as any).__cogniMotionState ??= {
-          openGesture: 0, headTilt: 0, headNod: 0,
-        });
-        _motionState.openGesture =
-          _activeIntent === 'explaining' || _activeIntent === 'emphasizing' ? 1 : 0;
-        _motionState.headTilt =
-          _activeIntent === 'thinking'   ? 0.05 :
-          _activeIntent === 'questioning' ? 0.08 : 0;
-        _motionState.headNod =
-          _activeIntent === 'confirming' || _activeIntent === 'agreeing' ? 0.10 : 0;
-
-        // ── SPEECH-RHYTHM BASELINE ─────────────────────────────────────────────
-        // When speaking with no specific intent all motionState values stay 0 →
-        // motion layers get no signal. Inject a gentle sin-wave headNod and a
-        // small openGesture so the avatar always has SOME motion while speaking.
-        // This does NOT override intent-classified values (they're higher).
-        if (speaking) {
-          const _tSpeech = (typeof performance !== 'undefined' ? performance.now() : 0) * 0.0012;
-          if (_motionState.headNod === 0) {
-            _motionState.headNod = Math.abs(Math.sin(_tSpeech)) * 0.12;
-          }
-          if (_motionState.openGesture === 0) {
-            _motionState.openGesture = 0.25 + Math.abs(Math.sin(_tSpeech * 0.7)) * 0.25;
-          }
-        }
+        // motionState / _activeIntent / _timingWeight / _ampedMotionState are
+        // computed unconditionally above (PART 1 root-cause hoist).  Here we
+        // only consume them.
 
         // ── [PHASE_2] + [MOTION_STATE] log (throttled 250ms) ─────────────────
         if (typeof performance !== 'undefined') {
@@ -4314,26 +4364,6 @@ export function VRMSkeletonManager({
             }
           }
         }
-
-        // ── TASK 6 — forced motionState override (enable: window.__forceMotionState = true) ──
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        if ((typeof window !== 'undefined') && (window as any).__forceMotionState) {
-          const _ft6 = performance.now() * 0.002;
-          _motionState.headNod     = Math.sin(_ft6) * 0.3;
-          _motionState.headTilt    = Math.cos(_ft6) * 0.2;
-          _motionState.openGesture = 1.0;
-          console.log('[FORCED_MOTION_STATE]', _motionState);
-        }
-
-        // ── MOTION VISIBILITY AMPLIFICATION + REBALANCED CLAMP ───────────────
-        // 3× amplification preserved; tighter clamps prevent extreme distortion
-        // while keeping motion clearly readable at normal viewing distance.
-        const _VIS_AMP = 3.0;
-        const _ampedMotionState = {
-          headNod:     Math.max(-0.3, Math.min(0.3,  _motionState.headNod     * _VIS_AMP)),
-          headTilt:    Math.max(-0.3, Math.min(0.3,  _motionState.headTilt    * _VIS_AMP)),
-          openGesture: Math.max(0,    Math.min(0.8,  _motionState.openGesture * _VIS_AMP)),
-        };
 
         // ── [VISIBLE_MOTION] + [LAYER_BALANCE] logs (throttled 250ms) ──────────
         if (typeof performance !== 'undefined') {
@@ -4489,9 +4519,8 @@ export function VRMSkeletonManager({
           (globalThis as any).__readEuler = _readEuler;
         }
 
-        // ── Priority attenuation global — presence/idle read this flag ───────
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (globalThis as any).__intentAttenuation = _timingWeight;
+        // (priority attenuation global is now set unconditionally above —
+        // see PART 1 root-cause hoist near runWithProceduralSuppression).
         safeCall('biomechanical', () => applyBiomechanicalCorrections(
           finalPose,
           t,
@@ -4542,6 +4571,21 @@ export function VRMSkeletonManager({
           }
         }
         // ── End new motion layers ─────────────────────────────────────────────
+      } else {
+        // ── PART 1 root-cause: apply intent motion under VRMA isolation ─────
+        // The procedural block above is skipped when a VRMA clip is playing,
+        // which left motionState orphaned and forced the behavior-sync layer
+        // to inject motion every frame.  Now we apply `applyIntentMotionState`
+        // with REDUCED weight (× 0.5) so the speech-rhythm baseline + intent
+        // contributions reach the head / arms even during clip playback.
+        // VRMA stays dominant on the body; the clip's lower-limb / spine
+        // motion is preserved.  This eliminates SYNC_FORCE_INJECTION at root.
+        safeCall(
+          'intentMotion-vrma',
+          () => applyIntentMotionState(finalPose, _ampedMotionState, _timingWeight * 0.5, _activeIntent),
+          { applied: false, headNod: 0, headTilt: 0, armOpen: 0 },
+        );
+        diffAndRegisterAuthority(BoneAuthority.INTENT, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
       }
 
       // ── HUMAN MICRO-BEHAVIOR: blink + breathing + saccades ──────────────────
@@ -4606,7 +4650,17 @@ export function VRMSkeletonManager({
         gestureActive:   gestureLayerW > 0.1,
       });
       safeCall('behaviorSync', () => applyBehaviorSyncModifiers(finalPose, _bs), undefined);
+      // PART 1 (Hard Sync Guarantee): force-inject minimum motion when
+      // speaking + critical bones frozen.  Additive — never overrides.
+      safeCall('hardSyncGuarantee', () => enforceHardSyncGuarantee(finalPose, _bs), undefined);
+      // PART 3+4: emotion + intent validators (observability only).
+      safeCall('emotionValidate', () => validateEmotionEffect(finalPose, _bs), undefined);
+      safeCall('intentValidate',  () => validateIntentEffect(_bs),             undefined);
+      // PART 2: timing alignment check + auto-correction.
       checkSyncAlignment(_bsNowMs);
+      // PART 6: critical failure log.  validateAvatarPipeline emits
+      // [CRITICAL_PIPELINE_FAILURE] when a hard failure is present.
+      validateAvatarPipeline();
       checkFreezeVsSpeech(_bs);
     }
 

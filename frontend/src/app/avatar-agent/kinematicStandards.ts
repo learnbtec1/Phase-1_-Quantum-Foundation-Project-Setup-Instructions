@@ -1,6 +1,8 @@
 /**
  * Empirical kinematic baseline (cogni.vrm, normalized bones, local Euler order YXZ).
  *
+ * Bone-local axes only — **world/scene forward is +Z** (`config/avatar.ts`).
+ *
  * Right upper arm (reference limb): primary reach = −X, primary up = −Z.
  * Left upper limb: mirror X (forward = +X); Z vertical follows mirrored hang vs idle.
  *

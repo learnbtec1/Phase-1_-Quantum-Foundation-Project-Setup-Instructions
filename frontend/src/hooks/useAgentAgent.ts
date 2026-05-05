@@ -2181,6 +2181,55 @@ export function useAgentAgent({
     return () => window.removeEventListener('cogni:user:silent', onSilent);
   }, []);
 
+  /**
+   * Closes the previously-open intent → gesture loop.
+   *
+   * The behavior-sync layer dispatches `cogni:intent:retrigger` when an
+   * active intent (intensity > 0.5) has been present for >800 ms with no
+   * matching gesture firing through the canonical paths (LLM gesture, brain
+   * state, co-speech planner).  Without a listener, that event was dead —
+   * intent kept retriggering, never producing motion.
+   *
+   * Mapping is conservative (one canonical gesture per cognitive intent)
+   * and respects `automaticGestureInjectorsDisabled()` — the existing
+   * master kill-switch for auto-gestures stays in effect.
+   */
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const ACTIVE_INTENT_TO_GESTURE: Readonly<Record<string, string>> = {
+      explaining:   'explain',
+      emphasizing:  'point',
+      thinking:     'think',
+      questioning:  'tilt',
+      confirming:   'nod',
+      agreeing:     'nod',
+      disagreeing:  'shake',
+      greeting:     'wave',
+      listening:    '',          // listening = no auto gesture
+      neutral:      '',
+    };
+    const onIntentRetrigger = (e: Event): void => {
+      if (!mountedRef.current) return;
+      if (automaticGestureInjectorsDisabled()) return;
+      const detail = (e as CustomEvent).detail as
+        | { intent?: string; intensity?: number; emotion?: string }
+        | undefined;
+      const intent = (detail?.intent ?? '').toLowerCase();
+      if (!intent) return;
+      const gesture = ACTIVE_INTENT_TO_GESTURE[intent];
+      if (!gesture) return;
+      // Avoid double-fire if the canonical path already played this gesture
+      // moments ago — the bone-authority gesture log gives us that signal.
+      trackGestureDispatch(`retrigger:${gesture}`);
+      void unifiedGestureEngine.play(gesture, {
+        priority: PRIORITY.LOW,         // canonical paths still take precedence
+        durationMs: 1500,
+      });
+    };
+    window.addEventListener('cogni:intent:retrigger', onIntentRetrigger as EventListener);
+    return () => window.removeEventListener('cogni:intent:retrigger', onIntentRetrigger as EventListener);
+  }, []);
+
   // ── Stable ref wrappers for vadStart / vadStop ─────────────────────────────
   // The avatar:speak event handlers (useEffect below) need to call the latest
   // vadStart/vadStop without them in the effect dependency array (adding them

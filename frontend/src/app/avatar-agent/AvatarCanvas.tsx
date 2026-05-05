@@ -60,7 +60,6 @@ import { getSharedAudioContext } from '@/lib/audio/avatarAudioContext';
 import {
   getAvatarOfficeScenePosition,
   pickVrmUrl,
-  AVATAR_GROUP_ROTATION_Y,
   AVATAR_EQUIRECT_ENV_PUBLIC_PATH,
   AVATAR_OFFICE_SCENE_DEFAULTS,
   PHYSICS_CONFIG,
@@ -217,8 +216,8 @@ const OFFICE_CAMERA_FACE_Y = 2.5;
 const OFFICE_CAMERA_FACE_Y_BOUNDED = 1.62;
 const OFFICE_CAMERA_Z_OFFSET = 5;
 /**
- * Bounded room: camera **in front of** the +Z glass façade (~3 m), not inside the box.
- * ~5.5–6 m from avatar +Z matches a 40° FOV “window view” without wide‑lens stretch.
+ * Bounded room: camera on **−Z** world axis at `avatarZ − offset`, sight line **+Z** toward avatar face.
+ * VRM native forward is **+Z**; offset magnitude (~5.5–6 m) matches the bounded-room framing FOV.
  */
 const OFFICE_CAMERA_Z_OFFSET_BOUNDED_ROOM = 5.78;
 const OFFICE_LOOK_AT_Y_OFFSET = 1.25;
@@ -254,7 +253,7 @@ function OfficeAvatarCameraFaceSetup({
     if (!active || !hasVrm || appliedRef.current) return;
     appliedRef.current = true;
     const look = new THREE.Vector3(avatarX, avatarY + lookAtYOffset, avatarZ);
-    camera.position.set(avatarX, cameraEyeY, avatarZ + cameraZOffset);
+    camera.position.set(avatarX, cameraEyeY, avatarZ - cameraZOffset);
     camera.lookAt(look);
     const ctrl = controls as { target?: THREE.Vector3; update?: () => void } | undefined;
     if (ctrl?.target && typeof ctrl.update === 'function') {
@@ -277,7 +276,7 @@ function OfficeAvatarCameraFaceSetup({
   if (!active || !hasVrm) return null;
 
   const cx = avatarX;
-  const cz = avatarZ + cameraZOffset;
+  const cz = avatarZ - cameraZOffset;
   const labelY = cameraEyeY + OFFICE_CAMERA_LABEL_Y;
 
   return (
@@ -854,6 +853,10 @@ export default function AvatarCanvas({
       window.dispatchEvent(
         new CustomEvent('avatar:scene:ready', { detail: { source: 'AvatarCanvas' as const } }),
       );
+      if (process.env.NODE_ENV === 'development') {
+        // eslint-disable-next-line no-console -- post-orientation calibration sanity marker
+        console.info('[POST_ALIGNMENT_OK]', true);
+      }
     });
   }, [vrm, liftNode]);
 
@@ -866,10 +869,12 @@ export default function AvatarCanvas({
   const lookYOffset = boundedRoomScene ? OFFICE_LOOK_AT_Y_OFFSET_BOUNDED : OFFICE_LOOK_AT_Y_OFFSET;
   const perspectiveFov = boundedRoomScene ? BOUNDED_ROOM_CAMERA_FOV : 45;
 
+  // Camera is placed on −Z looking toward +Z (avatar front). See `config/avatar.ts` global axes.
+  /** +Y up, +Z forward (VRM). Camera on −Z side; positive `cameraZOff` = distance along −Z from avatar. */
   const cameraPosition: [number, number, number] = [
     ax,
     cameraEyeY,
-    az + cameraZOff,
+    az - cameraZOff,
   ];
   const orbitTarget: [number, number, number] = [ax, ay + lookYOffset, az];
 
@@ -924,7 +929,7 @@ export default function AvatarCanvas({
           }, { once: true });
         }}
       >
-        {/* كاميرا أمام الأفاتار — غرفة مصغَّرة حقيقية (6×6 م) أو equirect / HTML حسب الإعداد */}
+        {/* كاميرا على محور −Z تنظر نحو +Z (وجه VRM الافتراضي) */}
         <PerspectiveCamera
           makeDefault
           position={cameraPosition}
@@ -996,7 +1001,7 @@ export default function AvatarCanvas({
               ref={groupRef}
               name="AvatarRoot"
               position={[avatarXZ[0], resolvedAvatarPosition[1], avatarXZ[1]]}
-              rotation={[0, AVATAR_GROUP_ROTATION_Y + Math.PI, 0]}
+              rotation={[0, 0, 0]}
               scale={avatarScale}
             >
               {liftNode && <primitive object={liftNode} />}

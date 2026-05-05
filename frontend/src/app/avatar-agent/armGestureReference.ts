@@ -1,6 +1,8 @@
 /**
  * armGestureReference.ts — VRM 1.0 Arm Pose Reference (cogni.vrm)
  *
+ * Bone-local upper-arm convention only — **world/scene forward is +Z** (`config/avatar.ts`).
+ *
  * Full-body procedural layer uses the same local YXZ convention; universal
  * commands live in `semanticCommand.ts` + `generativeBoneNormalize.ts`.
  *
@@ -10,7 +12,7 @@
  * ║                                                                         ║
  * ║  RIGHT upper arm (rua):                                                ║
  * ║    PRIMARY forward reach = −ruaX (dominant channel; do not use Y)        ║
- * ║    Forward  = −X  (more negative X → reach toward avatar front)        ║
+ * ║    Forward  = −X  (more negative X → bone-local reach toward torso / world +Z) ║
  * ║    Backward = +X                                                       ║
  * ║    Up       = −Z  (more negative Z → raise)                             ║
  * ║    Down     = +Z                                                       ║

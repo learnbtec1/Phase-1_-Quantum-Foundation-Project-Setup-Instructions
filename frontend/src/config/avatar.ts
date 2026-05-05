@@ -6,6 +6,15 @@
  * without touching source code.
  *
  * Feature flags — all default OFF so experimental code is never active in prod.
+ *
+ * === GLOBAL COORDINATE SYSTEM (world / scene) ===
+ * +Z = forward — avatar faces this direction when `AvatarRoot` rotation is identity (VRM native).
+ * +Y = up
+ * +X = right
+ * Three.js right-handed coordinate system (RHS).
+ *
+ * Note: procedural arm tuning uses **bone-local** axes (−/+X reach on normalized shoulders); that is
+ * not the same label as world forward — see `armGestureReference.ts` / VRMSkeletonManager banner.
  */
 
 import {
@@ -137,12 +146,20 @@ export const AVATAR_OFFICE_SCENE_DEFAULTS = {
   /** Locked room root position — same as `FINAL_ROOM_POSITION`. */
   officePosition: FINAL_ROOM_POSITION,
   officeScale: 1.0,
-  // Avatar at desk (Z=-0.7). Faces +X (toward desk) via AVATAR_GROUP_ROTATION_Y=-π/2.
+  // Avatar at desk (Z=-0.7). World frame: +Z forward (VRM native); camera uses −Z offset in AvatarCanvas.
   // Y=0.30 = floor level (simulates seated-at-desk position from camera angle).
   avatarPosition: [0, 0.30, -0.7] as [number, number, number],
   avatarScale: 1.0,
-  // Camera on -X side (opposite to desk on +X side) — filming the avatar's face.
+  /**
+   * @deprecated Legacy sideline sample (−X world offset). **Not used by `AvatarCanvas` runtime** —
+   * production camera is `[avatarX, eyeY, avatarZ − distance]` on world **−Z**, sight line toward **+Z**
+   * (avatar front). Numeric tuple kept only for backwards-compatible snapshots / tooling.
+   */
   cameraPosition: [-3.2, 1.55, -0.7] as [number, number, number],
+  /**
+   * @deprecated Legacy orbit anchor paired with `cameraPosition` above. **`AvatarCanvas`** sets
+   * `OrbitControls.target` from avatar face height + `avatarZ`; do not assume these literals drive prod.
+   */
   orbitTarget: [0, 1.25, -0.7] as [number, number, number],
 } as const;
 
@@ -293,18 +310,15 @@ export const ENABLE_MIME_MODE: boolean =
 export const ENABLE_PROCEDURAL_LIFE = true as boolean;
 
 /**
- * VRM 1.0 faces +Z by default. Camera is on −Z looking toward +Z.
- * rotateVRM0() is NOT called for VRM 1.0 models — they already face the right way.
- * This constant is kept for the motion lab VrmPreview group (set to 0 = no extra rotation).
+ * Preview-only yaw hook for motion lab scenes — production uses identity **AvatarRoot** and **+Z** world forward.
  */
 export const FORWARD_ROTATION_Y = 0;
 
 /**
- * Additional Y rotation on AvatarRoot group (on top of rotateVRM0's π).
- * -Math.PI/2 → avatar faces +X direction (toward desk on right side).
- * Camera placed on -X side (opposite to desk) to film the face.
+ * @deprecated Always `0` — legacy yaw hacks removed; world forward is **+Z** with identity `AvatarRoot`.
+ * Retained only so older snippets / forks keep compiling.
  */
-export const AVATAR_GROUP_ROTATION_Y = -Math.PI / 2;
+export const AVATAR_GROUP_ROTATION_Y = 0 as const;
 
 /** Ignore duplicate WS speech audio starts within this window (ms) — reduces echo from double dispatch. */
 export const AUDIO_DEDUP_WINDOW_MS = 300 as const;
