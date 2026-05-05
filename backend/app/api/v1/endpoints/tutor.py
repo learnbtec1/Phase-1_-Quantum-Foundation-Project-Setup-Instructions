@@ -1613,6 +1613,20 @@ async def _get_cogni_response(message: str, context: dict) -> str:
             time.monotonic() - _tutor_t0,
             len(raw_reply or ""),
         )
+        # ── TASKS 3–5: Double-filter + kill-switch ─────────────────────────────
+        # Pass 1 (already done above); Pass 2 here.
+        raw_reply = strip_internal_llm_markers(raw_reply)
+        # Pass 3 — paranoid final clean using raw regex
+        raw_reply = re.sub(r'\[SYSTEM_EVENT:[\s\S]*?\]', '', raw_reply or '', flags=re.IGNORECASE).strip()
+        # Kill switch: if tag STILL present after three passes, replace entirely
+        if "[SYSTEM_EVENT:" in (raw_reply or "").upper():
+            logger.error(
+                "[SYSTEM_EVENT_CRITICAL_LEAK] Tag survived ALL strip passes — activating kill switch. session=%s",
+                context.get("session_id", "?"),
+            )
+            raw_reply = (
+                "تمام، خلينا نكمل بشكل طبيعي. شو النقطة اللي حاب نركز عليها؟\n*يبتسم بهدوء*\n[EMOTION: calm]"
+            )
         return raw_reply
     except Exception as e:
         if "OPENAI_TOKEN_RATE_LIMIT" in str(e):
