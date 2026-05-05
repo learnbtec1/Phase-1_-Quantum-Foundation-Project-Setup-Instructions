@@ -39,6 +39,7 @@ import { useVAD }                          from '@/hooks/useVAD';
 import { useBrainStore }                   from '@/store/useBrainStore';
 import { agentDirector }                   from '@/ai/avatar/AgentDirector';
 import { unifiedGestureEngine, initGestureNormalizer } from '@/ai/cognitive/UnifiedGestureEngine';
+import { trackGestureDispatch } from '@/app/avatar-agent/motion/__boneAuthority';
 import { emitUserSpeechTickForAnticipation } from '@/lib/behavior/anticipationLayer';
 import { PRIORITY } from '@/constants/gestures';
 import { PROACTIVE_QUESTION_MS } from '@/config/avatar';
@@ -597,6 +598,9 @@ export function useAgentAgent({
     planCoSpeechGestures(trimmed, eff).forEach((pl) => {
       const id = window.setTimeout(() => {
         if (!mountedRef.current) return;
+        // Bone-authority duplicate detector: same gesture key inside a small
+        // time window logs [GESTURE_DUPLICATION] (does not block).
+        trackGestureDispatch(`coSpeech:${pl.gesture}`);
         window.dispatchEvent(
           new CustomEvent('avatar:gesture', {
             detail: { type: pl.gesture, side: 'right', duration: 2.2 },
@@ -896,6 +900,7 @@ export function useAgentAgent({
                       pitch: avatarBehavior.gazeTarget === 'think' ? -0.12 : 0,
                       durationMs: 2000 },
           }));
+          trackGestureDispatch(`brain:${avatarBehavior.gesture}`);
           void unifiedGestureEngine.play(avatarBehavior.gesture, {
             priority: PRIORITY.NORMAL,
             replyText: transcript,
@@ -929,6 +934,7 @@ export function useAgentAgent({
           // 3. Intent gesture hint
           if (gestureHint && !automaticGestureInjectorsDisabled()) {
             setTimeout(() => {
+              trackGestureDispatch(`intent:${gestureHint}`);
               void unifiedGestureEngine.play(gestureHint, {
                 priority: PRIORITY.NORMAL,
                 durationMs: 2200,

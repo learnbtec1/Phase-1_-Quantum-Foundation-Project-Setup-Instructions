@@ -89,6 +89,28 @@ import {
   tickSelfHealing,
 } from './motion/__avatarErrorTracker';
 import { sniper, activateSniper, deactivateSniper } from './motion/__errorSniper';
+import {
+  BoneAuthority,
+  tickFrameCounter as tickAuthorityFrameCounter,
+  resetBoneAuthorityFrame,
+  registerBoneAuthority,
+  applyBoneRotationSafe,
+  captureSignatureSnapshot,
+  diffAndRegisterAuthority,
+  readLiveBoneSnapshot,
+  traceInput as traceAuthorityInput,
+  tracePoseComposer,
+  traceBeforeApply,
+  traceAfterApply,
+  traceAfterVrmUpdate,
+  traceFinalFrame,
+  detectPoseLoss,
+  detectVrmOverride,
+  tickFreezeDetector,
+  logRootMotion,
+  TRACKED_POSE_KEYS,
+  TRACKED_HUMANOID_NAMES,
+} from './motion/__boneAuthority';
 import { blendPoseInto, generateIntentPose } from './motion/intentPoseGenerator';
 import { updateIntentFromBehaviorBrain } from '@/lib/avatar/motionIntentContinuity';
 import { deriveEmbodimentFromLLM, getCognitiveOrchestratorInputOverlay } from '@/lib/ai/cognitiveOrchestrator';
@@ -2153,6 +2175,13 @@ export function VRMSkeletonManager({
     // Per-frame hard guard: evict VRMA authority in procedural-only mode.
     assertNoVrmaLeak();
 
+    // ── BONE AUTHORITY: per-frame state reset ─────────────────────────────────
+    // Must run before any layer touches finalPose / bones so the conflict map
+    // is fresh.  Returns the new frame counter — used by the trace throttle
+    // (every 20th frame) and the freeze detector (≥90 frames without motion).
+    tickAuthorityFrameCounter();
+    resetBoneAuthorityFrame();
+
     // ── Awareness tick (throttled ~500ms — does NOT run every frame) ──────────
     {
       const _awareNow = masterClockNowMs();
@@ -4040,6 +4069,31 @@ export function VRMSkeletonManager({
         kinematicBoneWeightOverrides.size > 0 ? kinematicBoneWeightOverrides : undefined,
     });
 
+    // ── BONE AUTHORITY: PoseComposer trace + pose-loss detection ──────────────
+    // Initial authority claim — every key currently in finalPose came directly
+    // from blendPoseLayers (idle / generative / gesture / collision / VRMA mix).
+    // Subsequent procedural layers (presence, intent, micro, etc.) will diff-register
+    // *additional* authority below; conflicting writes surface as [AUTHORITY_CONFLICT].
+    for (const key of finalPose.keys()) {
+      // Map "currently dominant blend source" → authority for this initial claim.
+      // Heuristic: VRMA wins when its weight is non-trivial; otherwise INTENT.
+      registerBoneAuthority(key, vrmaLayerW > 0.05 ? BoneAuthority.VRMA : BoneAuthority.INTENT);
+    }
+    tracePoseComposer({
+      finalPose,
+      weights: {
+        idle:       +idleLayerW.toFixed(3),
+        generative: +generativeLayerW.toFixed(3),
+        gesture:    +gestureLayerW.toFixed(3),
+        collision:  +collisionLayerW.toFixed(3),
+        vrma:       +vrmaLayerW.toFixed(3),
+      },
+    });
+    detectPoseLoss(finalPose);
+    // Snapshot tracked keys so layers below can diff-register their authority.
+    const _authoritySnap = new Map<string, string>();
+    captureSignatureSnapshot(finalPose, TRACKED_POSE_KEYS, _authoritySnap);
+
     const embFrame = getEmbodimentState();
     const vrmaPose = clonePoseMap(finalPose);
     const intentPose = generateIntentPose(embFrame, t, m);
@@ -4085,6 +4139,7 @@ export function VRMSkeletonManager({
           gestureLayerW,
           isTalking: speaking,
         }), undefined);
+        diffAndRegisterAuthority(BoneAuthority.MICRO, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
 
         safeCall('intentMotor', () => applyIntentMotor(finalPose, embFrame, safeDelta, {
           motionSource,
@@ -4100,11 +4155,13 @@ export function VRMSkeletonManager({
                 }
               : undefined,
         }), undefined);
+        diffAndRegisterAuthority(BoneAuthority.INTENT, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
 
         safeCall('motionDriver', () => applyMotionDriver(finalPose, embFrame, safeDelta, {
           motionSource,
           gestureLayerW,
         }), undefined);
+        diffAndRegisterAuthority(BoneAuthority.INTENT, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
       }
 
       if (!isolateVrmaLayers) {
@@ -4133,7 +4190,9 @@ export function VRMSkeletonManager({
           freezeHealShoulder: humRaw.freezeHealShoulder * cogAmp,
         };
         safeCall('humanization', () => applyHumanizationLayer(finalPose, safeDelta, humSnap!), undefined);
+        diffAndRegisterAuthority(BoneAuthority.MICRO, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
         safeCall('attentionSeeking', () => applyAttentionSeekingLayer(finalPose, t, getPerceptionAttentionSeekingStrength()), undefined);
+        diffAndRegisterAuthority(BoneAuthority.MICRO, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
 
         // ── New motion layers (biomechanical + finger + gaze + timing) ────────
         // 1) LLM intent wins if provided; otherwise rule-based classifier runs on
@@ -4297,6 +4356,7 @@ export function VRMSkeletonManager({
 
         // ── Apply motionState onto finalPose bones (the missing connection) ──
         const _applied = safeCall('intentMotion', () => applyIntentMotionState(finalPose, _ampedMotionState, _timingWeight, _activeIntent), { applied: false, headNod: 0, headTilt: 0, armOpen: 0 });
+        diffAndRegisterAuthority(BoneAuthority.INTENT, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
 
         if (_shouldTrace) {
           const _afterIntent = {
@@ -4392,10 +4452,15 @@ export function VRMSkeletonManager({
           humSnap!.breathAmpMul,
           speaking,
         ), undefined);
+        diffAndRegisterAuthority(BoneAuthority.INTENT, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
         safeCall('finger',       () => applyFingerMicroLayer(finalPose, t, speaking), undefined);
+        // finger writes only finger bones — not in TRACKED_POSE_KEYS, no diff needed.
         safeCall('gaze',         () => applyGazeIntentLayer(finalPose, _activeIntent, safeDelta, vrm), undefined);
+        diffAndRegisterAuthority(BoneAuthority.MICRO, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
         safeCall('neural',       () => applyNeuralLayer(finalPose, t, !!speaking, _timingWeight), undefined);
+        diffAndRegisterAuthority(BoneAuthority.MICRO, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
         safeCall('subconscious', () => applySubconsciousLayer(finalPose, t, _timingWeight, !!speaking), undefined);
+        diffAndRegisterAuthority(BoneAuthority.MICRO, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
 
         // humanMicro is placed AFTER the inner block — always runs (moved below)
 
@@ -4449,6 +4514,7 @@ export function VRMSkeletonManager({
             : undefined,
         },
       ), undefined);
+      diffAndRegisterAuthority(BoneAuthority.MICRO, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
 
       if (!isolateVrmaLayers) {
         safeCall('cinematic', () => applyCinematicMicroLayer(finalPose, safeDelta, t, {
@@ -4456,12 +4522,26 @@ export function VRMSkeletonManager({
           energy: Math.max(0.15, speechDriveSnap.energy),
           syllablePulse: speechDriveSnap.syllablePulse,
         }), undefined);
+        diffAndRegisterAuthority(BoneAuthority.MICRO, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
         safeCall('microHuman', () => applyMicroHumanBehavior(finalPose, embFrame, safeDelta, t, speaking), undefined);
+        diffAndRegisterAuthority(BoneAuthority.MICRO, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
         safeCall('idleMicro', () => applyIdleMicroPresence(finalPose, embFrame, safeDelta, {
           motionSource,
           gestureLayerW,
         }), undefined);
+        diffAndRegisterAuthority(BoneAuthority.MICRO, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
       }
+    });
+
+    // ── BONE AUTHORITY: input trace + per-frame intent claim summary ──────────
+    // Emit once we know the active intent + speaking state.  Throttled internally.
+    traceAuthorityInput({
+      gestures:      embFrame.intent.activeIntent ? [embFrame.intent.activeIntent] : [],
+      motorCommands: { motorMul, gestureLayerW: +gestureLayerW.toFixed(3), vrmaLayerW: +vrmaLayerW.toFixed(3) },
+      performance:   { motionSource, idle: +idleLayerW.toFixed(3) },
+      emotion:       behaviorPayload?.emotion ?? 'neutral',
+      intent:        embFrame.intent.activeIntent ?? '',
+      speaking,
     });
 
     if (humSnap && shouldTriggerBlinkEdge(humSnap) && typeof window !== 'undefined') {
@@ -4516,6 +4596,7 @@ export function VRMSkeletonManager({
         intensityMul: proceduralMul,
         neckSway: personaMotion.neckSway,
       }), undefined);
+      diffAndRegisterAuthority(BoneAuthority.VRMA, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
     }
 
     if (isAvatarMotionTraceOn() && motionTraceFrameRef.current % 100 === 0) {
@@ -4870,9 +4951,19 @@ export function VRMSkeletonManager({
       (globalThis as any).__diagPreSnap = _before;
     }
 
+    // ── BONE AUTHORITY: snapshot live bones BEFORE the apply chain ────────────
+    // (vrm.update + applyFinalPoseToVrm).  Used by traceBeforeApply and by
+    // detectVrmOverride to attribute drift to the right stage.
+    const _liveBefore = readLiveBoneSnapshot(vrm.humanoid, TRACKED_HUMANOID_NAMES);
+    traceBeforeApply({ finalPose, liveBones: _liveBefore });
+
     if (!VRM_HARD_ISOLATION) {
       vrm.update(safeDelta);
     }
+
+    // ── BONE AUTHORITY: snapshot bones immediately AFTER vrm.update ───────────
+    const _liveAfterVrmUpdate = readLiveBoneSnapshot(vrm.humanoid, TRACKED_HUMANOID_NAMES);
+    traceAfterVrmUpdate(_liveAfterVrmUpdate);
 
     if (_doDiagSnap) {
       // ── TASK 2: [AFTER_VRM] snapshot ─────────────────────────────────────
@@ -4984,6 +5075,13 @@ export function VRMSkeletonManager({
       delta: safeDelta,
     }), undefined);
 
+    // ── BONE AUTHORITY: snapshot bones AFTER applyFinalPoseToVrm ──────────────
+    // Compared to _liveBefore for VRM-override detection (any drift beyond
+    // expected slerp progress = dual-writer or VRM internal mutation).
+    const _liveAfterApply = readLiveBoneSnapshot(vrm.humanoid, TRACKED_HUMANOID_NAMES);
+    traceAfterApply(_liveAfterApply);
+    detectVrmOverride(_liveBefore, _liveAfterApply);
+
     // ── [FINAL_POSE_AFTER] + [PHASE_3] verdict ─────────────────────────────────
     if (_doFp3) {
       const _after = { head: _fp3ReadQ('head'), neck: _fp3ReadQ('neck'), lua: _fp3ReadQ('lua'), rua: _fp3ReadQ('rua') };
@@ -5066,13 +5164,26 @@ export function VRMSkeletonManager({
           const _hn = (_ms.headNod ?? 0) * 0.6;
           const _ht = (_ms.headTilt ?? 0) * 0.6;
           const _og = (_ms.openGesture ?? 0) * 0.6;
+          // Each write below runs through applyBoneRotationSafe so it
+          // registers PHYSICS authority and surfaces an [AUTHORITY_CONFLICT]
+          // log when the canonical pipeline already wrote that bone.
+          const _eul = new THREE.Euler(0, 0, 0, 'YXZ');
           if (_hNode) {
-            _hNode.rotation.x = _hn;
-            _hNode.rotation.z = _ht;
+            _eul.set(_hn, 0, _ht);
+            applyBoneRotationSafe(_hNode, _eul, BoneAuthority.PHYSICS);
           }
-          if (_nNode) _nNode.rotation.x = _hn * 0.3;
-          if (_lNode) _lNode.rotation.z =  _og * 0.45;
-          if (_rNode) _rNode.rotation.z = -_og * 0.45;
+          if (_nNode) {
+            _eul.set(_hn * 0.3, 0, 0);
+            applyBoneRotationSafe(_nNode, _eul, BoneAuthority.PHYSICS);
+          }
+          if (_lNode) {
+            _eul.set(0, 0,  _og * 0.45);
+            applyBoneRotationSafe(_lNode, _eul, BoneAuthority.PHYSICS);
+          }
+          if (_rNode) {
+            _eul.set(0, 0, -_og * 0.45);
+            applyBoneRotationSafe(_rNode, _eul, BoneAuthority.PHYSICS);
+          }
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           (vrm.humanoid as any).update?.();
           if (AVATAR_DEBUG) {
@@ -5097,10 +5208,25 @@ export function VRMSkeletonManager({
       const _fLua  = vrm.humanoid?.getNormalizedBoneNode('leftUpperArm' as never) ?? null;
       const _fRua  = vrm.humanoid?.getNormalizedBoneNode('rightUpperArm' as never) ?? null;
       const _fNeck = vrm.humanoid?.getNormalizedBoneNode('neck'         as never) ?? null;
-      if (_fHead) _fHead.rotation.x = _fmtSin;
-      if (_fLua)  _fLua.rotation.z  =  0.8;
-      if (_fRua)  _fRua.rotation.z  = -0.8;
-      if (_fNeck) _fNeck.rotation.y = Math.sin(performance.now() * 0.001) * 0.15;
+      // Use applyBoneRotationSafe so PHYSICS authority is registered and
+      // any concurrent writer surfaces as [AUTHORITY_CONFLICT].
+      const _fmtEul = new THREE.Euler(0, 0, 0, 'YXZ');
+      if (_fHead) {
+        _fmtEul.set(_fmtSin, 0, 0);
+        applyBoneRotationSafe(_fHead, _fmtEul, BoneAuthority.PHYSICS);
+      }
+      if (_fLua) {
+        _fmtEul.set(0, 0,  0.8);
+        applyBoneRotationSafe(_fLua, _fmtEul, BoneAuthority.PHYSICS);
+      }
+      if (_fRua) {
+        _fmtEul.set(0, 0, -0.8);
+        applyBoneRotationSafe(_fRua, _fmtEul, BoneAuthority.PHYSICS);
+      }
+      if (_fNeck) {
+        _fmtEul.set(0, Math.sin(performance.now() * 0.001) * 0.15, 0);
+        applyBoneRotationSafe(_fNeck, _fmtEul, BoneAuthority.PHYSICS);
+      }
       // Re-propagate so raw bones reflect our writes
       try { (vrm.humanoid as any)?.update?.(); } catch { /* ignore */ }
       console.log('[FORCED_MOTION_TEST]', {
@@ -5116,6 +5242,67 @@ export function VRMSkeletonManager({
     }
 
     enforceAvatarRootStability(vrm);
+
+    // ── BONE AUTHORITY: end-of-frame summary + freeze + root-motion ───────────
+    // (1) Freeze detector — warns when a bone hasn't moved in ≥90 frames.
+    //     Pulls live nodes through humanoid; bones not present silently skip.
+    if (vrm.humanoid) {
+      const _freezeBones: Record<string, THREE.Object3D | null | undefined> = {};
+      for (const name of TRACKED_HUMANOID_NAMES) {
+        try {
+          _freezeBones[name] = vrm.humanoid.getNormalizedBoneNode(name as never) ?? null;
+        } catch { _freezeBones[name] = null; }
+      }
+      tickFreezeDetector(_freezeBones);
+    }
+    // (2) Root-motion — log AvatarRoot (outer locomotion group) vs vrm.scene
+    //     (inner, expected to stay at origin via enforceAvatarRootStability).
+    {
+      // Outer AvatarRoot is the grandparent of vrm.scene:
+      //   AvatarRoot → liftNode → vrm.scene
+      const _avatarRoot = vrm.scene?.parent?.parent ?? null;
+      const _vrmScene   = vrm.scene;
+      if (_avatarRoot && _vrmScene) {
+        logRootMotion(
+          { x: +_avatarRoot.position.x.toFixed(3), z: +_avatarRoot.position.z.toFixed(3) },
+          {
+            x: +_vrmScene.position.x.toFixed(4),
+            y: +_vrmScene.position.y.toFixed(4),
+            z: +_vrmScene.position.z.toFixed(4),
+          },
+        );
+      }
+    }
+    // (3) Final-frame trace — head / arms / hips + per-frame conflict count.
+    {
+      const _liveFinal = vrm.humanoid
+        ? readLiveBoneSnapshot(vrm.humanoid, TRACKED_HUMANOID_NAMES)
+        : {};
+      let _hipsLocal: { x: number; y: number; z: number } | undefined;
+      try {
+        const _hipsNode = vrm.humanoid?.getNormalizedBoneNode('hips' as never);
+        if (_hipsNode) {
+          _hipsLocal = {
+            x: +_hipsNode.position.x.toFixed(4),
+            y: +_hipsNode.position.y.toFixed(4),
+            z: +_hipsNode.position.z.toFixed(4),
+          };
+        }
+      } catch { /* hips missing — already covered by [POSE_LOSS] */ }
+      const _avatarRoot = vrm.scene?.parent?.parent ?? null;
+      traceFinalFrame({
+        liveBones:    _liveFinal,
+        externalRoot: _avatarRoot
+          ? { x: +_avatarRoot.position.x.toFixed(3), z: +_avatarRoot.position.z.toFixed(3) }
+          : undefined,
+        vrmRoot: vrm.scene ? {
+          x: +vrm.scene.position.x.toFixed(4),
+          y: +vrm.scene.position.y.toFixed(4),
+          z: +vrm.scene.position.z.toFixed(4),
+        } : undefined,
+        hipsLocal: _hipsLocal,
+      });
+    }
 
     // TASK 7: [FINAL_STATE] — throttled proof-of-fix log (~1/s)
     if (AVATAR_DEBUG) {
