@@ -27,14 +27,16 @@ import {
 } from '@/app/avatar-agent/motion/__boneAuthority';
 
 const EMPTY_SUMMARY: FrameDiagnosticSummary = {
-  frame:           0,
-  conflicts:       0,
-  rejections:      0,
-  frozenBones:     [],
-  overrides:       [],
-  missingPose:     [],
-  rootMotion:      false,
-  hasExternalRoot: false,
+  frame:                0,
+  conflicts:            0,
+  rejections:           0,
+  cooperativeBlends:    0,
+  frozenBones:          [],
+  overrides:            [],
+  missingPose:          [],
+  rootMotion:           false,
+  hasExternalRoot:      false,
+  locomotionDeadFrames: 0,
 };
 
 const EMPTY_CAUSE: RootCause = { cause: 'No issues detected', confidence: 'high' };
@@ -132,7 +134,8 @@ export function AvatarDebugOverlay(): React.JSX.Element | null {
       <div style={{ color: '#7d8896', marginBottom: 8 }}>
         frame <strong style={{ color: '#dde4ee' }}>{summary.frame}</strong> · conflicts{' '}
         <strong style={{ color: conflictTotal > 0 ? '#ffcf66' : '#dde4ee' }}>{summary.conflicts}</strong>{' '}
-        · rejections <strong style={{ color: summary.rejections > 0 ? '#ffcf66' : '#dde4ee' }}>{summary.rejections}</strong>
+        · rejections <strong style={{ color: summary.rejections > 0 ? '#ffcf66' : '#dde4ee' }}>{summary.rejections}</strong>{' '}
+        · blends <strong style={{ color: '#dde4ee' }}>{summary.cooperativeBlends}</strong>
       </div>
 
       <Section label="ROOT CAUSE">
@@ -200,6 +203,12 @@ export function AvatarDebugOverlay(): React.JSX.Element | null {
               : 'no — AvatarRoot stationary'
             : 'unknown — root not yet sampled'}
         </div>
+        {summary.locomotionDeadFrames > 0 && (
+          <div style={{ color: summary.locomotionDeadFrames >= 240 ? '#ff8d8d' : '#7d8896', marginTop: 2 }}>
+            idle frames: {summary.locomotionDeadFrames}
+            {summary.locomotionDeadFrames >= 240 && ' — DEAD (set window.__INJECT_LOCOMOTION_FALLBACK = true)'}
+          </div>
+        )}
       </Section>
 
       <Section label={`PER-BONE AUTHORITY (${Object.keys(perBone).length})`}>

@@ -71,10 +71,12 @@ export const AUTHORITY_PRIORITY: Readonly<Record<BoneAuthority, number>> = Objec
 });
 
 interface FrameState {
-  frame:              number;
-  perBoneAuthority:   Map<string, BoneAuthority>;
-  conflictsThisFrame: number;
-  rejectionsThisFrame: number;
+  frame:                       number;
+  perBoneAuthority:            Map<string, BoneAuthority>;
+  conflictsThisFrame:          number;
+  rejectionsThisFrame:         number;
+  /** Equal-priority cooperative blends — counted but not warned about. */
+  cooperativeBlendsThisFrame:  number;
 }
 
 /**
@@ -101,10 +103,11 @@ const _frameDiag: {
 };
 
 const _state: FrameState = {
-  frame:               0,
-  perBoneAuthority:    new Map(),
-  conflictsThisFrame:  0,
-  rejectionsThisFrame: 0,
+  frame:                      0,
+  perBoneAuthority:           new Map(),
+  conflictsThisFrame:         0,
+  rejectionsThisFrame:        0,
+  cooperativeBlendsThisFrame: 0,
 };
 
 /** Bounded conflict log — newest at the end. */
@@ -150,8 +153,9 @@ export function shouldLogThisFrame(everyNthFrame: number = 20): boolean {
 /** Reset per-frame authority map.  Call once at the very top of useFrame. */
 export function resetBoneAuthorityFrame(): void {
   _state.perBoneAuthority.clear();
-  _state.conflictsThisFrame  = 0;
-  _state.rejectionsThisFrame = 0;
+  _state.conflictsThisFrame         = 0;
+  _state.rejectionsThisFrame        = 0;
+  _state.cooperativeBlendsThisFrame = 0;
   _frameDiag.missingPose = [];
   _frameDiag.overrides   = [];
   _frameDiag.rootMotion  = false;
@@ -160,25 +164,39 @@ export function resetBoneAuthorityFrame(): void {
 /**
  * Register a bone write attempt with priority semantics.
  *
- * Rules (deterministic, additive):
+ * Rules (deterministic, cooperative-blending):
+ *   0.  `MICRO` is a passive blend tier — never claims ownership, never
+ *       triggers conflicts, never blocks anything.  It is the breath /
+ *       blink / saccade background that always runs alongside whatever
+ *       higher-priority layer owns the bone.  Returns `true` immediately.
  *   1.  No prior owner → claim, return `true`.
  *   2.  Same owner re-claims → no-op, return `true`.
- *   3.  Different owner, incoming.priority < existing.priority
+ *   3.  Different owner, incoming.priority === existing.priority
+ *       → cooperative blend (silent).  No log, no override of the
+ *         authority record.  Tracked in `cooperativeBlendsThisFrame`.
+ *   4.  Different owner, incoming.priority < existing.priority
  *       → log `[AUTHORITY_REJECTED]`, do NOT update map, return `false`.
- *   4.  Different owner, incoming.priority ≥ existing.priority
+ *   5.  Different owner, incoming.priority > existing.priority
  *       → log `[AUTHORITY_CONFLICT]`, update map (higher priority wins),
  *         return `true`.
  *
- * Both warnings are de-duplicated within a 60-frame window so a recurring
- * but harmless conflict (e.g. INTENT then MICRO writing `head` every frame)
- * does not flood the console.  The actual `_state.conflictsThisFrame` /
- * `_state.rejectionsThisFrame` counters increment every frame regardless of
- * de-dup so the frame summary reflects ground truth.
+ * Conflict / rejection warnings are de-duplicated within a 60-frame window
+ * so a recurring but harmless conflict does not flood the console.
+ * Per-frame counters always reflect ground truth.
  */
 export function registerBoneAuthority(
   bone: string,
   authority: BoneAuthority,
 ): boolean {
+  // ── PART 1 fix: MICRO never competes — pure passive blend ────────────────
+  if (authority === BoneAuthority.MICRO) {
+    // Claim the bone only if nobody else owns it; otherwise stay invisible.
+    if (!_state.perBoneAuthority.has(bone)) {
+      _state.perBoneAuthority.set(bone, BoneAuthority.MICRO);
+    }
+    return true;
+  }
+
   const existing = _state.perBoneAuthority.get(bone);
   if (!existing) {
     _state.perBoneAuthority.set(bone, authority);
@@ -186,8 +204,20 @@ export function registerBoneAuthority(
   }
   if (existing === authority) return true;
 
+  // MICRO ownership yields immediately to any higher-priority claimant.
+  if (existing === BoneAuthority.MICRO) {
+    _state.perBoneAuthority.set(bone, authority);
+    return true;
+  }
+
   const incomingP = AUTHORITY_PRIORITY[authority];
   const existingP = AUTHORITY_PRIORITY[existing];
+
+  // ── PART 5: equal priority → cooperative blend (silent, no override) ─────
+  if (incomingP === existingP) {
+    _state.cooperativeBlendsThisFrame++;
+    return true;
+  }
 
   if (incomingP < existingP) {
     // ── Lower-priority secondary write — REJECTED (tracking only here;
@@ -210,7 +240,7 @@ export function registerBoneAuthority(
     return false;
   }
 
-  // ── Equal or higher priority — override permitted, log as conflict.
+  // ── Strictly higher priority — override permitted, log as conflict.
   _state.conflictsThisFrame++;
   if (_conflictLog.length >= _CONFLICT_LOG_MAX) _conflictLog.shift();
   _conflictLog.push({
@@ -242,22 +272,41 @@ export function registerBoneAuthority(
 // PART 2 — applyBoneRotationSafe write guard
 // ═══════════════════════════════════════════════════════════════════════════
 
+/**
+ * Strict-mode resolver (PART 4).
+ *
+ * Strict mode now defaults to `true` — the deterministic, production-safe
+ * behaviour.  Two console-toggleable flags exist:
+ *   • `window.__STRICT_BONE_AUTHORITY = false` — explicit opt-out.
+ *   • `window.__ALLOW_CONFLICTS       = true`  — escape hatch that wins over
+ *     strict mode (lets every legacy direct write through, useful while
+ *     debugging a new layer).
+ */
 function _strictModeEnabled(): boolean {
   if (typeof window === 'undefined') return false;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (window as any).__STRICT_BONE_AUTHORITY === true;
+  const w = window as any;
+  if (w.__ALLOW_CONFLICTS === true) return false; // explicit override wins
+  // Default: strict.  Only an explicit `false` disables.
+  return w.__STRICT_BONE_AUTHORITY !== false;
 }
+
+/** Scratch quaternion for Euler→Quat conversions in additive paths. */
+const _qScratchSafe = new THREE.Quaternion();
 
 /**
  * Wrap any direct rotation/quaternion write to a bone node.
  *
- * Priority semantics (deterministic):
- *   • If the incoming source has lower priority than the current owner of
- *     this bone, the write is REJECTED (logged once per dedup window).
- *   • If `window.__STRICT_BONE_AUTHORITY === true`, the rotation copy is
- *     also skipped — strict enforcement.
- *   • Otherwise (same source, equal/higher priority), the rotation is
- *     applied as before; authority record is updated.
+ * Source semantics:
+ *   • `MICRO`: ADDITIVE blend — multiplied onto current quaternion, never
+ *     replaces.  Always permitted, never registers authority, never blocked
+ *     by strict mode.  This is the breath / blink / saccade tier.
+ *   • Other sources: priority-based replacement.  If the incoming priority
+ *     is lower than the current owner's, the write is REJECTED (logged
+ *     once per dedup window).  In strict mode the actual rotation copy is
+ *     skipped; non-strict falls through to preserve legacy behaviour.
+ *   • Equal-priority writes from a different source are silently treated
+ *     as cooperative blends (`registerBoneAuthority` returns `true`).
  *
  * Returns `true` when the rotation was actually written, `false` otherwise.
  */
@@ -267,11 +316,21 @@ export function applyBoneRotationSafe(
   source:   BoneAuthority,
 ): boolean {
   if (!bone) return false;
+
+  // ── PART 1 fix: MICRO is additive blend, never an authority claim ────────
+  if (source === BoneAuthority.MICRO) {
+    if (rotation instanceof THREE.Quaternion) {
+      bone.quaternion.multiply(rotation);
+    } else {
+      _qScratchSafe.setFromEuler(rotation);
+      bone.quaternion.multiply(_qScratchSafe);
+    }
+    return true;
+  }
+
   const name = bone.name || 'unknown';
   const accepted = registerBoneAuthority(name, source);
   if (!accepted) {
-    // Lower-priority secondary write.  Always logged inside
-    // `registerBoneAuthority`; strict mode additionally blocks.
     if (_strictModeEnabled()) {
       if (AVATAR_DEBUG) {
         console.warn('[AUTHORITY_BLOCK]', {
@@ -728,18 +787,162 @@ export function trackGestureDispatch(gestureKey: string | undefined | null): boo
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// PART 2 — VRMA safety overrides
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Bones that carry the user-visible expressivity of an INTENT.  When a VRMA
+ * clip is playing AND an LLM-driven intent is active, we cap VRMA influence
+ * on these bones so the gesture/intent cannot be silently overwritten by
+ * the clip.  Lower limbs and torso keep full VRMA — they carry the clip's
+ * weight (idle sway, walk cycle, etc.).
+ */
+export const VRMA_INTENT_PROTECTED_BONES = [
+  'head', 'neck',
+  'lua', 'rua',
+  'lla', 'rla',
+  'leftShoulder', 'rightShoulder',
+] as const;
+
+let _lastVrmaWeightAdjustLog = -Infinity;
+
+/**
+ * Compute per-bone VRMA weight overrides when an INTENT is active.
+ * Returns `null` when no adjustment is needed (cheap fast-path for the
+ * common case).  Caller merges the returned weights into the existing
+ * `kinematicBoneWeightOverrides` map using `Math.min` so generative locks
+ * are never weakened.
+ */
+export function computeVrmaSafetyOverrides(params: {
+  motionSource:    string;
+  vrmaLayerW:      number;
+  intentIntensity: number;
+  intentActive:    boolean;
+}): { vrmaReduced: number; bones: ReadonlyArray<string> } | null {
+  if (!params.intentActive) return null;
+  if (params.motionSource !== 'VRMA') return null;
+  if (params.vrmaLayerW <= 0.05) return null;
+
+  // Reduction factor scales with intent intensity:
+  //   intent=0.2 (active threshold) → keep ~86% VRMA
+  //   intent=1.0 (max)              → keep  30% VRMA
+  const intent       = Math.max(0, Math.min(1, params.intentIntensity));
+  const reduction    = 1 - intent * 0.7;             // 0.3 .. 1.0
+  const vrmaReduced  = params.vrmaLayerW * reduction;
+
+  if (AVATAR_DEBUG && _state.frame - _lastVrmaWeightAdjustLog > 60) {
+    _lastVrmaWeightAdjustLog = _state.frame;
+    _ensureFrameTraceGroup();
+    console.warn('[VRMA_WEIGHT_ADJUST]', {
+      bones:           VRMA_INTENT_PROTECTED_BONES,
+      vrmaOriginal:    +params.vrmaLayerW.toFixed(3),
+      vrmaReduced:     +vrmaReduced.toFixed(3),
+      intentIntensity: +intent.toFixed(3),
+      reductionFactor: +reduction.toFixed(3),
+      reason: 'INTENT active during VRMA playback — protect gesture-critical bones',
+    });
+  }
+
+  return { vrmaReduced, bones: VRMA_INTENT_PROTECTED_BONES };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PART 3 — Locomotion watchdog
+// ═══════════════════════════════════════════════════════════════════════════
+
+const LOCOMOTION_DEAD_THRESHOLD_FRAMES = 240; // ≈ 4 s at 60fps
+const LOCOMOTION_LOG_COOLDOWN_FRAMES   = 600; // re-warn at most every 10 s
+
+let _locomotionDeadFrames    = 0;
+let _lastLocomotionWarnFrame = -Infinity;
+
+/**
+ * Result of the locomotion watcher.  `dead` becomes true after the avatar
+ * has been stationary for `LOCOMOTION_DEAD_THRESHOLD_FRAMES` consecutive
+ * frames.  `suggested` is a small sin-based dx/dz hint that callers MAY
+ * apply — the watcher itself never mutates anything.  Activation is opt-in
+ * via `window.__INJECT_LOCOMOTION_FALLBACK = true`.
+ */
+export interface LocomotionWatchResult {
+  dead:        boolean;
+  framesIdle:  number;
+  suggested:   { dx: number; dz: number } | null;
+  injectAllowed: boolean;
+}
+
+/**
+ * Sample the locomotion state.  Updates internal counters and logs
+ * `[LOCOMOTION_DEAD]` (rate-limited) when the avatar has frozen in place.
+ *
+ * Returns a small suggested micro-translation derived from sin/cos waves
+ * (sub-millimetre amplitude) — caller chooses whether to apply, gated by
+ * `window.__INJECT_LOCOMOTION_FALLBACK`.
+ */
+export function tickLocomotionWatcher(): LocomotionWatchResult {
+  // No external root sampled yet — nothing to watch.
+  if (!_frameDiag.hasExternalRoot) {
+    return { dead: false, framesIdle: 0, suggested: null, injectAllowed: false };
+  }
+  if (_frameDiag.rootMotion) {
+    _locomotionDeadFrames = 0;
+    return { dead: false, framesIdle: 0, suggested: null, injectAllowed: false };
+  }
+  _locomotionDeadFrames++;
+  if (_locomotionDeadFrames < LOCOMOTION_DEAD_THRESHOLD_FRAMES) {
+    return { dead: false, framesIdle: _locomotionDeadFrames, suggested: null, injectAllowed: false };
+  }
+
+  // ── LOCOMOTION_DEAD reached ──────────────────────────────────────────────
+  if (
+    AVATAR_DEBUG &&
+    _state.frame - _lastLocomotionWarnFrame > LOCOMOTION_LOG_COOLDOWN_FRAMES
+  ) {
+    _lastLocomotionWarnFrame = _state.frame;
+    _ensureFrameTraceGroup();
+    console.warn('[LOCOMOTION_DEAD]', {
+      framesIdle:    _locomotionDeadFrames,
+      threshold:     LOCOMOTION_DEAD_THRESHOLD_FRAMES,
+      hint:          'Avatar root has not translated for ≥' +
+                     LOCOMOTION_DEAD_THRESHOLD_FRAMES + ' frames.  ' +
+                     'Set window.__INJECT_LOCOMOTION_FALLBACK = true to ' +
+                     'inject a sub-millimetre sin sway.',
+    });
+  }
+
+  const tSec        = (typeof performance !== 'undefined' ? performance.now() : 0) * 0.001;
+  const suggested = {
+    dx: Math.sin(tSec * 0.4)  * 0.0008,   // ≈ 0.8 mm in X
+    dz: Math.cos(tSec * 0.31) * 0.0006,   // ≈ 0.6 mm in Z
+  };
+
+  let injectAllowed = false;
+  if (typeof window !== 'undefined') {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    injectAllowed = (window as any).__INJECT_LOCOMOTION_FALLBACK === true;
+  }
+  return {
+    dead: true,
+    framesIdle: _locomotionDeadFrames,
+    suggested,
+    injectAllowed,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // PART 3+4 — Frame summary + Root cause detector
 // ═══════════════════════════════════════════════════════════════════════════
 
 export interface FrameDiagnosticSummary {
-  frame:        number;
-  conflicts:    number;
-  rejections:   number;
-  frozenBones:  string[];
-  overrides:    string[];
-  missingPose:  string[];
-  rootMotion:   boolean;
-  hasExternalRoot: boolean;
+  frame:              number;
+  conflicts:          number;
+  rejections:         number;
+  cooperativeBlends:  number;
+  frozenBones:        string[];
+  overrides:          string[];
+  missingPose:        string[];
+  rootMotion:         boolean;
+  hasExternalRoot:    boolean;
+  locomotionDeadFrames: number;
 }
 
 export interface RootCause {
@@ -753,14 +956,16 @@ export function getFrameDiagnosticSummary(): FrameDiagnosticSummary {
     .filter(([, v]) => v.framesFrozen >= FREEZE_FRAMES)
     .map(([n]) => n);
   return {
-    frame:           _state.frame,
-    conflicts:       _state.conflictsThisFrame,
-    rejections:      _state.rejectionsThisFrame,
+    frame:                _state.frame,
+    conflicts:            _state.conflictsThisFrame,
+    rejections:           _state.rejectionsThisFrame,
+    cooperativeBlends:    _state.cooperativeBlendsThisFrame,
     frozenBones,
-    overrides:       [..._frameDiag.overrides],
-    missingPose:     [..._frameDiag.missingPose],
-    rootMotion:      _frameDiag.rootMotion,
-    hasExternalRoot: _frameDiag.hasExternalRoot,
+    overrides:            [..._frameDiag.overrides],
+    missingPose:          [..._frameDiag.missingPose],
+    rootMotion:           _frameDiag.rootMotion,
+    hasExternalRoot:      _frameDiag.hasExternalRoot,
+    locomotionDeadFrames: _locomotionDeadFrames,
   };
 }
 
@@ -803,11 +1008,17 @@ export function detectRootCause(summary: FrameDiagnosticSummary): RootCause {
       confidence: 'medium',
     };
   }
-  // 5. Locomotion check is the most ambiguous: avatar may be intentionally
-  //    standing still.  Flag medium confidence so it doesn't dominate.
-  if (summary.hasExternalRoot && !summary.rootMotion) {
+  // 5. Locomotion check — only fires after sustained stillness so we don't
+  //    confuse "intentionally standing" with "broken locomotion".  Confidence
+  //    stays medium because both look identical at the bone-authority layer.
+  if (
+    summary.hasExternalRoot &&
+    !summary.rootMotion &&
+    summary.locomotionDeadFrames >= LOCOMOTION_DEAD_THRESHOLD_FRAMES
+  ) {
     return {
-      cause:      'Locomotion system inactive — AvatarRoot has not translated recently',
+      cause: 'Locomotion system inactive — AvatarRoot has not translated for ' +
+             summary.locomotionDeadFrames + ' frames',
       confidence: 'medium',
     };
   }
@@ -880,8 +1091,12 @@ export function getAuthorityReport(): AuthorityReport {
 if (typeof window !== 'undefined') {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const w = window as any;
-  w.__STRICT_BONE_AUTHORITY = w.__STRICT_BONE_AUTHORITY ?? false;
+  // PART 4 — strict by default; opt-out via either flag below.
+  w.__STRICT_BONE_AUTHORITY = w.__STRICT_BONE_AUTHORITY ?? true;
+  w.__ALLOW_CONFLICTS       = w.__ALLOW_CONFLICTS       ?? false;
   w.__AVATAR_DEBUG_OVERLAY  = w.__AVATAR_DEBUG_OVERLAY  ?? false;
+  w.__INJECT_LOCOMOTION_FALLBACK =
+    w.__INJECT_LOCOMOTION_FALLBACK ?? false;
   w.__avatarAuthorityReport = getAuthorityReport;
   w.__avatarFrameSummary    = getFrameDiagnosticSummary;
   w.__avatarRootCause       = (): RootCause => detectRootCause(getFrameDiagnosticSummary());

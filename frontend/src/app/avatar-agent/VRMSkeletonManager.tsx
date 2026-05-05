@@ -111,6 +111,8 @@ import {
   beginFrameTraceGroup,
   endFrameTraceGroup,
   emitRootCauseIfAny,
+  computeVrmaSafetyOverrides,
+  tickLocomotionWatcher,
   TRACKED_POSE_KEYS,
   TRACKED_HUMANOID_NAMES,
 } from './motion/__boneAuthority';
@@ -4060,6 +4062,35 @@ export function VRMSkeletonManager({
       motionSource,
     });
 
+    // ── PART 2 (Bone Authority): VRMA safety override ─────────────────────────
+    // When an INTENT is active during VRMA playback, cap VRMA weight on the
+    // gesture-critical bones (head, neck, upper/lower arms, shoulders) so the
+    // clip cannot silently overwrite the intent gesture.  Lower limbs and
+    // torso keep full VRMA — they carry the clip's idle sway / locomotion.
+    const _intentIntensity = cognitiveEmb.intent?.intensity ?? 0;
+    const _intentActive    = !!cognitiveEmb.intent?.activeIntent && _intentIntensity > 0.2;
+    const _vrmaSafety = computeVrmaSafetyOverrides({
+      motionSource,
+      vrmaLayerW,
+      intentIntensity: _intentIntensity,
+      intentActive:    _intentActive,
+    });
+    if (_vrmaSafety) {
+      for (const bone of _vrmaSafety.bones) {
+        const existingOverride = kinematicBoneWeightOverrides.get(bone) ?? {};
+        const existingVrma = existingOverride.vrma;
+        // Math.min so we never weaken a stricter generative lock that's
+        // already in place (the weakest VRMA wins for the bone).
+        const newVrma = existingVrma !== undefined
+          ? Math.min(existingVrma, _vrmaSafety.vrmaReduced)
+          : _vrmaSafety.vrmaReduced;
+        kinematicBoneWeightOverrides.set(bone, {
+          ...existingOverride,
+          vrma: newVrma,
+        });
+      }
+    }
+
     const finalPose = blendPoseLayers({
       bind: m,
       idle: idlePose,
@@ -5280,6 +5311,17 @@ export function VRMSkeletonManager({
             z: +_vrmScene.position.z.toFixed(4),
           },
         );
+        // ── PART 3: Locomotion watcher ──────────────────────────────────────
+        // Detects "dead root" (no translation for ≥240 frames) and emits
+        // [LOCOMOTION_DEAD].  When the user opts in via
+        // `window.__INJECT_LOCOMOTION_FALLBACK = true`, applies a sub-mm
+        // sin sway to the outer AvatarRoot so the avatar never freezes
+        // in place visually.  Off by default — purely opt-in.
+        const _loco = tickLocomotionWatcher();
+        if (_loco.dead && _loco.injectAllowed && _loco.suggested) {
+          _avatarRoot.position.x += _loco.suggested.dx;
+          _avatarRoot.position.z += _loco.suggested.dz;
+        }
       }
     }
     // (3) Final-frame trace — head / arms / hips + per-frame conflict count.
