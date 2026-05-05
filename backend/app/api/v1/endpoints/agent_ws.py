@@ -1069,9 +1069,22 @@ async def agent_ws(websocket: WebSocket):
                 if not _strict_json or not _strict_ok:
                     # Legacy: inline [gesture] tokens → performance[]; optional behavior layers.
                     parsed = parse_reply_with_inline_gestures(reply_text)
-                    parsed["dialogue"] = strip_internal_llm_markers(
-                        parsed.get("dialogue", "") or ""
-                    ).strip()
+                    # Tasks 3–5: double filter + kill switch on parsed["dialogue"]
+                    _raw_dlg = parsed.get("dialogue", "") or ""
+                    # Pass 1
+                    _raw_dlg = strip_internal_llm_markers(_raw_dlg).strip()
+                    # Pass 2 — raw regex
+                    import re as _re_se
+                    _raw_dlg = _re_se.sub(r'\[SYSTEM_EVENT:[\s\S]*?\]', '', _raw_dlg, flags=_re_se.IGNORECASE).strip()
+                    # Kill switch
+                    if "[SYSTEM_EVENT:" in _raw_dlg.upper():
+                        logger.error(
+                            "[SYSTEM_EVENT_CRITICAL_LEAK] dialogue survived all strip passes session=%s", session_id
+                        )
+                        _raw_dlg = (
+                            "تمام، خلينا نكمل بشكل طبيعي. شو النقطة اللي حاب نركز عليها؟"
+                        )
+                    parsed["dialogue"] = _raw_dlg
                     _reply_meta_ws = context.get("_reply_meta") or {}
                     parsed["performance"] = _pedagogical_performance_supplement(
                         parsed.get("dialogue") or "",
@@ -1270,36 +1283,52 @@ async def agent_ws(websocket: WebSocket):
                             e,
                             exc_info=True,
                         )
+                        # ── EDGE-DIRECT FALLBACK with circuit-breaker awareness ─────────────
+                        # If the Edge circuit is open (e.g. WebSocket 403 on Docker IPs),
+                        # skip this fallback entirely — repeating the same call wastes time
+                        # and floods logs.  agent_ws will then send `tts_unavailable` and the
+                        # frontend silent-speak path will keep the avatar animated.
                         try:
-                            from app.services.audio_ffmpeg import get_audio_duration_ms, normalize_mp3_to_24k_hz
-                            from app.services.tts_service import (
-                                stub_viseme_timeline_for_text,
-                                synthesize_edge_tts_async,
-                            )
-
-                            _d_fb = (parsed.get("dialogue") or "").strip()[:8000]
-                            if _d_fb:
-                                mp3_bytes = await synthesize_edge_tts_async(
-                                    _d_fb, settings.TTS_ARABIC_VOICE
-                                )
-                                if mp3_bytes:
-                                    logger.info(
-                                        "[AgentWS] TTS USING EDGE FALLBACK synthesize_edge_tts_async | bytes=%d",
-                                        len(mp3_bytes),
-                                    )
-                                    mp3_bytes = normalize_mp3_to_24k_hz(mp3_bytes)
-                                    audio_b64 = base64.b64encode(mp3_bytes).decode("ascii")
-                                    _dur_fb = int(get_audio_duration_ms(mp3_bytes))
-                                    viseme_cues = stub_viseme_timeline_for_text(
-                                        _d_fb, duration_ms=_dur_fb
-                                    )
-                                    word_cues = []
-                        except Exception as _fb_exc:
+                            from app.services.tts_edge_circuit import tts_cb_ok
+                            _edge_circuit_ok = tts_cb_ok()
+                        except Exception:
+                            _edge_circuit_ok = True
+                        if not _edge_circuit_ok:
                             logger.warning(
-                                "[AgentWS] EDGE direct fallback failed: %s",
-                                _fb_exc,
-                                exc_info=True,
+                                "[AgentWS] EDGE direct fallback SKIPPED — circuit OPEN (datacenter IP block?). "
+                                "Frontend will receive tts_unavailable; configure ELEVENLABS_API_KEY or LOCAL_TTS_URL.",
                             )
+                        else:
+                            try:
+                                from app.services.audio_ffmpeg import get_audio_duration_ms, normalize_mp3_to_24k_hz
+                                from app.services.tts_service import (
+                                    stub_viseme_timeline_for_text,
+                                    synthesize_edge_tts_async,
+                                )
+
+                                _d_fb = (parsed.get("dialogue") or "").strip()[:8000]
+                                if _d_fb:
+                                    mp3_bytes = await synthesize_edge_tts_async(
+                                        _d_fb, settings.TTS_ARABIC_VOICE
+                                    )
+                                    if mp3_bytes:
+                                        logger.info(
+                                            "[AgentWS] TTS USING EDGE FALLBACK synthesize_edge_tts_async | bytes=%d",
+                                            len(mp3_bytes),
+                                        )
+                                        mp3_bytes = normalize_mp3_to_24k_hz(mp3_bytes)
+                                        audio_b64 = base64.b64encode(mp3_bytes).decode("ascii")
+                                        _dur_fb = int(get_audio_duration_ms(mp3_bytes))
+                                        viseme_cues = stub_viseme_timeline_for_text(
+                                            _d_fb, duration_ms=_dur_fb
+                                        )
+                                        word_cues = []
+                            except Exception as _fb_exc:
+                                logger.warning(
+                                    "[AgentWS] EDGE direct fallback failed: %s",
+                                    _fb_exc,
+                                    exc_info=True,
+                                )
 
                 from app.services.audio_ffmpeg import get_audio_duration_ms
 

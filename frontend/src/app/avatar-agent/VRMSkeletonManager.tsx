@@ -2179,17 +2179,25 @@ export function VRMSkeletonManager({
 
     const analyserNode = analyserRef?.current ?? null;
     let audioRms01 = 0;
-    let audioRmsSource: 'analyser' | 'emergency' | 'silent' = 'silent';
+    let audioRmsSource: 'analyser' | 'emergency' | 'silent-speak' | 'silent' = 'silent';
     // Read RMS any time the analyser exists (not only when speaking) so energy
     // updates the moment audio begins, before the `speaking` flag propagates.
     if (analyserNode) {
       audioRms01 = readAnalyserRms01(analyserNode, timeDomainBufRef);
       audioRmsSource = 'analyser';
+      // Silent-speak boost: if analyser exists but RMS is essentially zero AND
+      // we're speaking → TTS audio likely failed to play. Inject pseudo-energy
+      // so motion still happens. Sine wave at ~1.5 Hz gives natural amplitude.
+      if (speaking && audioRms01 < 0.02) {
+        const _t = (typeof performance !== 'undefined' ? performance.now() : 0) * 0.0015;
+        audioRms01 = 0.35 + Math.abs(Math.sin(_t)) * 0.25;
+        audioRmsSource = 'silent-speak';
+      }
     } else if (speaking) {
-      // Emergency-only fallback: brain says we're speaking but the <audio> isn't wired
-      // to the analyser yet. Use a small constant (0.20) so motion isn't fully dead;
-      // real RMS takes over once the analyser hooks up (usually within 1–2 frames).
-      audioRms01 = 0.20;
+      // Emergency fallback: <audio> not wired to analyser yet. Use a dynamic
+      // sine pulse instead of a flat constant so the avatar doesn't look frozen.
+      const _t = (typeof performance !== 'undefined' ? performance.now() : 0) * 0.0015;
+      audioRms01 = 0.30 + Math.abs(Math.sin(_t)) * 0.30;
       audioRmsSource = 'emergency';
     }
     const brainSnap = useBrainStore.getState();

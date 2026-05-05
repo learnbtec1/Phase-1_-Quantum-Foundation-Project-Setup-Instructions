@@ -1294,6 +1294,35 @@ export function useAgentAgent({
               : undefined;
           // eslint-disable-next-line no-console
           console.log('[TTS_TRIGGER]', dialogue);
+          // ── SILENT-SPEAK FALLBACK ──────────────────────────────────────────
+          // Even if HTTP TTS is about to fail (no key, blocked Edge, etc.),
+          // dispatch avatar:speak NOW so the avatar moves in sync with the
+          // estimated dialogue duration. The audio (if it arrives) will
+          // overlay later. This prevents a fully-frozen avatar on TTS failure.
+          if (typeof window !== 'undefined') {
+            const _silentDur = estimateDialogueDurationMs(dialogue);
+            setSpeechIntentHintsFromText(dialogue);
+            setSpeechEmotionBridge({ emotion: emotionLabel, intensity: 0.55 });
+            window.dispatchEvent(
+              new CustomEvent('avatar:speak', {
+                detail: {
+                  text: dialogue,
+                  timings: wcForPerf ?? [],
+                  sampleRate: 24000,
+                  audio: undefined,
+                  durationMs: _silentDur,
+                  silent: true,
+                },
+              }),
+            );
+            console.log('[AVATAR_SILENT_SPEAK]', { dialogue: dialogue.slice(0, 60), durationMs: _silentDur });
+            // Auto-end the silent-speak so animation state machine returns to idle.
+            setTimeout(() => {
+              if (mountedRef.current) {
+                window.dispatchEvent(new CustomEvent('avatar:speak:end'));
+              }
+            }, _silentDur + 250);
+          }
           void agentDirector.scheduleTTS(dialogue, emotionLabel, 0, ttsFallbackOpts);
         } else if (typeof window !== 'undefined') {
           setSpeechIntentHintsFromText(dialogue);
