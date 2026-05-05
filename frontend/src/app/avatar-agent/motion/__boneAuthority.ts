@@ -768,6 +768,7 @@ const _GESTURE_LOG_MAX = 32;
 export function trackGestureDispatch(gestureKey: string | undefined | null): boolean {
   if (!gestureKey) return false;
   const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  _lastGestureDispatchMs = now;
   while (_gestureLog.length > 0 && now - _gestureLog[0].ts > GESTURE_DUP_WINDOW_MS) {
     _gestureLog.shift();
   }
@@ -784,6 +785,12 @@ export function trackGestureDispatch(gestureKey: string | undefined | null): boo
     return true;
   }
   return false;
+}
+
+/** Most-recent gesture dispatch timestamp (`performance.now()`-aligned). 0 = never. */
+let _lastGestureDispatchMs = 0;
+export function getLastGestureDispatchMs(): number {
+  return _lastGestureDispatchMs;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

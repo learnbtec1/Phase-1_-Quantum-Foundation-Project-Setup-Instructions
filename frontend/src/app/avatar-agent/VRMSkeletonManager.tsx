@@ -116,6 +116,12 @@ import {
   TRACKED_POSE_KEYS,
   TRACKED_HUMANOID_NAMES,
 } from './motion/__boneAuthority';
+import {
+  getBehaviorState,
+  applyBehaviorSyncModifiers,
+  checkSyncAlignment,
+  checkFreezeVsSpeech,
+} from './motion/__behaviorSync';
 import { blendPoseInto, generateIntentPose } from './motion/intentPoseGenerator';
 import { updateIntentFromBehaviorBrain } from '@/lib/avatar/motionIntentContinuity';
 import { deriveEmbodimentFromLLM, getCognitiveOrchestratorInputOverlay } from '@/lib/ai/cognitiveOrchestrator';
@@ -4583,6 +4589,26 @@ export function VRMSkeletonManager({
       intent:        embFrame.intent.activeIntent ?? '',
       speaking,
     });
+
+    // ── BEHAVIOR SYNC: aggregate speech/emotion/intent + apply additive deltas
+    // (BEFORE applyFinalPoseToVrm).  Modifiers are small (≤ 0.05 rad) and
+    // multiplied onto existing pose quaternions — never replace.  The sync
+    // checks (DESYNC + SYNC_FAILURE) run here while we still have ground
+    // truth on speaking + intent.
+    {
+      const _bsNowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const _bs = getBehaviorState({
+        nowMs:           _bsNowMs,
+        speechActive:    speaking,
+        speechEnergy:    embFrame.speech.energy,
+        emotionRaw:      behaviorPayload?.emotion ?? 'neutral',
+        intentIntensity: embFrame.intent.intensity ?? 0,
+        gestureActive:   gestureLayerW > 0.1,
+      });
+      safeCall('behaviorSync', () => applyBehaviorSyncModifiers(finalPose, _bs), undefined);
+      checkSyncAlignment(_bsNowMs);
+      checkFreezeVsSpeech(_bs);
+    }
 
     if (humSnap && shouldTriggerBlinkEdge(humSnap) && typeof window !== 'undefined') {
       const em = behaviorPayload?.emotion ?? 'neutral';

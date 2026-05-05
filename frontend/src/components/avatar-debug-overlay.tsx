@@ -25,6 +25,12 @@ import {
   type FrameDiagnosticSummary,
   type RootCause,
 } from '@/app/avatar-agent/motion/__boneAuthority';
+import {
+  getLastBehaviorState,
+  getSyncStatus,
+  type BehaviorState,
+  type SyncStatus,
+} from '@/app/avatar-agent/motion/__behaviorSync';
 
 const EMPTY_SUMMARY: FrameDiagnosticSummary = {
   frame:                0,
@@ -50,11 +56,13 @@ interface AuthorityReportShape {
 const POLL_INTERVAL_MS = 500;
 
 export function AvatarDebugOverlay(): React.JSX.Element | null {
-  const [enabled, setEnabled] = useState(false);
-  const [summary, setSummary] = useState<FrameDiagnosticSummary>(EMPTY_SUMMARY);
-  const [cause,   setCause]   = useState<RootCause>(EMPTY_CAUSE);
-  const [perBone, setPerBone] = useState<Record<string, BoneAuthority>>({});
-  const [health,  setHealth]  = useState<'OK' | 'DEGRADED' | 'BROKEN'>('OK');
+  const [enabled,   setEnabled]   = useState(false);
+  const [summary,   setSummary]   = useState<FrameDiagnosticSummary>(EMPTY_SUMMARY);
+  const [cause,     setCause]     = useState<RootCause>(EMPTY_CAUSE);
+  const [perBone,   setPerBone]   = useState<Record<string, BoneAuthority>>({});
+  const [health,    setHealth]    = useState<'OK' | 'DEGRADED' | 'BROKEN'>('OK');
+  const [behavior,  setBehavior]  = useState<BehaviorState | null>(null);
+  const [syncState, setSyncState] = useState<SyncStatus>('OK');
 
   // ── Watch the debug flag — toggling in console flips the overlay live ────
   useEffect(() => {
@@ -88,6 +96,8 @@ export function AvatarDebugOverlay(): React.JSX.Element | null {
           setPerBone(report.perBoneThisFrame);
           setHealth(report.health);
         }
+        setBehavior(getLastBehaviorState());
+        setSyncState(getSyncStatus());
       } catch {
         /* never let the overlay crash the page */
       }
@@ -137,6 +147,56 @@ export function AvatarDebugOverlay(): React.JSX.Element | null {
         · rejections <strong style={{ color: summary.rejections > 0 ? '#ffcf66' : '#dde4ee' }}>{summary.rejections}</strong>{' '}
         · blends <strong style={{ color: '#dde4ee' }}>{summary.cooperativeBlends}</strong>
       </div>
+
+      <Section label="BEHAVIOR SYNC">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ color: '#bfd6f6' }}>status</span>
+          <SyncBadge status={syncState} />
+        </div>
+        {behavior ? (
+          <div style={{ color: '#7d8896', marginTop: 4, lineHeight: 1.5 }}>
+            <div>
+              <span style={{ color: '#bfd6f6' }}>speech</span>
+              <span style={{ color: '#7d8896' }}> → </span>
+              <strong style={{ color: behavior.speechActive ? '#7fffaf' : '#7d8896' }}>
+                {behavior.speechActive ? 'ACTIVE' : 'idle'}
+              </strong>
+              <span style={{ color: '#7d8896' }}> · energy </span>
+              <strong style={{ color: '#dde4ee' }}>{behavior.speechEnergy.toFixed(2)}</strong>
+            </div>
+            <div>
+              <span style={{ color: '#bfd6f6' }}>emotion</span>
+              <span style={{ color: '#7d8896' }}> → </span>
+              <strong style={{ color: EMOTION_COLOURS[behavior.emotion] }}>{behavior.emotion}</strong>
+              {behavior.emotionRaw !== behavior.emotion && (
+                <span style={{ color: '#7d8896' }}> ({behavior.emotionRaw})</span>
+              )}
+            </div>
+            <div>
+              <span style={{ color: '#bfd6f6' }}>intent</span>
+              <span style={{ color: '#7d8896' }}> → </span>
+              <strong style={{ color: behavior.gestureActive ? '#ffcf66' : '#7d8896' }}>
+                {behavior.intentIntensity.toFixed(2)}
+              </strong>
+              <span style={{ color: '#7d8896' }}> · gestures </span>
+              <strong style={{ color: behavior.gestureActive ? '#7fffaf' : '#7d8896' }}>
+                {behavior.gestureActive ? 'ENABLED' : 'suppressed'}
+              </strong>
+            </div>
+            <div style={{ color: '#7d8896', marginTop: 2 }}>
+              ampMul {behavior.gestureAmpMul.toFixed(2)} · motionMul {behavior.motionIntensityMul.toFixed(2)} · posture{' '}
+              <span style={{
+                color: behavior.postureExpansion > 0 ? '#7fffaf' :
+                       behavior.postureExpansion < 0 ? '#ff8d8d' : '#dde4ee',
+              }}>
+                {behavior.postureExpansion > 0 ? '+' : ''}{behavior.postureExpansion.toFixed(2)}
+              </span>
+            </div>
+          </div>
+        ) : (
+          <div style={{ color: '#7d8896', marginTop: 2 }}>state not yet sampled</div>
+        )}
+      </Section>
 
       <Section label="ROOT CAUSE">
         <div
@@ -251,6 +311,13 @@ const AUTHORITY_COLOURS: Readonly<Record<string, string>> = {
   PHYSICS: '#ff8d8d',
 };
 
+const EMOTION_COLOURS: Readonly<Record<string, string>> = {
+  neutral: '#dde4ee',
+  happy:   '#ffcf66',
+  serious: '#7eb8ff',
+  excited: '#ff8d8d',
+};
+
 const listStyle: React.CSSProperties = {
   listStyle:   'none',
   margin:      0,
@@ -288,6 +355,27 @@ function HealthBadge({ health }: { health: 'OK' | 'DEGRADED' | 'BROKEN' }): Reac
       }}
     >
       {health}
+    </span>
+  );
+}
+
+function SyncBadge({ status }: { status: SyncStatus }): React.JSX.Element {
+  const colour =
+    status === 'OK'      ? '#7fffaf' :
+    status === 'PARTIAL' ? '#ffcf66' :
+                           '#ff5151';
+  return (
+    <span
+      style={{
+        color:         colour,
+        border:        `1px solid ${colour}`,
+        borderRadius:  999,
+        padding:       '1px 8px',
+        fontSize:      10,
+        letterSpacing: 0.5,
+      }}
+    >
+      {status}
     </span>
   );
 }
