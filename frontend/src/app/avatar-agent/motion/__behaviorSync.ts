@@ -1239,15 +1239,54 @@ const BEHAVIOR_ENGINE_LOG_MS = 450;
 let _lastTimingPhaseLogMs = -Infinity;
 const TIMING_PHASE_LOG_MS = 380;
 
+let _lastPipelineTraceMs = -Infinity;
+const PIPELINE_TRACE_MS = 500;
+let _lastOverrideLogMs = -Infinity;
+const OVERRIDE_LOG_MS = 600;
+let _lastMotionZeroLogMs = -Infinity;
+const MOTION_ZERO_LOG_MS = 600;
+let _lastMotionGuardLogMs = -Infinity;
+const MOTION_GUARD_LOG_MS = 600;
+
+/** Counters surfaced via `window.__avatarMotionGuardStats` for tests / overlay. */
+const _guardStats = {
+  motionZero: 0,
+  behaviorKilled: 0,
+  timingKilled: 0,
+  finalOverride: 0,
+  guardApplied: 0,
+  settlingClamped: 0,
+};
+
+/** Effective-zero threshold for motion scalars (avoids float-noise false negatives). */
+const _MOTION_EPS = 0.0005;
+/** Minimum head/arm motion injected when speaking-but-zero is detected. */
+const _GUARD_FLOOR = 0.05;
+/** Settling-phase floor so head/arm never collapses to a flat zero mid-transition. */
+const _SETTLING_FLOOR = 0.03;
+
+function _energy(m: { headNod: number; openGesture: number }): number {
+  return Math.abs(m.headNod) + Math.abs(m.openGesture);
+}
+
 /**
  * Multiplies existing `__cogniMotionState` scalars after intent/speech baseline — never replaces them.
  * Keeps VRMSkeletonManager as the sole writer of the base kinematic intent; this layer only biases energy.
+ *
+ * Pipeline observability + safety guards (additive, non-destructive):
+ *   1. Snapshot motion at each stage: base → afterBehavior → afterTiming → final.
+ *   2. Detect layer overrides ([BEHAVIOR_KILLED_MOTION] / [TIMING_KILLED_MOTION] / [FINAL_OVERRIDE]).
+ *   3. Clamp `settling` floor so timing falloff cannot drive motion to absolute zero.
+ *   4. Final motion guard — inject `_GUARD_FLOOR` if speaking but motion still zero.
  */
 export function mergeBehaviorEngineMotionScalars(
   motion: { headNod: number; headTilt: number; openGesture: number },
   opts: { speaking: boolean; intent: string; emotion: string; intensity: number },
 ): void {
   const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+  const baseMotion = { headNod: motion.headNod, openGesture: motion.openGesture };
+  const baseEnergy = _energy(baseMotion);
 
   const input: BehaviorInput = {
     speaking: opts.speaking,
@@ -1260,8 +1299,50 @@ export function mergeBehaviorEngineMotionScalars(
   motion.headNod *= mul.headNod;
   motion.openGesture *= mul.openGesture;
 
+  const afterBehavior = { headNod: motion.headNod, openGesture: motion.openGesture };
+  const afterBehaviorEnergy = _energy(afterBehavior);
+
   const timing = computeTimingState({ speaking: opts.speaking, now });
   applyTimingToMotion(motion, timing, now);
+
+  if (timing.phase === 'settling' && opts.speaking === false) {
+    if (Math.abs(motion.headNod) < _SETTLING_FLOOR) {
+      motion.headNod = motion.headNod >= 0 ? _SETTLING_FLOOR : -_SETTLING_FLOOR;
+      _guardStats.settlingClamped += 1;
+    }
+    if (motion.openGesture < _SETTLING_FLOOR) {
+      motion.openGesture = _SETTLING_FLOOR;
+      _guardStats.settlingClamped += 1;
+    }
+  }
+
+  const afterTiming = { headNod: motion.headNod, openGesture: motion.openGesture };
+  const afterTimingEnergy = _energy(afterTiming);
+
+  let guardApplied = false;
+  if (opts.speaking && afterTimingEnergy <= _MOTION_EPS) {
+    motion.headNod = motion.headNod === 0 ? _GUARD_FLOOR : motion.headNod;
+    motion.openGesture = motion.openGesture === 0 ? _GUARD_FLOOR : motion.openGesture;
+    if (Math.abs(motion.headNod) < _GUARD_FLOOR) {
+      motion.headNod = motion.headNod >= 0 ? _GUARD_FLOOR : -_GUARD_FLOOR;
+    }
+    if (motion.openGesture < _GUARD_FLOOR) motion.openGesture = _GUARD_FLOOR;
+    guardApplied = true;
+    _guardStats.guardApplied += 1;
+  }
+
+  const finalMotion = { headNod: motion.headNod, openGesture: motion.openGesture };
+  const finalEnergy = _energy(finalMotion);
+
+  const behaviorKilled =
+    baseEnergy > _MOTION_EPS && afterBehaviorEnergy <= _MOTION_EPS;
+  const timingKilled =
+    afterBehaviorEnergy > _MOTION_EPS && afterTimingEnergy <= _MOTION_EPS;
+  const finalOverride =
+    afterTimingEnergy > _MOTION_EPS && finalEnergy <= _MOTION_EPS;
+  if (behaviorKilled) _guardStats.behaviorKilled += 1;
+  if (timingKilled) _guardStats.timingKilled += 1;
+  if (finalOverride) _guardStats.finalOverride += 1;
 
   if (typeof window !== 'undefined') {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1269,6 +1350,67 @@ export function mergeBehaviorEngineMotionScalars(
     w.__behaviorEnginePlan = plan;
     w.__behaviorEngineMotionMul = mul;
     w.__behaviorTimingState = timing;
+    w.__avatarMotionGuardStats = _guardStats;
+    w.__avatarLastPipelineMotion = {
+      base: baseMotion,
+      afterBehavior,
+      afterTiming,
+      final: finalMotion,
+    };
+  }
+
+  if (_logEnabled()) {
+    if (now - _lastPipelineTraceMs > _cooldown(PIPELINE_TRACE_MS)) {
+      _lastPipelineTraceMs = now;
+      console.log('[PIPELINE_TRACE]', {
+        speaking: opts.speaking,
+        intent: input.intent || '(none)',
+        emotion: input.emotion || 'neutral',
+        timingPhase: timing.phase,
+        motion: {
+          base:           { hn: +baseMotion.headNod.toFixed(3),     og: +baseMotion.openGesture.toFixed(3) },
+          afterBehavior:  { hn: +afterBehavior.headNod.toFixed(3),  og: +afterBehavior.openGesture.toFixed(3) },
+          afterTiming:    { hn: +afterTiming.headNod.toFixed(3),    og: +afterTiming.openGesture.toFixed(3) },
+          final:          { hn: +finalMotion.headNod.toFixed(3),    og: +finalMotion.openGesture.toFixed(3) },
+        },
+      });
+    }
+
+    if (
+      opts.speaking &&
+      finalEnergy <= _MOTION_EPS &&
+      now - _lastMotionZeroLogMs > _cooldown(MOTION_ZERO_LOG_MS)
+    ) {
+      _lastMotionZeroLogMs = now;
+      _guardStats.motionZero += 1;
+      console.error('[MOTION_ZERO_ERROR]', {
+        speaking: opts.speaking,
+        baseEnergy: +baseEnergy.toFixed(3),
+        afterBehaviorEnergy: +afterBehaviorEnergy.toFixed(3),
+        afterTimingEnergy: +afterTimingEnergy.toFixed(3),
+        finalEnergy: +finalEnergy.toFixed(3),
+        timingPhase: timing.phase,
+      });
+    }
+
+    if (
+      (behaviorKilled || timingKilled || finalOverride) &&
+      now - _lastOverrideLogMs > _cooldown(OVERRIDE_LOG_MS)
+    ) {
+      _lastOverrideLogMs = now;
+      if (behaviorKilled) console.warn('[BEHAVIOR_KILLED_MOTION]', { base: baseMotion, afterBehavior });
+      if (timingKilled)   console.warn('[TIMING_KILLED_MOTION]',   { afterBehavior, afterTiming, phase: timing.phase });
+      if (finalOverride)  console.warn('[FINAL_OVERRIDE]',         { afterTiming, final: finalMotion });
+    }
+
+    if (guardApplied && now - _lastMotionGuardLogMs > _cooldown(MOTION_GUARD_LOG_MS)) {
+      _lastMotionGuardLogMs = now;
+      console.warn('[MOTION_GUARD_APPLIED]', {
+        speaking: opts.speaking,
+        injectedHeadNod: +motion.headNod.toFixed(3),
+        injectedOpenGesture: +motion.openGesture.toFixed(3),
+      });
+    }
   }
 
   if (_logEnabled() && now - _lastBehaviorEngineLogMs > _cooldown(BEHAVIOR_ENGINE_LOG_MS)) {
@@ -1292,6 +1434,10 @@ export function mergeBehaviorEngineMotionScalars(
   }
 }
 
+export function getMotionGuardStats(): Readonly<typeof _guardStats> {
+  return _guardStats;
+}
+
 // ── Window helpers ────────────────────────────────────────────────────────
 
 if (typeof window !== 'undefined') {
@@ -1306,4 +1452,5 @@ if (typeof window !== 'undefined') {
   w.__avatarSelfHealStats     = getSelfHealStats;
   w.__avatarStabilityScore    = getStabilityScore;
   w.__avatarResetSelfHealStats = resetSelfHealStats;
+  w.__avatarGetMotionGuardStats = getMotionGuardStats;
 }
