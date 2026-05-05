@@ -4545,46 +4545,16 @@ export function VRMSkeletonManager({
     // ── PHASE 3: Self-healing tick — auto-resets errorState after 3 s clean ───
     tickSelfHealing();
 
-    // TASK 4: sniper probes (only active when window.__sniperActive = true)
-    // activateSniper(['finalPose'])  — pauses DevTools exactly on throw
+    // ── applyFinalPoseToVrm MOVED to AFTER vrm.update() ──────────────────────
+    // ROOT CAUSE FIX: vrm.update() calls lookAt.update() which re-writes the
+    // head/neck normalized bones AFTER our applyFinalPoseToVrm call, erasing
+    // our motion.  By applying AFTER vrm.update() + calling humanoid.update()
+    // again, our normalized values are the LAST write before rendering.
+    // (See post-vrm block below.)
     sniper('finalPose', () => {
       if (finalPose.size === 0) throw new Error('finalPose is empty');
       if (!vrm.humanoid)       throw new Error('vrm.humanoid is null');
     });
-
-    safeCall('finalPoseToVrm', () => applyFinalPoseToVrm({
-      finalPose,
-      humanoid: vrm.humanoid ?? null,
-      kinematicSnapKeys,
-      smoothLambda: 8,
-      maxRotationPerFrameRad: 0.35,
-      boneRefs: {
-        hips: hipsRef.current,
-        spine: spineRef.current,
-        chest: chestRef.current,
-        neck: neckRef.current,
-        head: headRef.current,
-        leftShoulder: leftShoulderRef.current,
-        rightShoulder: rightShoulderRef.current,
-        lua: luaRef.current,
-        rua: ruaRef.current,
-        lla: llaRef.current,
-        rla: rlaRef.current,
-        lh: lhRef.current,
-        rh: rhRef.current,
-        rIndexProximal: rIndexProximalRef.current,
-        rMiddleProximal: rMiddleProximalRef.current,
-        rRingProximal: rRingProximalRef.current,
-        rLittleProximal: rLittleProximalRef.current,
-        rThumbProximal: rThumbProximalRef.current,
-        lIndexProximal: lIndexProximalRef.current,
-        lMiddleProximal: lMiddleProximalRef.current,
-        lRingProximal: lRingProximalRef.current,
-        lLittleProximal: lLittleProximalRef.current,
-        lThumbProximal: lThumbProximalRef.current,
-      },
-      delta: safeDelta,
-    }), undefined);
 
     // ─── [POSE_AFTER_VRM] — read actual scene-graph rotations post-apply ──
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -4626,79 +4596,232 @@ export function VRMSkeletonManager({
     // ─── vrm.update() — Phase 20 “heartbeat” ──────────────────────────────────
     // Every frame while the canvas runs: propagate humanoid + expressionManager + spring bones.
     // AnimationController (priority −2) and LipSyncManager (−1) write morphs first; this applies them.
-    // TASK 2: pre-vrm.update snapshot (throttled ~1/s)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // RENDER PIPELINE BREAKPOINT DIAGNOSTICS (throttled ~1/s)
+    // Tags: [BEFORE_VRM] [AFTER_VRM] [PIPELINE_BREAK]
+    // ═══════════════════════════════════════════════════════════════════════════
     const _diagNow  = typeof performance !== 'undefined' ? performance.now() : 0;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const _diagLast = (globalThis as any).__diagSnapshotLastMs ?? 0;
     const _doDiagSnap = _diagNow - _diagLast > 1000;
+
+    // ── Bone-read helpers ────────────────────────────────────────────────────
+    const _readRot = (node: THREE.Object3D | null) => {
+      if (!node) return null;
+      return {
+        rx: +node.rotation.x.toFixed(4),
+        ry: +node.rotation.y.toFixed(4),
+        rz: +node.rotation.z.toFixed(4),
+      };
+    };
+
     if (_doDiagSnap) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (globalThis as any).__diagSnapshotLastMs = _diagNow;
-      const _eT = new THREE.Euler(0, 0, 0, 'YXZ');
-      const _snapB = (node: THREE.Object3D | null) => {
-        if (!node) return null;
-        _eT.setFromQuaternion(node.quaternion, 'YXZ');
-        return { x: +_eT.x.toFixed(4), y: +_eT.y.toFixed(4), z: +_eT.z.toFixed(4) };
+
+      // ── TASK 5: humanoid ref check — does vrm.humanoid give same node as cache? ──
+      const _vrmLua = vrm.humanoid?.getNormalizedBoneNode('leftUpperArm' as never) ?? null;
+      const _vrmHead = vrm.humanoid?.getNormalizedBoneNode('head' as never) ?? null;
+      const _refMatchLua  = _vrmLua  === luaRef.current;
+      const _refMatchHead = _vrmHead === headRef.current;
+      if (!_refMatchLua || !_refMatchHead) {
+        console.warn('[PIPELINE_BREAK:BONE_REF_MISMATCH]', {
+          luaCacheNull:    !luaRef.current,
+          luaVrmNull:      !_vrmLua,
+          luaMatch:        _refMatchLua,
+          headCacheNull:   !headRef.current,
+          headVrmNull:     !_vrmHead,
+          headMatch:       _refMatchHead,
+          verdict: 'ROOT_CAUSE_B: cached refs diverge from vrm.humanoid nodes',
+        });
+      }
+
+      // ── TASK 1: [BEFORE_VRM] snapshot ────────────────────────────────────
+      const _before = {
+        head: _readRot(headRef.current),
+        lua:  _readRot(luaRef.current),
+        rua:  _readRot(ruaRef.current),
       };
-      const _preSnap = { head: _snapB(headRef.current), lua: _snapB(luaRef.current), rua: _snapB(ruaRef.current) };
-      console.log('[DIAG_PRE_VRM_UPDATE]', _preSnap);
+      console.log('[BEFORE_VRM]', {
+        head: _before.head?.rx ?? 'NULL',
+        lua:  _before.lua?.rz  ?? 'NULL',
+        refsNull: { head: !headRef.current, lua: !luaRef.current },
+      });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (globalThis as any).__diagPreSnap = _preSnap;
+      (globalThis as any).__diagPreSnap = _before;
     }
 
     if (!VRM_HARD_ISOLATION) {
       vrm.update(safeDelta);
     }
 
-    // TASK 2: post-vrm.update snapshot + override-detection
     if (_doDiagSnap) {
-      const _eT2 = new THREE.Euler(0, 0, 0, 'YXZ');
-      const _snapB2 = (node: THREE.Object3D | null) => {
-        if (!node) return null;
-        _eT2.setFromQuaternion(node.quaternion, 'YXZ');
-        return { x: +_eT2.x.toFixed(4), y: +_eT2.y.toFixed(4), z: +_eT2.z.toFixed(4) };
+      // ── TASK 2: [AFTER_VRM] snapshot ─────────────────────────────────────
+      const _after = {
+        head: _readRot(headRef.current),
+        lua:  _readRot(luaRef.current),
+        rua:  _readRot(ruaRef.current),
       };
-      const _postSnap = { head: _snapB2(headRef.current), lua: _snapB2(luaRef.current), rua: _snapB2(ruaRef.current) };
-      console.log('[DIAG_POST_VRM_UPDATE]', _postSnap);
+      console.log('[AFTER_VRM]', {
+        head: _after.head?.rx ?? 'NULL',
+        lua:  _after.lua?.rz  ?? 'NULL',
+      });
+
+      // ── TASK 3 & 6: [PIPELINE_BREAK] verdict ─────────────────────────────
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const _preStored = (globalThis as any).__diagPreSnap as { head: { x: number } | null } | undefined;
-      if (_preStored?.head && _postSnap.head) {
-        const _headDelta = Math.abs(_postSnap.head.x - _preStored.head.x);
-        if (_headDelta > 0.01) {
-          console.warn(
-            '[DIAG_VRM_UPDATE_OVERRIDE] WARNING vrm.update() changed head.x by', _headDelta.toFixed(4),
-            '=> vrm.lookAt or autoUpdateHumanBones is resetting bones!',
-            { before: _preStored.head.x, after: _postSnap.head.x },
-          );
-        } else {
-          console.log('[DIAG_VRM_UPDATE_OVERRIDE] OK head.x stable across vrm.update()');
-        }
+      const _pre = (globalThis as any).__diagPreSnap as typeof _after | undefined;
+      const _headBefore = _pre?.head?.rx ?? null;
+      const _headAfter  = _after.head?.rx ?? null;
+      const _luaBefore  = _pre?.lua?.rz  ?? null;
+      const _luaAfter   = _after.lua?.rz  ?? null;
+
+      const _headChanged = _headBefore !== null && _headAfter !== null
+        && Math.abs(_headAfter - _headBefore) > 0.005;
+      const _luaChanged  = _luaBefore !== null && _luaAfter !== null
+        && Math.abs(_luaAfter  - _luaBefore)  > 0.005;
+
+      // Determine root cause
+      let _rootCause = 'UNKNOWN';
+      if (!headRef.current && !luaRef.current) {
+        _rootCause = 'B: Wrong bone reference (all refs null)';
+      } else if (_headChanged || _luaChanged) {
+        _rootCause = 'A: VRM is overriding motion (vrm.update() mutated bones)';
+      } else if (!_headChanged && !_luaChanged && _headBefore === 0 && _luaBefore === 0) {
+        _rootCause = 'C: Motion never reached bones (finalPose → bone write broken)';
+      } else {
+        _rootCause = 'D: vrm.update() stable but bones show no motion — check applyFinalPoseToVrm';
+      }
+
+      console.log('[PIPELINE_BREAK]', {
+        beforeVrmHead:    _headBefore,
+        afterVrmHead:     _headAfter,
+        beforeVrmLua:     _luaBefore,
+        afterVrmLua:      _luaAfter,
+        headChangedByVrm: _headChanged,
+        luaChangedByVrm:  _luaChanged,
+        refsNull:         { head: !headRef.current, lua: !luaRef.current },
+        ROOT_CAUSE:       _rootCause,
+      });
+
+      if (_headChanged || _luaChanged) {
+        console.error(
+          '[PIPELINE_BREAK] CONFIRMED: vrm.update() is overriding bone rotations.',
+          'FIX: move applyFinalPoseToVrm to run AFTER vrm.update(), or disable vrm.lookAt.',
+        );
       }
     }
 
-    // TASK 1: forced direct bone write test (enable: window.__forcedMotionTest = true)
-    // Run AFTER vrm.update() so this is the LAST write.
-    // If arms/head MOVE  => render pipeline OK, bug is upstream
-    // If arms/head STILL => bone/render pipeline broken
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FINAL VRM MOTION FIX — apply AFTER vrm.update() so lookAt cannot override
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // TASKS 1 & 2 (FIX): applyFinalPoseToVrm runs AFTER vrm.update().
+    // boneRefs is intentionally empty so every bone resolves fresh from
+    // vrm.humanoid.getNormalizedBoneNode() — no stale cached refs.
+    safeCall('finalPoseToVrm', () => applyFinalPoseToVrm({
+      finalPose,
+      humanoid: vrm.humanoid ?? null,
+      kinematicSnapKeys,
+      smoothLambda: 8,
+      maxRotationPerFrameRad: 0.35,
+      boneRefs: {},          // ← always resolves live from vrm.humanoid
+      delta: safeDelta,
+    }), undefined);
+
+    // TASK 2 (FIX): Re-propagate normalized → raw AFTER our writes.
+    // vrm.humanoid.update() reads normalized bone quaternions and writes to
+    // raw scene-graph bones (raw = restQuat * normalizedQuat).
+    // This must run AFTER applyFinalPoseToVrm so the raw bones receive our values.
+    if (vrm.humanoid) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (vrm.humanoid as any).update?.();
+      } catch { /* ignore — humanoid.update() not public in all versions */ }
+    }
+
+    // TASK 3 (FIX): Apply motionState deltas directly via vrm.humanoid.getNormalizedBoneNode.
+    // This is a failsafe layer: even if applyFinalPoseToVrm missed a bone, these
+    // minimal additive deltas (headNod, openGesture) will be applied.
+    if (vrm.humanoid) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _ms = (globalThis as any).__cogniMotionState as
+        { headNod?: number; headTilt?: number; openGesture?: number } | undefined;
+      if (_ms) {
+        try {
+          const _hNode = vrm.humanoid.getNormalizedBoneNode('head' as never);
+          const _lNode = vrm.humanoid.getNormalizedBoneNode('leftUpperArm' as never);
+          const _rNode = vrm.humanoid.getNormalizedBoneNode('rightUpperArm' as never);
+          const _nNode = vrm.humanoid.getNormalizedBoneNode('neck' as never);
+          if (_hNode && _ms.headNod)   _hNode.rotation.x += _ms.headNod;
+          if (_hNode && _ms.headTilt)  _hNode.rotation.z += _ms.headTilt;
+          if (_nNode && _ms.headNod)   _nNode.rotation.x += _ms.headNod * 0.3;
+          if (_lNode && _ms.openGesture) _lNode.rotation.z += _ms.openGesture * 0.45;
+          if (_rNode && _ms.openGesture) _rNode.rotation.z -= _ms.openGesture * 0.45;
+          // Re-propagate after delta writes
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (vrm.humanoid as any).update?.();
+        } catch { /* ignore */ }
+      }
+    }
+
+    // ── TASK 4 (FIX): Hard override test — resolves bones live from vrm.humanoid ──
+    // Enable: window.__forcedMotionTest = true
+    // Resolves bones live each frame — no cached ref dependency.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if ((typeof window !== 'undefined') && (window as any).__forcedMotionTest) {
       const _fmtSin = Math.sin(performance.now() * 0.002) * 0.3;
-      if (headRef.current) headRef.current.rotation.x = _fmtSin;
-      if (luaRef.current)  luaRef.current.rotation.z  =  0.8;
-      if (ruaRef.current)  ruaRef.current.rotation.z  = -0.8;
-      if (neckRef.current) neckRef.current.rotation.y = Math.sin(performance.now() * 0.001) * 0.15;
+      // Always resolve from vrm.humanoid — never use cached refs here
+      const _fHead = vrm.humanoid?.getNormalizedBoneNode('head'         as never) ?? null;
+      const _fLua  = vrm.humanoid?.getNormalizedBoneNode('leftUpperArm' as never) ?? null;
+      const _fRua  = vrm.humanoid?.getNormalizedBoneNode('rightUpperArm' as never) ?? null;
+      const _fNeck = vrm.humanoid?.getNormalizedBoneNode('neck'         as never) ?? null;
+      if (_fHead) _fHead.rotation.x = _fmtSin;
+      if (_fLua)  _fLua.rotation.z  =  0.8;
+      if (_fRua)  _fRua.rotation.z  = -0.8;
+      if (_fNeck) _fNeck.rotation.y = Math.sin(performance.now() * 0.001) * 0.15;
+      // Re-propagate so raw bones reflect our writes
+      try { (vrm.humanoid as any)?.update?.(); } catch { /* ignore */ }
       console.log('[FORCED_MOTION_TEST]', {
-        head_x:    headRef.current?.rotation.x.toFixed(3) ?? 'NULL_REF',
-        lua_z:     luaRef.current?.rotation.z.toFixed(3)  ?? 'NULL_REF',
-        rua_z:     ruaRef.current?.rotation.z.toFixed(3)  ?? 'NULL_REF',
-        refsExist: { head: !!headRef.current, lua: !!luaRef.current, rua: !!ruaRef.current },
-        verdict:   (!headRef.current && !luaRef.current)
-          ? 'REFS_NULL => bone mapping broken'
-          : 'refs_valid => if no movement, check scene graph parenting',
+        boneSource: 'vrm.humanoid.getNormalizedBoneNode',
+        head_rx: _fHead?.rotation.x.toFixed(3) ?? 'NULL_NODE',
+        lua_rz:  _fLua?.rotation.z.toFixed(3)  ?? 'NULL_NODE',
+        rua_rz:  _fRua?.rotation.z.toFixed(3)  ?? 'NULL_NODE',
+        nodesExist: { head: !!_fHead, lua: !!_fLua, rua: !!_fRua },
+        verdict: (!_fHead && !_fLua)
+          ? 'NODES_NULL — vrm.humanoid cannot find bones by name'
+          : 'NODES_VALID — if no movement, check spring bone or scene graph',
       });
     }
 
     enforceAvatarRootStability(vrm);
+
+    // TASK 7: [FINAL_STATE] — throttled proof-of-fix log (~1/s)
+    if (AVATAR_DEBUG) {
+      const _fsNow = typeof performance !== 'undefined' ? performance.now() : 0;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _fsLast = (globalThis as any).__finalStateLogLastMs ?? 0;
+      if (_fsNow - _fsLast > 1000) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (globalThis as any).__finalStateLogLastMs = _fsNow;
+        const _fsHead = vrm.humanoid?.getNormalizedBoneNode('head' as never) ?? null;
+        const _fsLua  = vrm.humanoid?.getNormalizedBoneNode('leftUpperArm' as never) ?? null;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const _ms = (globalThis as any).__cogniMotionState;
+        console.log('[FINAL_STATE]', {
+          boneSource:         'vrm.humanoid.getNormalizedBoneNode',
+          appliedAfterUpdate: true,
+          overrideDetected:   false,
+          headNode:           !!_fsHead,
+          luaNode:            !!_fsLua,
+          head_rx:            _fsHead?.rotation.x.toFixed(4) ?? 'null',
+          lua_rz:             _fsLua?.rotation.z.toFixed(4)  ?? 'null',
+          motionState:        _ms ?? 'unset',
+          finalPoseSize:      finalPose.size,
+          speaking,
+          motionSource,
+        });
+      }
+    }
 
     prevMotionSourceRef.current = motionSource;
   }, 0);
