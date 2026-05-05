@@ -1260,13 +1260,27 @@ const _guardStats = {
 
 /** Effective-zero threshold for motion scalars (avoids float-noise false negatives). */
 const _MOTION_EPS = 0.0005;
-/** Minimum head/arm motion injected when speaking-but-zero is detected. */
-const _GUARD_FLOOR = 0.05;
-/** Settling-phase floor so head/arm never collapses to a flat zero mid-transition. */
-const _SETTLING_FLOOR = 0.03;
 
 function _energy(m: { headNod: number; openGesture: number }): number {
   return Math.abs(m.headNod) + Math.abs(m.openGesture);
+}
+
+/** Linear interpolation of a clamp floor based on intensity (0..1). */
+function _dynamicFloor(intensity01: number, lo: number, hi: number): number {
+  const i = Math.max(0, Math.min(1, intensity01));
+  return lo + (hi - lo) * i;
+}
+
+/**
+ * Smooth two-octave sinusoidal noise in ~[0.9, 1.1].
+ * Avoids per-frame rng jitter (which would buzz the rig); coupled to monotonic clock so
+ * head and arm channels can be desynchronised by `phaseOffset`.
+ */
+function _variationMul(now: number, phaseOffset: number): number {
+  const a = Math.sin(now * 0.0023 + phaseOffset);
+  const b = Math.sin(now * 0.0037 + phaseOffset + 1.7);
+  const n = (a + b) * 0.5;
+  return 1 + 0.1 * n;
 }
 
 /**

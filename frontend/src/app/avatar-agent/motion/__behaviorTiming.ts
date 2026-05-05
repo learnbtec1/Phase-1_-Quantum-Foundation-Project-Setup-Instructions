@@ -75,6 +75,10 @@ export function computeTimingState(input: TimingInput): TimingState {
 
 /**
  * Multiplicative timing envelope on motion scalars only (after behavior engine).
+ *
+ * `anticipation` is a **leading ramp** — strongest at the start of the phase, easing back to 1.0
+ * by the time the phase machine flips to `speaking`. This reads as "gesture begins before speech".
+ * `settling` is a smoothstep falloff that never zeroes (caller applies a residual floor).
  */
 export function applyTimingToMotion(
   motion: { headNod: number; headTilt: number; openGesture: number },
@@ -84,11 +88,15 @@ export function applyTimingToMotion(
   switch (timing.phase) {
     case 'idle':
       break;
-    case 'anticipation':
-      motion.headNod *= 1.12;
-      motion.headTilt *= 1.06;
-      motion.openGesture *= 1.06;
+    case 'anticipation': {
+      const dur = timing.duration > 0 ? timing.duration : 1;
+      const t = Math.min(1, Math.max(0, (now - timing.phaseStart) / dur));
+      const lead = 1 - _smoothstep(t);
+      motion.headNod *= 1 + 0.22 * lead;
+      motion.headTilt *= 1 + 0.12 * lead;
+      motion.openGesture *= 1 + 0.18 * lead;
       break;
+    }
     case 'speaking':
       break;
     case 'settling': {
