@@ -1296,23 +1296,18 @@ export function useAgentAgent({
           console.log('[TTS_TRIGGER]', dialogue);
           // ── SILENT-SPEAK FALLBACK ──────────────────────────────────────────
           // Even if HTTP TTS is about to fail (no key, blocked Edge, etc.),
-          // dispatch avatar:speak NOW so the avatar moves in sync with the
-          // estimated dialogue duration. The audio (if it arrives) will
-          // overlay later. This prevents a fully-frozen avatar on TTS failure.
+          // fire avatar:speak:start NOW so the avatar moves in sync with the
+          // estimated dialogue duration. avatar:speak:end auto-fires when the
+          // estimated duration elapses. If real audio later arrives, the
+          // analyser-driven RMS overlays naturally on top.
           if (typeof window !== 'undefined') {
             const _silentDur = estimateDialogueDurationMs(dialogue);
             setSpeechIntentHintsFromText(dialogue);
             setSpeechEmotionBridge({ emotion: emotionLabel, intensity: 0.55 });
+            // Fire the events that AvatarCanvas/LipSyncManager actually listen to.
             window.dispatchEvent(
-              new CustomEvent('avatar:speak', {
-                detail: {
-                  text: dialogue,
-                  timings: wcForPerf ?? [],
-                  sampleRate: 24000,
-                  audio: undefined,
-                  durationMs: _silentDur,
-                  silent: true,
-                },
+              new CustomEvent('avatar:speak:start', {
+                detail: { text: dialogue, durationMs: _silentDur, silent: true },
               }),
             );
             console.log('[AVATAR_SILENT_SPEAK]', { dialogue: dialogue.slice(0, 60), durationMs: _silentDur });

@@ -79,10 +79,11 @@ export function applyIdleMicroPresence(
    * but scale down by the current intent timing weight so idle stays quiet
    * while a gesture is active.
    */
+  // Rebalanced: gesture still wins when active (0.8 reduction) but idle micro-motion
+  // is never fully killed — subtle breathing/sway always visible under gestures.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const _intentW = Math.min(1, Math.max(0, (globalThis as any).__intentAttenuation ?? 0));
-  // Cinematic dominance: hard cut idle to 5% when gesture is clearly active.
-  const gestureAtten = _intentW > 0.4 ? 0.05 : 1 - _intentW * 0.95;
+  const gestureAtten = 1 - _intentW * 0.8;
 
   const brain = getBehaviorMotionState();
   const now = masterClockNowMs();

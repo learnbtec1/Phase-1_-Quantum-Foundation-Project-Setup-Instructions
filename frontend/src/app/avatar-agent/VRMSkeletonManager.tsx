@@ -55,6 +55,7 @@ import {
   setBoneAxisMap,
 } from './motion/biomechanicalCorrectionLayer';
 import { applyFingerMicroLayer } from './motion/fingerMicroLayer';
+import { applyHumanMicroBehavior } from './motion/humanMicroBehavior';
 import { applyGazeIntentLayer } from './motion/gazeIntentLayer';
 import { tickGestureTiming, getGestureTimingSnapshot } from './motion/gestureTiming';
 import { detectIntent, detectIntentDetailed } from './motion/intentClassifier';
@@ -1296,6 +1297,40 @@ export function VRMSkeletonManager({
   /** Failsafe: no embodiment pulse > ~2s — inject micro motion (throttled). */
   const lastEmbodimentFailsafeAtMsRef = useRef(0);
 
+  // ── HARD-LINK: avatar:speak:start/:end → localSpeakingRef ─────────────────
+  // Defense-in-depth: even if isTalkingRef (parent-managed) does not update for
+  // any reason (race conditions, missing parent listener), we keep our own
+  // local mirror updated directly from window events.  Speaking source used
+  // for energy injection = isTalkingRef.current || localSpeakingRef.current
+  const localSpeakingRef = useRef(false);
+  const localSpeakingUntilMsRef = useRef(0);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onStart = (e: Event): void => {
+      localSpeakingRef.current = true;
+      const detail = (e as CustomEvent<{ durationMs?: number }>).detail;
+      if (detail?.durationMs && Number.isFinite(detail.durationMs)) {
+        localSpeakingUntilMsRef.current =
+          (typeof performance !== 'undefined' ? performance.now() : Date.now()) +
+          detail.durationMs + 250;
+      } else {
+        localSpeakingUntilMsRef.current = 0;
+      }
+      console.log('[SPEAKING_STATE]', { speaking: true, source: 'avatar:speak:start' });
+    };
+    const onEnd = (): void => {
+      localSpeakingRef.current = false;
+      localSpeakingUntilMsRef.current = 0;
+      console.log('[SPEAKING_STATE]', { speaking: false, source: 'avatar:speak:end' });
+    };
+    window.addEventListener('avatar:speak:start', onStart as EventListener);
+    window.addEventListener('avatar:speak:end',   onEnd);
+    return () => {
+      window.removeEventListener('avatar:speak:start', onStart as EventListener);
+      window.removeEventListener('avatar:speak:end',   onEnd);
+    };
+  }, []);
+
   // ── avatar:headpose override (AgentDirector._handleUserSpeaking, etc.) ──────
   /** Persistent gentle head yaw/pitch override; decays back to 0 after durationMs */
   const headposeYawRef   = useRef(0);
@@ -2150,7 +2185,21 @@ export function VRMSkeletonManager({
       return;
     }
 
-    const speaking = isTalkingRef.current;
+    // ── Speaking source: parent-managed ref OR local event-driven ref ─────────
+    // The local ref keeps speaking=true for the dispatched `durationMs` even if
+    // the parent never flips isTalkingRef (e.g. silent-speak fallback path).
+    const _localSpeakActive =
+      localSpeakingRef.current &&
+      (localSpeakingUntilMsRef.current === 0 ||
+       (typeof performance !== 'undefined' ? performance.now() : Date.now()) <
+         localSpeakingUntilMsRef.current);
+    if (localSpeakingRef.current && !_localSpeakActive) {
+      // Auto-clear when our internal duration expired (failsafe in case
+      // `avatar:speak:end` was dropped).
+      localSpeakingRef.current = false;
+      localSpeakingUntilMsRef.current = 0;
+    }
+    const speaking = isTalkingRef.current || _localSpeakActive;
     const listening = isListeningRef?.current ?? false;
     const thinking  = isThinkingRef?.current  ?? false;
     const motorMul = motorSpeedMulRef?.current ?? 1;
@@ -2177,28 +2226,55 @@ export function VRMSkeletonManager({
     const localAxisCalibActive =
       localAxisCalibElapsedMs >= 0 && localAxisCalibElapsedMs < LOCAL_AXIS_CALIB_DURATION_MS;
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PIPER → ENERGY PIPELINE (Tasks 1–7)
+    //   Task 1: HTMLAudioElement → analyser via wireAnalyser() in AvatarCanvas
+    //   Task 2: createMediaElementSource + createAnalyser (fftSize=512)
+    //   Task 3: getByteTimeDomainData → RMS in readAnalyserRms01()
+    //   Task 4: Normalized * 2.85 + clamp01 (in extractor)
+    //   Task 5: audioRms01 → tickUnifiedEnergy (below)
+    //   Task 6: Silent-speak + emergency fallback (sine pulse)
+    //   Task 7: [PIPER_RMS] debug log every ~250ms while speaking
+    // ═══════════════════════════════════════════════════════════════════════════
     const analyserNode = analyserRef?.current ?? null;
     let audioRms01 = 0;
-    let audioRmsSource: 'analyser' | 'emergency' | 'silent-speak' | 'silent' = 'silent';
-    // Read RMS any time the analyser exists (not only when speaking) so energy
-    // updates the moment audio begins, before the `speaking` flag propagates.
+    let audioRmsSource: 'analyser' | 'emergency' | 'silent-speak' | 'safety-guard' | 'silent' = 'silent';
     if (analyserNode) {
       audioRms01 = readAnalyserRms01(analyserNode, timeDomainBufRef);
       audioRmsSource = 'analyser';
-      // Silent-speak boost: if analyser exists but RMS is essentially zero AND
-      // we're speaking → TTS audio likely failed to play. Inject pseudo-energy
-      // so motion still happens. Sine wave at ~1.5 Hz gives natural amplitude.
       if (speaking && audioRms01 < 0.02) {
-        const _t = (typeof performance !== 'undefined' ? performance.now() : 0) * 0.0015;
-        audioRms01 = 0.35 + Math.abs(Math.sin(_t)) * 0.25;
+        const _t = (typeof performance !== 'undefined' ? performance.now() : 0) * 0.002;
+        audioRms01 = 0.35 + Math.abs(Math.sin(_t)) * 0.35;
         audioRmsSource = 'silent-speak';
       }
     } else if (speaking) {
-      // Emergency fallback: <audio> not wired to analyser yet. Use a dynamic
-      // sine pulse instead of a flat constant so the avatar doesn't look frozen.
-      const _t = (typeof performance !== 'undefined' ? performance.now() : 0) * 0.0015;
-      audioRms01 = 0.30 + Math.abs(Math.sin(_t)) * 0.30;
+      const _t = (typeof performance !== 'undefined' ? performance.now() : 0) * 0.002;
+      audioRms01 = 0.35 + Math.abs(Math.sin(_t)) * 0.35;
       audioRmsSource = 'emergency';
+    }
+    // ── TASK 3: Safety guard — speaking MUST always produce non-zero energy ──
+    // If speaking flipped true between branches (race), or any branch returned 0,
+    // force a baseline so motion never freezes mid-utterance.
+    if (audioRms01 === 0 && speaking) {
+      audioRms01 = 0.40;
+      audioRmsSource = 'safety-guard';
+    }
+    // ── TASK 4: [PIPER_RMS] + [FINAL_RMS] debug log (throttled 250 ms) ─────────
+    if (speaking && typeof performance !== 'undefined') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _piperLast = (globalThis as any).__piperRmsLogLastMs ?? 0;
+      const _piperNow  = performance.now();
+      if (_piperNow - _piperLast > 250) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (globalThis as any).__piperRmsLogLastMs = _piperNow;
+        console.log('[PIPER_RMS]', {
+          rms:           Number(audioRms01.toFixed(3)),
+          source:        audioRmsSource,
+          analyserWired: !!analyserNode,
+          speaking,
+        });
+        console.log('[FINAL_RMS]', Number(audioRms01.toFixed(3)));
+      }
     }
     const brainSnap = useBrainStore.getState();
     const gf = getGlobalFrame();
@@ -2213,7 +2289,46 @@ export function VRMSkeletonManager({
       speaking,
       delta: safeDelta,
     });
-    patchSpeechEmotionEnergy(getSmoothedUnifiedEnergy());
+    const _unifiedNow = getSmoothedUnifiedEnergy();
+    patchSpeechEmotionEnergy(_unifiedNow);
+
+    // ── [ENERGY_FLOW] — always-on throttled probe (250ms) ─────────────────────
+    // Captures the exact values that drive motion so we can verify the
+    // audioRms01 → tickUnifiedEnergy → getSmoothedUnifiedEnergy chain.
+    if (typeof performance !== 'undefined') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _efLast = (globalThis as any).__energyFlowLogLastMs ?? 0;
+      const _efNow  = performance.now();
+      if (_efNow - _efLast > 250) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (globalThis as any).__energyFlowLogLastMs = _efNow;
+        // Accumulate a rolling 4-sample window so we can answer
+        // "is unifiedEnergy changing over time?" in one console entry.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const _win: number[] = (globalThis as any).__energyFlowWindow ?? [];
+        _win.push(+_unifiedNow.toFixed(3));
+        if (_win.length > 4) _win.shift();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (globalThis as any).__energyFlowWindow = _win;
+        const _minW  = Math.min(..._win);
+        const _maxW  = Math.max(..._win);
+        const _changing = (_maxW - _minW) > 0.02;
+        console.log('[ENERGY_FLOW]', {
+          audioRms01:    +audioRms01.toFixed(3),
+          speaking,
+          rmsSource:     audioRmsSource,
+          unifiedEnergy: +_unifiedNow.toFixed(3),
+          window4:       [..._win],
+          energyChanging: _changing,
+        });
+        if (!_changing && speaking) {
+          console.warn(
+            '[ENERGY_FLOW] ⚠️ unifiedEnergy is CONSTANT while speaking —',
+            'check tickUnifiedEnergy inputs or brainSnap.intentEnergy',
+          );
+        }
+      }
+    }
     const speechDriveSnap = getSpeechDriveSnapshot(speaking);
     if (speaking) {
       logDebugThrottledCallback('MOTION', 'motion-intensity', 800, () => {
@@ -4045,22 +4160,53 @@ export function VRMSkeletonManager({
         _motionState.headNod =
           _activeIntent === 'confirming' || _activeIntent === 'agreeing' ? 0.10 : 0;
 
-        // ── TASK 5 — motionState presence check (throttled, ~1/s) ─────────────
+        // ── SPEECH-RHYTHM BASELINE ─────────────────────────────────────────────
+        // When speaking with no specific intent all motionState values stay 0 →
+        // motion layers get no signal. Inject a gentle sin-wave headNod and a
+        // small openGesture so the avatar always has SOME motion while speaking.
+        // This does NOT override intent-classified values (they're higher).
+        if (speaking) {
+          const _tSpeech = (typeof performance !== 'undefined' ? performance.now() : 0) * 0.0012;
+          if (_motionState.headNod === 0) {
+            _motionState.headNod = Math.abs(Math.sin(_tSpeech)) * 0.12;
+          }
+          if (_motionState.openGesture === 0) {
+            _motionState.openGesture = 0.25 + Math.abs(Math.sin(_tSpeech * 0.7)) * 0.25;
+          }
+        }
+
+        // ── [PHASE_2] + [MOTION_STATE] log (throttled 250ms) ─────────────────
         if (typeof performance !== 'undefined') {
           const _msNow = performance.now();
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const _msLast = (globalThis as any).__motionStateLogLastMs ?? 0;
-          if (_msNow - _msLast > 1000) {
+          if (_msNow - _msLast > 250) {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             (globalThis as any).__motionStateLogLastMs = _msNow;
+            const _allZero =
+              _motionState.headNod === 0 &&
+              _motionState.headTilt === 0 &&
+              _motionState.openGesture === 0;
             console.log('[MOTION_STATE]', {
-              openGesture:  _motionState.openGesture,
-              headTilt:     _motionState.headTilt,
-              headNod:      _motionState.headNod,
-              timingWeight: _timingWeight.toFixed(3),
+              openGesture:  +_motionState.openGesture.toFixed(4),
+              headTilt:     +_motionState.headTilt.toFixed(4),
+              headNod:      +_motionState.headNod.toFixed(4),
+              timingWeight: +_timingWeight.toFixed(3),
               activeIntent: _activeIntent || '(none)',
               speaking,
             });
+            console.log('[PHASE_2]', {
+              motionGenerated: !_allZero,
+              headNod:        +_motionState.headNod.toFixed(4),
+              headTilt:       +_motionState.headTilt.toFixed(4),
+              openGesture:    +_motionState.openGesture.toFixed(4),
+              intent:         _activeIntent || '(none)',
+              speaking,
+              note: _allZero ? 'ALL_ZERO — check intent classifier' : 'OK',
+            });
+            if (_allZero && !speaking) {
+              console.warn('[PHASE_2] ⚠️ motionState is all-zero (not speaking — normal)');
+            }
           }
         }
 
@@ -4072,6 +4218,49 @@ export function VRMSkeletonManager({
           _motionState.headTilt    = Math.cos(_ft6) * 0.2;
           _motionState.openGesture = 1.0;
           console.log('[FORCED_MOTION_STATE]', _motionState);
+        }
+
+        // ── MOTION VISIBILITY AMPLIFICATION + REBALANCED CLAMP ───────────────
+        // 3× amplification preserved; tighter clamps prevent extreme distortion
+        // while keeping motion clearly readable at normal viewing distance.
+        const _VIS_AMP = 3.0;
+        const _ampedMotionState = {
+          headNod:     Math.max(-0.3, Math.min(0.3,  _motionState.headNod     * _VIS_AMP)),
+          headTilt:    Math.max(-0.3, Math.min(0.3,  _motionState.headTilt    * _VIS_AMP)),
+          openGesture: Math.max(0,    Math.min(0.8,  _motionState.openGesture * _VIS_AMP)),
+        };
+
+        // ── [VISIBLE_MOTION] + [LAYER_BALANCE] logs (throttled 250ms) ──────────
+        if (typeof performance !== 'undefined') {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const _vmLast = (globalThis as any).__visMotionLogLastMs ?? 0;
+          const _vmNow  = performance.now();
+          if (_vmNow - _vmLast > 250) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (globalThis as any).__visMotionLogLastMs = _vmNow;
+            console.log('[VISIBLE_MOTION]', {
+              headNod:     +_ampedMotionState.headNod.toFixed(4),
+              headTilt:    +_ampedMotionState.headTilt.toFixed(4),
+              openGesture: +_ampedMotionState.openGesture.toFixed(4),
+              amp:         _VIS_AMP,
+              speaking,
+            });
+            // [LAYER_BALANCE] — shows how layers interplay this frame
+            const _intentW = Math.min(1, Math.max(0,
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (globalThis as any).__intentAttenuation ?? 0
+            ));
+            const _presenceMul = 1 - _intentW * 0.7;    // matches presenceLayer
+            const _idleMul     = 1 - _intentW * 0.8;    // matches idleMicroPresence
+            console.log('[LAYER_BALANCE]', {
+              intentW:    +_intentW.toFixed(3),
+              presenceMul: +_presenceMul.toFixed(3),
+              idleMul:     +_idleMul.toFixed(3),
+              intentDominant: _intentW > 0.5,
+              headNodClamped:    +_ampedMotionState.headNod.toFixed(4),
+              openGestureClamped: +_ampedMotionState.openGesture.toFixed(4),
+            });
+          }
         }
 
         // ── Capture bone rotations BEFORE intent apply ────────────────────
@@ -4107,7 +4296,7 @@ export function VRMSkeletonManager({
           : null;
 
         // ── Apply motionState onto finalPose bones (the missing connection) ──
-        const _applied = safeCall('intentMotion', () => applyIntentMotionState(finalPose, _motionState, _timingWeight, _activeIntent), { applied: false, headNod: 0, headTilt: 0, armOpen: 0 });
+        const _applied = safeCall('intentMotion', () => applyIntentMotionState(finalPose, _ampedMotionState, _timingWeight, _activeIntent), { applied: false, headNod: 0, headTilt: 0, armOpen: 0 });
 
         if (_shouldTrace) {
           const _afterIntent = {
@@ -4208,6 +4397,8 @@ export function VRMSkeletonManager({
         safeCall('neural',       () => applyNeuralLayer(finalPose, t, !!speaking, _timingWeight), undefined);
         safeCall('subconscious', () => applySubconsciousLayer(finalPose, t, _timingWeight, !!speaking), undefined);
 
+        // humanMicro is placed AFTER the inner block — always runs (moved below)
+
         // Throttled checkpoint log (~1/s)
         if (typeof performance !== 'undefined') {
           const _now = performance.now();
@@ -4241,6 +4432,23 @@ export function VRMSkeletonManager({
         }
         // ── End new motion layers ─────────────────────────────────────────────
       }
+
+      // ── HUMAN MICRO-BEHAVIOR: blink + breathing + saccades ──────────────────
+      // Runs ALWAYS — regardless of motionSource (VRMA, GESTURE, IDLE).
+      // Blink and breathing are biological constants, not animation-state-dependent.
+      safeCall('humanMicro', () => applyHumanMicroBehavior(
+        finalPose,
+        t,
+        safeDelta,
+        !!speaking,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (globalThis as any).__cogniMotionState?.activeIntent ?? '',
+        {
+          expressionManager: vrm.expressionManager
+            ? { setValue: (n: string, v: number) => vrm.expressionManager?.setValue(n as never, v) }
+            : undefined,
+        },
+      ), undefined);
 
       if (!isolateVrmaLayers) {
         safeCall('cinematic', () => applyCinematicMicroLayer(finalPose, safeDelta, t, {
@@ -4717,6 +4925,20 @@ export function VRMSkeletonManager({
           'FIX: move applyFinalPoseToVrm to run AFTER vrm.update(), or disable vrm.lookAt.',
         );
       }
+
+      // ── [PHASE_4] clean verdict ─────────────────────────────────────────────
+      console.log('[PHASE_4]', {
+        vrmOverride:    _headChanged || _luaChanged,
+        beforeHead_rx:  _headBefore,
+        afterHead_rx:   _headAfter,
+        headDelta:      _headBefore !== null && _headAfter !== null
+          ? +(_headAfter - _headBefore).toFixed(5)
+          : null,
+        verdict: (_headChanged || _luaChanged)
+          ? 'VRM_OVERRIDE_DETECTED — vrm.update()/lookAt resets head each frame'
+          : 'NO_OVERRIDE — head rotation stable across vrm.update()',
+        fix_applied: 'applyFinalPoseToVrm runs AFTER vrm.update() (see FINAL VRM MOTION FIX block)',
+      });
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -4726,15 +4948,66 @@ export function VRMSkeletonManager({
     // TASKS 1 & 2 (FIX): applyFinalPoseToVrm runs AFTER vrm.update().
     // boneRefs is intentionally empty so every bone resolves fresh from
     // vrm.humanoid.getNormalizedBoneNode() — no stale cached refs.
+
+    // ── [PHASE_3] [FINAL_POSE_BEFORE] snapshot (throttled 250ms) ─────────────
+    const _fp3Now  = typeof performance !== 'undefined' ? performance.now() : 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const _fp3Last = (globalThis as any).__fp3LogLastMs ?? 0;
+    const _doFp3   = _fp3Now - _fp3Last > 250;
+    const _fp3ReadQ = (key: string): { x: number; y: number; z: number; w: number } | null => {
+      const q = finalPose.get(key);
+      if (!q) return null;
+      return { x: +q.x.toFixed(4), y: +q.y.toFixed(4), z: +q.z.toFixed(4), w: +q.w.toFixed(4) };
+    };
+    if (_doFp3) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).__fp3LogLastMs = _fp3Now;
+      const _before = { head: _fp3ReadQ('head'), neck: _fp3ReadQ('neck'), lua: _fp3ReadQ('lua'), rua: _fp3ReadQ('rua') };
+      console.log('[FINAL_POSE_BEFORE]', _before);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).__fp3Before = _before;
+    }
+
     safeCall('finalPoseToVrm', () => applyFinalPoseToVrm({
       finalPose,
       humanoid: vrm.humanoid ?? null,
       kinematicSnapKeys,
-      smoothLambda: 8,
-      maxRotationPerFrameRad: 0.35,
+      smoothLambda: 4,             // Task 2: was 8 — faster convergence, crisper response
+      maxRotationPerFrameRad: 0.5, // Task 3: was 0.35 — bigger per-frame step
       boneRefs: {},          // ← always resolves live from vrm.humanoid
       delta: safeDelta,
     }), undefined);
+
+    // ── [FINAL_POSE_AFTER] + [PHASE_3] verdict ─────────────────────────────────
+    if (_doFp3) {
+      const _after = { head: _fp3ReadQ('head'), neck: _fp3ReadQ('neck'), lua: _fp3ReadQ('lua'), rua: _fp3ReadQ('rua') };
+      console.log('[FINAL_POSE_AFTER]', _after);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _before = (globalThis as any).__fp3Before as typeof _after;
+      const _qDiff = (a: typeof _after['head'], b: typeof _after['head']) => {
+        if (!a || !b) return 0;
+        return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(a.z - b.z);
+      };
+      const _headDiff = _qDiff(_before?.head ?? null, _after.head);
+      const _luaDiff  = _qDiff(_before?.lua  ?? null, _after.lua);
+      const _poseChanging = (_headDiff + _luaDiff) > 0.001;
+      console.log('[PHASE_3]', {
+        poseChanging:  _poseChanging,
+        headQuatDiff:  +_headDiff.toFixed(5),
+        luaQuatDiff:   +_luaDiff.toFixed(5),
+        finalPoseSize: finalPose.size,
+        headBefore:    _before?.head,
+        headAfter:     _after.head,
+        note: !_after.head
+          ? 'HEAD_KEY_MISSING — finalPose has no "head" key'
+          : _poseChanging
+            ? 'OK — pose is updating each frame'
+            : 'STATIC — applyFinalPoseToVrm not changing head quat (slerp may already be at target)',
+      });
+      if (!_after.head) {
+        console.warn('[PHASE_3] ⚠️ finalPose.get("head") is null — check blendPoseLayers and bindRef population');
+      }
+    }
 
     // TASK 2 (FIX): Re-propagate normalized → raw AFTER our writes.
     // vrm.humanoid.update() reads normalized bone quaternions and writes to
@@ -4760,11 +5033,12 @@ export function VRMSkeletonManager({
           const _lNode = vrm.humanoid.getNormalizedBoneNode('leftUpperArm' as never);
           const _rNode = vrm.humanoid.getNormalizedBoneNode('rightUpperArm' as never);
           const _nNode = vrm.humanoid.getNormalizedBoneNode('neck' as never);
-          if (_hNode && _ms.headNod)   _hNode.rotation.x += _ms.headNod;
-          if (_hNode && _ms.headTilt)  _hNode.rotation.z += _ms.headTilt;
-          if (_nNode && _ms.headNod)   _nNode.rotation.x += _ms.headNod * 0.3;
-          if (_lNode && _ms.openGesture) _lNode.rotation.z += _ms.openGesture * 0.45;
-          if (_rNode && _ms.openGesture) _rNode.rotation.z -= _ms.openGesture * 0.45;
+          const _postAmp = 3.0;
+          if (_hNode && _ms.headNod)     _hNode.rotation.x += _ms.headNod   * _postAmp;
+          if (_hNode && _ms.headTilt)    _hNode.rotation.z += _ms.headTilt  * _postAmp;
+          if (_nNode && _ms.headNod)     _nNode.rotation.x += _ms.headNod   * _postAmp * 0.3;
+          if (_lNode && _ms.openGesture) _lNode.rotation.z += _ms.openGesture * _postAmp * 0.45;
+          if (_rNode && _ms.openGesture) _rNode.rotation.z -= _ms.openGesture * _postAmp * 0.45;
           // Re-propagate after delta writes
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           (vrm.humanoid as any).update?.();
@@ -4828,6 +5102,81 @@ export function VRMSkeletonManager({
           speaking,
           motionSource,
         });
+      }
+    }
+
+    // ── [PHASE_5] [BONE_CHECK] — bone reference validity (throttled 1s) ─────
+    if (typeof performance !== 'undefined') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _p5Last = (globalThis as any).__phase5LogLastMs ?? 0;
+      const _p5Now  = performance.now();
+      if (_p5Now - _p5Last > 1000) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (globalThis as any).__phase5LogLastMs = _p5Now;
+
+        // Resolve fresh every check — same call used by applyFinalPoseToVrm.
+        const _p5Head = vrm.humanoid?.getNormalizedBoneNode('head'         as never) ?? null;
+        const _p5Neck = vrm.humanoid?.getNormalizedBoneNode('neck'         as never) ?? null;
+        const _p5Lua  = vrm.humanoid?.getNormalizedBoneNode('leftUpperArm' as never) ?? null;
+        const _p5Rua  = vrm.humanoid?.getNormalizedBoneNode('rightUpperArm' as never) ?? null;
+
+        // Identity check: same object ref across frames?
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const _prevHead = (globalThis as any).__phase5PrevHead;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const _prevLua  = (globalThis as any).__phase5PrevLua;
+        const _sameHead = _prevHead !== undefined ? (_prevHead === _p5Head) : null;
+        const _sameLua  = _prevLua  !== undefined ? (_prevLua  === _p5Lua)  : null;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (globalThis as any).__phase5PrevHead = _p5Head;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (globalThis as any).__phase5PrevLua  = _p5Lua;
+
+        const _validBone = !!_p5Head && !!_p5Lua;
+
+        console.log('[BONE_CHECK]', {
+          head: _p5Head ? {
+            rx: +_p5Head.rotation.x.toFixed(4),
+            ry: +_p5Head.rotation.y.toFixed(4),
+            rz: +_p5Head.rotation.z.toFixed(4),
+            name: _p5Head.name,
+          } : null,
+          neck: _p5Neck ? { rx: +_p5Neck.rotation.x.toFixed(4), name: _p5Neck.name } : null,
+          lua:  _p5Lua  ? { rz: +_p5Lua.rotation.z.toFixed(4),  name: _p5Lua.name  } : null,
+          rua:  _p5Rua  ? { rz: +_p5Rua.rotation.z.toFixed(4),  name: _p5Rua.name  } : null,
+        });
+
+        console.log('[PHASE_5]', {
+          validBone:       _validBone,
+          headNode:        !!_p5Head,
+          luaNode:         !!_p5Lua,
+          headName:        _p5Head?.name ?? 'NOT_FOUND',
+          luaName:         _p5Lua?.name  ?? 'NOT_FOUND',
+          sameRefAcrossFrames: { head: _sameHead, lua: _sameLua },
+          headRotation:   _p5Head ? {
+            x: +_p5Head.rotation.x.toFixed(4),
+            y: +_p5Head.rotation.y.toFixed(4),
+            z: +_p5Head.rotation.z.toFixed(4),
+          } : null,
+          verdict: !_p5Head
+            ? 'NULL_BONE — vrm.humanoid cannot resolve "head" — check VRM model humanoid spec'
+            : (_sameHead === false)
+              ? 'UNSTABLE_REF — bone object identity changed between frames (VRM reload?)'
+              : 'OK — bone node valid and stable',
+        });
+
+        if (!_validBone) {
+          console.error(
+            '[PHASE_5] ❌ Bone node is NULL.',
+            'head:', !!_p5Head, '| lua:', !!_p5Lua,
+            '— humanoid bones not resolving. Check [AVATAR_AUDIT:BONES] output.',
+          );
+        } else if (_sameHead === false) {
+          console.warn(
+            '[PHASE_5] ⚠️ Bone ref changed identity between frames.',
+            'VRM may have been re-loaded mid-session.',
+          );
+        }
       }
     }
 

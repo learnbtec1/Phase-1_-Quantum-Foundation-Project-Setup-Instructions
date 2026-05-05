@@ -96,14 +96,11 @@ export function applyContinuousPresenceToFinalPose(
     : opts.behaviorMode === 'RESPONDING' ? 1.02
     : opts.behaviorMode === 'ANTICIPATING' ? 1.01
     : 1;
-  // Intent-driven attenuation: when a gesture timing weight is high,
-  // reduce presence down to 30% so intent shape dominates.
+  // Rebalanced: intent still attenuates presence so gesture shape dominates,
+  // but softer (0.7 not 0.9) so idle life stays visible underneath.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const _intentW = Math.min(1, Math.max(0, (globalThis as any).__intentAttenuation ?? 0));
-  // Cinematic dominance: when gesture is active (w > 0.4), slam presence to 10%.
-  const modePresMul = _intentW > 0.4
-    ? modePresMulBase * 0.1
-    : modePresMulBase * (1 - _intentW * 0.9);
+  const modePresMul = modePresMulBase * (1 - _intentW * 0.7);
 
   const n1 = noise3(t * 0.11, 1.7, 0.4);
   const n2 = noise3(0.3, t * 0.12, 0.55);
