@@ -1319,13 +1319,30 @@ export function mergeBehaviorEngineMotionScalars(
   const timing = computeTimingState({ speaking: opts.speaking, now });
   applyTimingToMotion(motion, timing, now);
 
+  // PART 2 — variation noise: keeps motion alive without robotic constancy.
+  const jitterHead = _variationMul(now, 0);
+  const jitterGesture = _variationMul(now, 1.3);
+  motion.headNod *= jitterHead;
+  motion.openGesture *= jitterGesture;
+
+  // PART 3 — speech-intensity link: above ~0.35 intent intensity, modestly amplify motion.
+  // Final clamp by `_VIS_AMP` block in VRMSkeletonManager prevents over-shoot.
+  const intensity01 = Math.max(0, Math.min(1, opts.intensity));
+  const speechBoost = 1 + 0.28 * Math.max(0, intensity01 - 0.35);
+  motion.headNod *= speechBoost;
+  motion.openGesture *= speechBoost;
+
+  // PART 1 — dynamic floors (lerp(0.02, 0.08, intensity) for guard; tighter for settling).
+  const settlingFloor = _dynamicFloor(intensity01, 0.015, 0.04);
+  const guardFloor = _dynamicFloor(intensity01, 0.02, 0.08);
+
   if (timing.phase === 'settling' && opts.speaking === false) {
-    if (Math.abs(motion.headNod) < _SETTLING_FLOOR) {
-      motion.headNod = motion.headNod >= 0 ? _SETTLING_FLOOR : -_SETTLING_FLOOR;
+    if (Math.abs(motion.headNod) < settlingFloor) {
+      motion.headNod = motion.headNod >= 0 ? settlingFloor : -settlingFloor;
       _guardStats.settlingClamped += 1;
     }
-    if (motion.openGesture < _SETTLING_FLOOR) {
-      motion.openGesture = _SETTLING_FLOOR;
+    if (motion.openGesture < settlingFloor) {
+      motion.openGesture = settlingFloor;
       _guardStats.settlingClamped += 1;
     }
   }
@@ -1335,12 +1352,12 @@ export function mergeBehaviorEngineMotionScalars(
 
   let guardApplied = false;
   if (opts.speaking && afterTimingEnergy <= _MOTION_EPS) {
-    motion.headNod = motion.headNod === 0 ? _GUARD_FLOOR : motion.headNod;
-    motion.openGesture = motion.openGesture === 0 ? _GUARD_FLOOR : motion.openGesture;
-    if (Math.abs(motion.headNod) < _GUARD_FLOOR) {
-      motion.headNod = motion.headNod >= 0 ? _GUARD_FLOOR : -_GUARD_FLOOR;
+    motion.headNod = motion.headNod === 0 ? guardFloor : motion.headNod;
+    motion.openGesture = motion.openGesture === 0 ? guardFloor : motion.openGesture;
+    if (Math.abs(motion.headNod) < guardFloor) {
+      motion.headNod = motion.headNod >= 0 ? guardFloor : -guardFloor;
     }
-    if (motion.openGesture < _GUARD_FLOOR) motion.openGesture = _GUARD_FLOOR;
+    if (motion.openGesture < guardFloor) motion.openGesture = guardFloor;
     guardApplied = true;
     _guardStats.guardApplied += 1;
   }
