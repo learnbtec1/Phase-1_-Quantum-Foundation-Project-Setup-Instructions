@@ -22,9 +22,12 @@ import { useBrainStore } from '@/store/useBrainStore';
 import { isMotionDiagEnabled } from '@/lib/avatar/motionDiagEnv';
 import { isProceduralOnlyMotion } from '@/lib/avatar/vrmaPlaybackPolicy';
 import { logDebug } from '@/lib/logging/runtimeLog';
+import { peekSpeechEnergy, getCouplingMode } from '@/app/avatar-agent/motion/__speechFusion';
 
 /** Throttle [MOTION_ALLOW] to once per 1500ms to avoid console flood. */
 let lastMotionAllowLogAt = 0;
+/** Throttle [COUPLING_STATE] to once per 750ms. */
+let lastCouplingStateLogAt = 0;
 
 type UnifiedMod = typeof import('@/ai/cognitive/UnifiedGestureEngine');
 let engineModPromise: Promise<UnifiedMod> | null = null;
@@ -176,11 +179,17 @@ async function schedulerTick(): Promise<void> {
   const { unifiedGestureEngine } = await loadGestureEngine();
 
   /** Emit [MOTION_ALLOW] at most once per 1500ms so it's visible without flooding. */
-  function logAllow(gesture: string): void {
+  function logAllow(gesture: string, modeOverride?: string): void {
     if (now - lastMotionAllowLogAt >= 1500) {
       lastMotionAllowLogAt = now;
       // eslint-disable-next-line no-console -- motion flow checkpoint (always-on, not gated)
-      console.log('[MOTION_ALLOW]', { gesture, mode, speaking, proceduralOnly: isProceduralOnlyMotion() });
+      console.log('[MOTION_ALLOW]', {
+        gesture,
+        mode: modeOverride ?? mode,
+        speaking,
+        proceduralOnly: isProceduralOnlyMotion(),
+        ...(modeOverride ? { speechBypass: true } : {}),
+      });
     }
     logDebug('MOTION', '[MOTION_SELECTED]', { primitive: gesture, mode, gesture, speaking });
   }
@@ -237,7 +246,44 @@ async function schedulerTick(): Promise<void> {
   // MIN_BETWEEN_SCHEDULER_PLAYS_MS (4 s); a second 80 % filter on top stacked
   // delays to 5-8 s and produced log spam without dispatch. Lowered to 50 %
   // so idle motion is still randomised but at a perceptually visible cadence.
-  if (mode === 'IDLE' && Math.random() > 0.5) {
+  //
+  // Speech bypass:
+  //   • If `getCouplingMode(speaking) === 'SPEAKING'` (i.e. speaking + energy > 0.2)
+  //     we promote the dispatch to `explain`, log mode='SPEAKING', and skip the random hold.
+  //   • Below the SPEAKING threshold but with weaker speech (energy > 0.1) we still
+  //     skip the random hold so `idle_shift` keeps firing during quiet utterances.
+  const speechEnergyForSched = speaking ? peekSpeechEnergy() : 0;
+  const couplingMode = getCouplingMode(speaking);
+  const speechIsActive = couplingMode === 'SPEAKING';
+  const speechBypassesIdleSkip =
+    speaking && (orch.speaking === true || speechEnergyForSched > 0.1);
+
+  // Throttled [COUPLING_STATE] log — once per ~750 ms.
+  if (now - lastCouplingStateLogAt >= 750) {
+    lastCouplingStateLogAt = now;
+    // eslint-disable-next-line no-console -- motion-flow checkpoint
+    console.log('[COUPLING_STATE]', {
+      energy:         +speechEnergyForSched.toFixed(3),
+      speaking,
+      mode:           speechIsActive ? 'SPEAKING' : mode,
+      proceduralOnly: isProceduralOnlyMotion(),
+      bypass:         speechIsActive,
+    });
+  }
+
+  if (mode === 'IDLE' && speechIsActive) {
+    // Promote IDLE → SPEAKING dispatch: fire `explain` instead of `idle_shift`.
+    lastSchedulerPlayAt = now;
+    logAllow('explain', 'SPEAKING');
+    void unifiedGestureEngine.play('explain', {
+      priority: PRIORITY.LOW,
+      humanTiming: false,
+      behaviorBrain: false,
+    });
+    return;
+  }
+
+  if (mode === 'IDLE' && !speechBypassesIdleSkip && Math.random() > 0.5) {
     if (isAvatarMotionTraceOn() && now - lastTraceSched6LogAt >= 5000) {
       lastTraceSched6LogAt = now;
       motionTraceStopAtGuard('sched-6', 'IDLE mode random hold (50% skip idle_shift)', {});

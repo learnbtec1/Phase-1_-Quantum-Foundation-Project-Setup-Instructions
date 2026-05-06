@@ -19,6 +19,149 @@ const _qOut = new THREE.Quaternion();
 const _eulerRead = new THREE.Euler(0, 0, 0, 'YXZ');
 const _qRead = new THREE.Quaternion();
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  SWING-TWIST ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+//  A rotation can be decomposed into two parts:
+//    Swing  — the component that moves the bone perpendicular to the twist axis
+//             (lifting / lowering the arm, pointing forward/sideways).
+//    Twist  — the component that spins the bone around its own length axis
+//             (forearm supination / pronation — generally not what we want when
+//             driving "openGesture" or intent motion).
+//
+//  Applying only the Swing component eliminates the twisting artefact that
+//  causes arm collapse, V-pose, and unnatural bone distortion.
+//
+//  Twist axis convention (VRM 1.0 normalized humanoid):
+//    Upper arm  → local +X  (shoulder → elbow direction)
+//    Lower arm  → local +X  (elbow → wrist direction)
+//    Default    → local +X
+//
+//  All scratch objects are module-scope to avoid per-frame GC.
+
+// Scratch — used only inside swingTwistDecompose, never held across calls.
+const _ST_R    = new THREE.Vector3();
+const _ST_PROJ = new THREE.Vector3();
+const _ST_TWIST_Q = new THREE.Quaternion();
+const _ST_SWING_Q = new THREE.Quaternion();
+const _ST_INV     = new THREE.Quaternion();
+
+/**
+ * Decompose quaternion `q` into Swing and Twist around `twistAxis`.
+ *
+ * Returns new quaternion objects (does not mutate `q`).
+ * The relationship holds: q = swing * twist.
+ *
+ * Algorithm (Dobrowolski 2012):
+ *   r    = vector part of q
+ *   proj = project r onto twistAxis
+ *   twist = normalize( Quaternion(proj, q.w) )
+ *   swing = q * twist⁻¹
+ */
+export function swingTwistDecompose(
+  q: THREE.Quaternion,
+  twistAxis: THREE.Vector3,
+): { swing: THREE.Quaternion; twist: THREE.Quaternion } {
+  _ST_R.set(q.x, q.y, q.z);
+
+  // Project vector part onto twist axis.
+  _ST_PROJ.copy(twistAxis).multiplyScalar(_ST_R.dot(twistAxis));
+
+  // Build and normalise twist quaternion.
+  _ST_TWIST_Q.set(_ST_PROJ.x, _ST_PROJ.y, _ST_PROJ.z, q.w);
+  const twistLen = Math.sqrt(
+    _ST_TWIST_Q.x * _ST_TWIST_Q.x +
+    _ST_TWIST_Q.y * _ST_TWIST_Q.y +
+    _ST_TWIST_Q.z * _ST_TWIST_Q.z +
+    _ST_TWIST_Q.w * _ST_TWIST_Q.w,
+  );
+  if (twistLen > 1e-10) {
+    _ST_TWIST_Q.x /= twistLen;
+    _ST_TWIST_Q.y /= twistLen;
+    _ST_TWIST_Q.z /= twistLen;
+    _ST_TWIST_Q.w /= twistLen;
+  } else {
+    // Quaternion is near identity — twist is identity.
+    _ST_TWIST_Q.set(0, 0, 0, 1);
+  }
+
+  // Swing = q * twist⁻¹.
+  _ST_INV.copy(_ST_TWIST_Q).invert();
+  _ST_SWING_Q.copy(q).multiply(_ST_INV);
+
+  return {
+    swing: _ST_SWING_Q.clone(),
+    twist: _ST_TWIST_Q.clone(),
+  };
+}
+
+/**
+ * Canonical twist (bone-length) axes per BONE_AXIS_MAP key.
+ * Upper / lower arms use local +X (shoulder→elbow / elbow→wrist).
+ */
+const BONE_TWIST_AXES: Record<string, THREE.Vector3> = {
+  lua:           new THREE.Vector3(1, 0, 0),
+  rua:           new THREE.Vector3(1, 0, 0),
+  lla:           new THREE.Vector3(1, 0, 0),
+  rla:           new THREE.Vector3(1, 0, 0),
+  lh:            new THREE.Vector3(1, 0, 0),
+  rh:            new THREE.Vector3(1, 0, 0),
+  leftShoulder:  new THREE.Vector3(1, 0, 0),
+  rightShoulder: new THREE.Vector3(1, 0, 0),
+};
+
+/** Default fallback twist axis when the bone key has no explicit entry. */
+const _DEFAULT_TWIST_AXIS = new THREE.Vector3(1, 0, 0);
+
+/**
+ * Multiply-onto-pose using swing-only rotation for arm/shoulder bones.
+ * Identical API to the internal `mulBone` but strips twist before writing.
+ *
+ * The delta rotation is applied, then the combined quaternion is decomposed
+ * and only the swing component is written back, preventing axial spin.
+ */
+function mulBoneSwingOnly(
+  pose: BonePoseMap,
+  key: string,
+  rx: number,
+  ry: number,
+  rz: number,
+): void {
+  if (isPoseKeyProcedurallySuppressed(key)) return;
+  const q = pose.get(key);
+  if (!q) { warnMissing(key); return; }
+
+  // Build delta, combine.
+  _e.set(rx, ry, rz, 'YXZ');
+  _qDelta.setFromEuler(_e);
+  _qOut.copy(q).multiply(_qDelta);
+
+  // Decompose and keep only swing.
+  const twistAxis = BONE_TWIST_AXES[key] ?? _DEFAULT_TWIST_AXIS;
+  const { swing } = swingTwistDecompose(_qOut, twistAxis);
+  pose.set(key, swing);
+}
+
+/**
+ * Apply a swing-only absolute rotation to a live VRM bone node.
+ * Replaces `bone.quaternion.setFromEuler(e)` with twist-free equivalent.
+ *
+ * @param bone       Normalized VRM bone node.
+ * @param euler      Target rotation as Euler (absolute, not delta).
+ * @param boneKey    Key into BONE_TWIST_AXES ('lua' | 'rua' etc.)
+ */
+export function applySwingOnlyRotation(
+  bone: THREE.Object3D,
+  euler: THREE.Euler,
+  boneKey = '',
+): void {
+  _qOut.setFromEuler(euler);
+  const twistAxis = BONE_TWIST_AXES[boneKey] ?? _DEFAULT_TWIST_AXIS;
+  const { swing } = swingTwistDecompose(_qOut, twistAxis);
+  bone.quaternion.copy(swing);
+}
+
 // ─── Dev-only missing key warning (silenced in production) ────────────────────
 const _warnedKeys = new Set<string>();
 function warnMissing(key: string): void {
@@ -194,6 +337,8 @@ export function applyNeuralLayer(
   clampBoneAxis(pose, 'hips',  0.15);
   clampBoneAxis(pose, 'lua',   CLAMP_ARM);
   clampBoneAxis(pose, 'rua',   CLAMP_ARM);
+  clampUpperArmAntiVPose(pose, 'lua');
+  clampUpperArmAntiVPose(pose, 'rua');
 
   // Throttled debug (~1/s)
   if (nowMs - _neural.lastDebugMs > 1000) {
@@ -404,7 +549,347 @@ export function setBoneAxisMap(override: Partial<typeof BONE_AXIS_MAP>): void {
   console.log('[AXIS_MAP_OVERRIDE]', BONE_AXIS_MAP);
 }
 
-/** Single-axis, sign-aware quaternion multiply. */
+// ─── Arm Axis Detector ────────────────────────────────────────────────────────
+//
+// Probes each local Euler axis (X, Y, Z) by temporarily applying a test rotation
+// and measuring where the bone's children end up in world space vs the baseline.
+// The axis whose positive rotation raises the averaged child centroid most in
+// world Y is the "lift axis".
+//
+// Safety rules:
+//   • Original quaternion is always restored (try/finally).
+//   • Only reads world positions — no bones modified permanently.
+//   • Never runs per-frame — call on VRM load only.
+//
+// Returns a full `ArmAxisResult` per bone, and optionally patches `BONE_AXIS_MAP`
+// and writes through to `localStorage` for persistence across reloads.
+
+const _DA_TEST_ANGLE   = 0.35;  // rad — enough signal, small enough to be invisible
+/** Base key — model-specific suffix appended by helpers. Do NOT use directly. */
+const _AXIS_MAP_BASE_KEY = 'cogni_arm_axis_map_v1';
+
+const _DA_Q_SAVE  = new THREE.Quaternion();
+const _DA_Q_TEST  = new THREE.Quaternion();
+const _DA_E_PROBE = new THREE.Euler(0, 0, 0, 'XYZ');
+const _DA_W_TEST  = new THREE.Vector3();
+
+export type ArmAxisResult = {
+  boneName:    string;
+  liftAxis:    AxisKey;
+  liftSign:    1 | -1;
+  /** Raw world-Y deltas per axis (before twist penalty). */
+  rawScores:   Record<AxisKey, number>;
+  /** Twist amounts per axis (0 = stable, 1 = full collapse). */
+  twistScores: Record<AxisKey, number>;
+  /** Final composite scores: deltaY − (twist × 0.5); −Infinity when twist > 0.6. */
+  finalScores: Record<AxisKey, number>;
+  confidence:  number;                 // winning finalScore magnitude; < 0.05 = suspect rig
+  childCount:  number;                 // number of children averaged (1 = synthetic)
+  rejected:    AxisKey[];              // axes discarded due to twist > 0.6
+};
+
+export type BothArmsResult = {
+  lua:       ArmAxisResult | null;
+  rua:       ArmAxisResult | null;
+  fromCache: boolean;
+};
+
+// ── Axis map storage helpers ──────────────────────────────────────────────────
+
+type StoredAxisMap = {
+  lua?: { axis: AxisKey; sign: 1 | -1 };
+  rua?: { axis: AxisKey; sign: 1 | -1 };
+};
+
+/** STEP 6 — Resolve model-specific storage key (matches getFwdCorrectionKey convention). */
+function _axisStorageKey(modelKey?: string): string {
+  if (!modelKey) return _AXIS_MAP_BASE_KEY + '_default';
+  return _AXIS_MAP_BASE_KEY + '_' + modelKey.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+}
+
+/**
+ * Try to load a previously saved arm-axis map from `localStorage` and apply it
+ * to `BONE_AXIS_MAP`. Returns the parsed object on success, `null` on miss/error.
+ * Safe in SSR (guards on `window`).
+ *
+ * @param modelKey  vrm.meta?.title or uuid — scopes the key (STEP 6)
+ */
+export function loadAxisMapFromStorage(modelKey?: string): StoredAxisMap | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(_axisStorageKey(modelKey));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredAxisMap;
+
+    let applied = 0;
+    if (parsed.lua && parsed.lua.axis && typeof parsed.lua.sign === 'number') {
+      BONE_AXIS_MAP['lua'] = { ...BONE_AXIS_MAP['lua'], open: parsed.lua };
+      applied++;
+    }
+    if (parsed.rua && parsed.rua.axis && typeof parsed.rua.sign === 'number') {
+      BONE_AXIS_MAP['rua'] = { ...BONE_AXIS_MAP['rua'], open: parsed.rua };
+      applied++;
+    }
+
+    if (applied > 0) {
+      console.log('[ARM_AXIS_LOADED_FROM_CACHE]', { ...parsed, modelKey: modelKey ?? 'default' });
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function _saveAxisMapToStorage(
+  lua: ArmAxisResult | null,
+  rua: ArmAxisResult | null,
+  modelKey?: string,
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const payload: StoredAxisMap = {};
+    if (lua) payload.lua = { axis: lua.liftAxis, sign: lua.liftSign };
+    if (rua) payload.rua = { axis: rua.liftAxis, sign: rua.liftSign };
+    localStorage.setItem(_axisStorageKey(modelKey), JSON.stringify(payload));
+    console.log('[ARM_AXIS_SAVED_TO_CACHE]', { ...payload, modelKey: modelKey ?? 'default' });
+  } catch { /* storage unavailable */ }
+}
+
+// Scratch vectors for the twist-penalty calculation (module-scope, zero GC).
+const _DA_BONE_WORLD = new THREE.Vector3();
+const _DA_DIR_BEFORE = new THREE.Vector3();
+const _DA_DIR_AFTER  = new THREE.Vector3();
+
+/** Twist-penalty threshold: axes that collapse geometry are fully rejected. */
+const _DA_TWIST_REJECT = 0.6;
+/** Weight applied to twist amount when computing final composite score. */
+const _DA_TWIST_WEIGHT = 0.5;
+
+/**
+ * Axis Detection v2 — anatomically correct selection.
+ *
+ * For each local Euler axis (X, Y, Z) the function:
+ *   1. Records the bone's world position and the child→bone direction vector.
+ *   2. Applies a test rotation on that axis.
+ *   3. Measures:
+ *        deltaY     = vertical lift of the child centroid
+ *        twist      = 1 − dot(dirBefore, dirAfter) — how much the arm
+ *                     direction spun rather than simply rising
+ *   4. Scores the axis: score = deltaY − (twist × 0.5)
+ *   5. Rejects the axis entirely if twist > 0.6 (geometry collapse).
+ *
+ * This prevents selecting a twist-dominant axis even when it happens to
+ * produce a large Y-delta on a misaligned rig.
+ *
+ * Uses up to 2 child bones averaged for probe accuracy.
+ * Falls back to a synthetic +0.3 m local-X point when the bone has no children.
+ *
+ * Never runs per-frame — call on VRM load only.
+ */
+export function detectArmAxis(
+  bone: THREE.Object3D,
+  boneName = '',
+): ArmAxisResult {
+  const probeChildren = bone.children.slice(0, 2);
+  const childCount = probeChildren.length || 1; // 1 = synthetic point
+
+  bone.updateWorldMatrix(true, true);
+
+  /** Average world position across probe children (or synthetic +0.3 m local-X). */
+  const getProbeWorld = (): THREE.Vector3 => {
+    bone.updateWorldMatrix(true, true);
+    if (probeChildren.length > 0) {
+      const acc = new THREE.Vector3();
+      for (const c of probeChildren) acc.add(c.getWorldPosition(new THREE.Vector3()));
+      return acc.divideScalar(probeChildren.length);
+    }
+    return new THREE.Vector3(0.3, 0, 0).applyMatrix4(bone.matrixWorld);
+  };
+
+  // Baseline: bone world position + child world position at rest.
+  bone.getWorldPosition(_DA_BONE_WORLD);
+  const baseChildWorld = getProbeWorld();
+
+  // Direction from bone to child at rest — used to measure twist.
+  _DA_DIR_BEFORE.copy(baseChildWorld).sub(_DA_BONE_WORLD);
+  const baseLen = _DA_DIR_BEFORE.length();
+  if (baseLen > 1e-6) _DA_DIR_BEFORE.divideScalar(baseLen);
+
+  _DA_Q_SAVE.copy(bone.quaternion);
+
+  const rawScores:   Record<AxisKey, number> = { x: 0, y: 0, z: 0 };
+  const twistScores: Record<AxisKey, number> = { x: 0, y: 0, z: 0 };
+  const finalScores: Record<AxisKey, number> = { x: 0, y: 0, z: 0 };
+  const rejected: AxisKey[] = [];
+
+  try {
+    for (const axis of ['x', 'y', 'z'] as AxisKey[]) {
+      // Apply single-axis test rotation.
+      _DA_E_PROBE.set(0, 0, 0, 'XYZ');
+      _DA_E_PROBE[axis] = _DA_TEST_ANGLE;
+      _DA_Q_TEST.setFromEuler(_DA_E_PROBE);
+      bone.quaternion.copy(_DA_Q_TEST);
+      bone.updateWorldMatrix(true, true);
+
+      const afterChildWorld = getProbeWorld();
+      _DA_W_TEST.copy(afterChildWorld);
+
+      // Raw metric: how much did the child rise in world Y?
+      const deltaY = _DA_W_TEST.y - baseChildWorld.y;
+      rawScores[axis] = deltaY;
+
+      // Twist metric: how much did the bone→child direction change?
+      _DA_DIR_AFTER.copy(afterChildWorld).sub(_DA_BONE_WORLD);
+      const afterLen = _DA_DIR_AFTER.length();
+      if (afterLen > 1e-6) _DA_DIR_AFTER.divideScalar(afterLen);
+      const twist = 1 - _DA_DIR_BEFORE.dot(_DA_DIR_AFTER);
+      twistScores[axis] = twist;
+
+      // Reject axes that cause geometric collapse.
+      if (twist > _DA_TWIST_REJECT) {
+        finalScores[axis] = -Infinity;
+        rejected.push(axis);
+      } else {
+        finalScores[axis] = deltaY - twist * _DA_TWIST_WEIGHT;
+      }
+
+      // Restore for next probe.
+      bone.quaternion.copy(_DA_Q_SAVE);
+      bone.updateWorldMatrix(true, true);
+    }
+  } finally {
+    // Unconditional restore (catches early-throw edge cases).
+    bone.quaternion.copy(_DA_Q_SAVE);
+    bone.updateWorldMatrix(true, true);
+  }
+
+  // Select the axis with the highest composite score (sign from rawScore).
+  let liftAxis: AxisKey = 'z';
+  let liftSign: 1 | -1 = 1;
+  let maxFinal = -Infinity;
+
+  for (const axis of ['x', 'y', 'z'] as AxisKey[]) {
+    if (finalScores[axis] > maxFinal) {
+      maxFinal = finalScores[axis];
+      liftAxis = axis;
+      liftSign = rawScores[axis] >= 0 ? 1 : -1;
+    }
+  }
+
+  // If every axis was rejected (all twist > 0.6), fall back to max raw deltaY
+  // and emit a warning — the rig has a severe orientation mismatch.
+  if (maxFinal === -Infinity) {
+    for (const axis of ['x', 'y', 'z'] as AxisKey[]) {
+      if (Math.abs(rawScores[axis]) > Math.abs(rawScores[liftAxis])) {
+        liftAxis = axis;
+      }
+    }
+    liftSign = rawScores[liftAxis] >= 0 ? 1 : -1;
+    maxFinal = Math.abs(rawScores[liftAxis]);
+    console.warn('[ARM_AXIS_DETECT] ⚠️ ALL axes rejected (twist > 0.6). Rig has severe orientation mismatch. Using best raw deltaY as fallback.', {
+      bone: boneName || bone.name, rawScores, twistScores,
+    });
+  }
+
+  const confidence = maxFinal === -Infinity ? 0 : maxFinal;
+
+  if (confidence < 0.05 && rejected.length < 3) {
+    console.warn('[ARM_AXIS_DETECT] ⚠️ low confidence — scores < 0.05. Matrices may not be updated yet.', {
+      bone: boneName || bone.name, finalScores,
+    });
+  }
+
+  const result: ArmAxisResult = {
+    boneName,
+    liftAxis,
+    liftSign,
+    rawScores,
+    twistScores,
+    finalScores,
+    confidence,
+    childCount,
+    rejected,
+  };
+
+  console.log('[ARM_AXIS_DETECT]', {
+    bone:        boneName || bone.name,
+    liftAxis,
+    liftSign,
+    rawScores:   { x: +rawScores.x.toFixed(4),   y: +rawScores.y.toFixed(4),   z: +rawScores.z.toFixed(4) },
+    twistScores: { x: +twistScores.x.toFixed(4), y: +twistScores.y.toFixed(4), z: +twistScores.z.toFixed(4) },
+    finalScores: {
+      x: finalScores.x === -Infinity ? '-∞' : +finalScores.x.toFixed(4),
+      y: finalScores.y === -Infinity ? '-∞' : +finalScores.y.toFixed(4),
+      z: finalScores.z === -Infinity ? '-∞' : +finalScores.z.toFixed(4),
+    },
+    confidence:  +confidence.toFixed(4),
+    rejected,
+    childCount,
+  });
+
+  return result;
+}
+
+/**
+ * Run `detectArmAxis` on both upper arms.
+ *
+ * Lifecycle:
+ *   patchMap = false  → probe only, log [ARM_AXIS_REPORT], no map change
+ *   patchMap = true   → probe + apply to BONE_AXIS_MAP + persist to localStorage
+ *
+ * Returns `fromCache: true` when the result was already loaded from storage
+ * (this function is then a no-op probe, results are informational only).
+ */
+export function detectBothArms(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  humanoid: { getNormalizedBoneNode: (n: any) => THREE.Object3D | null },
+  patchMap = false,
+  modelKey?: string,
+): BothArmsResult {
+  const luaBone = humanoid.getNormalizedBoneNode('leftUpperArm');
+  const ruaBone = humanoid.getNormalizedBoneNode('rightUpperArm');
+
+  const luaResult = luaBone ? detectArmAxis(luaBone, 'lua') : null;
+  const ruaResult = ruaBone ? detectArmAxis(ruaBone, 'rua') : null;
+
+  if (patchMap) {
+    // Apply to BONE_AXIS_MAP
+    if (luaResult) BONE_AXIS_MAP['lua'] = { ...BONE_AXIS_MAP['lua'], open: { axis: luaResult.liftAxis, sign: luaResult.liftSign } };
+    if (ruaResult) BONE_AXIS_MAP['rua'] = { ...BONE_AXIS_MAP['rua'], open: { axis: ruaResult.liftAxis, sign: ruaResult.liftSign } };
+    // Persist (model-keyed — STEP 6)
+    _saveAxisMapToStorage(luaResult, ruaResult, modelKey);
+    console.log('[ARM_AXIS_PATCHED_AND_SAVED]', {
+      lua: luaResult ? `${luaResult.liftAxis}·${luaResult.liftSign > 0 ? '+1' : '-1'}` : 'NOT_FOUND',
+      rua: ruaResult ? `${ruaResult.liftAxis}·${ruaResult.liftSign > 0 ? '+1' : '-1'}` : 'NOT_FOUND',
+    });
+  } else {
+    console.log('[ARM_AXIS_REPORT]', {
+      lua: luaResult
+        ? { liftAxis: luaResult.liftAxis, liftSign: luaResult.liftSign, confidence: +luaResult.confidence.toFixed(4), rejected: luaResult.rejected }
+        : 'BONE_NOT_FOUND',
+      rua: ruaResult
+        ? { liftAxis: ruaResult.liftAxis, liftSign: ruaResult.liftSign, confidence: +ruaResult.confidence.toFixed(4), rejected: ruaResult.rejected }
+        : 'BONE_NOT_FOUND',
+      patchedBoneAxisMap: false,
+    });
+  }
+
+  return { lua: luaResult, rua: ruaResult, fromCache: false };
+}
+
+/** Expose the current BONE_AXIS_MAP state (all entries) for console inspection. */
+export function getAxisMapSnapshot(): typeof BONE_AXIS_MAP {
+  return BONE_AXIS_MAP;
+}
+
+/** Bones for which we always apply swing-only (never allow twist accumulation). */
+const _SWING_ONLY_KEYS = new Set(['lua', 'rua', 'lla', 'rla', 'lh', 'rh', 'leftShoulder', 'rightShoulder']);
+
+/**
+ * Single-axis, sign-aware quaternion multiply.
+ * For arm/shoulder/hand bones, applies swing-only to prevent twist accumulation.
+ */
 function mulBoneByMap(
   pose: BonePoseMap,
   key: string,
@@ -416,9 +901,17 @@ function mulBoneByMap(
   const bone = entry[slot];
   if (!bone) return;
   const v = value * bone.sign;
-  if (bone.axis === 'x') mulBone(pose, key, v, 0, 0);
-  else if (bone.axis === 'y') mulBone(pose, key, 0, v, 0);
-  else mulBone(pose, key, 0, 0, v);
+
+  // Arm/shoulder/hand bones: strip twist on write.
+  if (_SWING_ONLY_KEYS.has(key)) {
+    if (bone.axis === 'x') mulBoneSwingOnly(pose, key, v, 0, 0);
+    else if (bone.axis === 'y') mulBoneSwingOnly(pose, key, 0, v, 0);
+    else mulBoneSwingOnly(pose, key, 0, 0, v);
+  } else {
+    if (bone.axis === 'x') mulBone(pose, key, v, 0, 0);
+    else if (bone.axis === 'y') mulBone(pose, key, 0, v, 0);
+    else mulBone(pose, key, 0, 0, v);
+  }
 }
 
 // ─── Orchestration state (gesture cycle — reroll on intent change) ────────────
@@ -497,6 +990,30 @@ function clampBoneAxis(pose: BonePoseMap, key: string, limit: number): void {
   eTmp.x = Math.max(-limit, Math.min(limit, eTmp.x));
   eTmp.y = Math.max(-limit, Math.min(limit, eTmp.y));
   eTmp.z = Math.max(-limit, Math.min(limit, eTmp.z));
+  const qOut = new THREE.Quaternion().setFromEuler(eTmp);
+  pose.set(key, qOut);
+}
+
+// ─── Anti-V-pose upper-arm clamp ──────────────────────────────────────────────
+// Per-axis bounds for `lua` / `rua`:
+//   X (forward / back raise): ±1.30 rad ≈ 75°  → never above shoulder
+//   Y (twist):                ±0.50 rad ≈ 29°
+//   Z (abduction):            ±CLAMP_ARM       → existing side-raise bound
+// Tighter than `clampBoneAxis(key, CLAMP_ARM)` on Y/Z but explicit + named.
+const CLAMP_ARM_X_FORWARD = 1.30;
+const CLAMP_ARM_Y_TWIST   = 0.50;
+const CLAMP_ARM_Z_ABDUCT  = CLAMP_ARM;
+export function clampUpperArmAntiVPose(pose: BonePoseMap, key: string): void {
+  const q = pose.get(key);
+  if (!q) return;
+  const eTmp = new THREE.Euler(0, 0, 0, 'YXZ');
+  eTmp.setFromQuaternion(q, 'YXZ');
+  eTmp.x = Math.max(-CLAMP_ARM_X_FORWARD, Math.min(CLAMP_ARM_X_FORWARD, eTmp.x));
+  eTmp.y = Math.max(-CLAMP_ARM_Y_TWIST,   Math.min(CLAMP_ARM_Y_TWIST,   eTmp.y));
+  eTmp.z = Math.max(-CLAMP_ARM_Z_ABDUCT,  Math.min(CLAMP_ARM_Z_ABDUCT,  eTmp.z));
+  // Plain setFromEuler — do NOT use swing decomposition here.
+  // Swing-only would strip the X component (forward-raise axis in VRM normalized
+  // bones), erasing legitimate gestures every frame and causing the V-pose freeze.
   const qOut = new THREE.Quaternion().setFromEuler(eTmp);
   pose.set(key, qOut);
 }
@@ -586,6 +1103,9 @@ export function applyIntentMotionState(
       mulBoneByMap(pose, 'rua', 'open', ruaOpen);
       clampBoneAxis(pose, 'lua', CLAMP_ARM);
       clampBoneAxis(pose, 'rua', CLAMP_ARM);
+      // Explicit anti-V-pose clamp — prevents forward raise above shoulder.
+      clampUpperArmAntiVPose(pose, 'lua');
+      clampUpperArmAntiVPose(pose, 'rua');
     }
 
     // ─── DYNAMIC ELBOW — axis-map driven ─────────────────────────────────
@@ -661,4 +1181,181 @@ export function applyIntentMotionState(
   }
 
   return { applied: true, headNod: hn, headTilt: ht, armOpen: og };
+}
+
+// ─── Hard anatomical safety net — runs on LIVE VRM normalized bones ───────────
+//
+// Called AFTER applyFinalPoseToVrm + humanoid.update() so it is the last writer
+// in the pipeline and cannot be undone by any upstream layer.  Uses absolute
+// setFromEuler (never +=) so there is zero accumulation risk.
+//
+// Limits (rad) per the spec comment:
+//   upperArm  X (fwd/back raise)   : ±1.30  ≈ ±75°
+//             Y (twist)            : ±0.50  ≈ ±29°
+//             Z (abduction)        : ±0.70  ≈ ±40°
+//   lowerArm  X (elbow flexion)    :  -0.05 → 1.60  (no hyper-extension, ~92° max flex)
+//             Y (medial/lateral)   : ±0.30
+//             Z (wrist-plane)      : ±0.30
+//
+// Safety rules (per system-wide contract):
+//   • Read quaternion → Euler XYZ → clamp → setFromEuler (absolute, never +=)
+//   • No world-space transforms — normalized bone = local space already correct
+//   • Writes `window.__armDebug` for quick console inspection
+
+const _BL_E  = new THREE.Euler(0, 0, 0, 'XYZ');
+const _BL_Q  = new THREE.Quaternion();
+
+// STEP 5 — upperArm xMax tightened from 1.30 → 0.40 to prevent the arm from
+// rotating BEHIND the body (left-arm-bends-backward symptom). The forward range
+// (xMin = -1.30 → -75°) stays untouched so legitimate forward-raise gestures work.
+//
+// Z range widened from ±0.70 → ±1.55 so the natural arms-hanging-by-side pose
+// (z ≈ ±1.40) is REACHABLE.  Without this, the clamp pulls the arm back toward
+// horizontal, perpetuating the T-pose look.  Range still bounded so the arm
+// cannot rotate past anatomical limits.
+const BL_LIMITS = {
+  upperArm: {
+    xMin: -1.30, xMax:  0.40,
+    yMin: -0.50, yMax:  0.50,
+    zMin: -1.55, zMax:  1.55,
+  },
+  lowerArm: {
+    xMin: -0.05, xMax:  1.60,
+    yMin: -0.30, yMax:  0.30,
+    zMin: -0.30, zMax:  0.30,
+  },
+} as const;
+
+// STEP 4 — Idle pose constants (applied when energy < 0.01 && !speaking).
+//
+// Anatomical hanging position (matches ARM_IDLE in armGestureReference.ts):
+//   • Right upper arm: ruaZ ≈ +1.40 rad (~80°)  → arm hanging straight down
+//   • Left  upper arm: luaZ ≈ -1.40 rad (~80°)  → mirror, hanging down
+//   • Lower arm:        rlaX ≈ +0.10 rad         → very slight elbow flex (relaxed)
+//
+// VRM normalized convention: Z=0 is the bind T-pose (arms horizontal). Rotating
+// Z toward the bone-length axis collapses the arm down to the side.
+//
+// Absolute write (no lerp): the previous lerp version never converged because
+// `applyFinalPoseToVrm` rewrites the bone every frame from the bind/PoseComposer
+// output (which contains the bind T-pose for arms when no gesture is active).
+// Each frame the lerp restarted from T-pose → only ~18% movement was visible.
+// With absolute write, arms snap to the natural pose every frame and stay there.
+const _IDLE_UPPER_ARM_X    = -0.05;  // tiny forward (relaxed shoulders)
+const _IDLE_UPPER_ARM_Z    =  1.40;  // hanging-down — right arm; left mirrored
+const _IDLE_LOWER_ARM_X    =  0.10;  // ~6° elbow flex (matches ARM_IDLE)
+
+/**
+ * Clamp a single live VRM normalized bone to anatomical limits.
+ *
+ * Uses plain Euler decompose → clamp → setFromEuler (absolute assignment).
+ * Does NOT use swing decomposition — swing-only stripping would remove
+ * the X component (forward-raise axis in VRM), erasing gestures every frame
+ * and causing the V-pose freeze. Swing-only belongs only in delta-write paths
+ * (mulBoneByMap), never in safety clamp paths.
+ */
+function _blClampBone(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  humanoid: { getNormalizedBoneNode: (n: any) => THREE.Object3D | null },
+  boneName: string,
+  limits: { xMin: number; xMax: number; yMin: number; yMax: number; zMin: number; zMax: number },
+): void {
+  const bone = humanoid.getNormalizedBoneNode(boneName);
+  if (!bone) return;
+  _BL_E.setFromQuaternion(bone.quaternion, 'XYZ');
+  _BL_E.x = Math.max(limits.xMin, Math.min(limits.xMax, _BL_E.x));
+  _BL_E.y = Math.max(limits.yMin, Math.min(limits.yMax, _BL_E.y));
+  _BL_E.z = Math.max(limits.zMin, Math.min(limits.zMax, _BL_E.z));
+  _BL_Q.setFromEuler(_BL_E);
+  bone.quaternion.copy(_BL_Q);
+}
+
+/**
+ * Force arm hanging pose when avatar is truly silent.
+ *
+ * ABSOLUTE WRITE — no lerp, no read of current bone state.
+ *
+ * Why absolute (not lerp):
+ *   `applyFinalPoseToVrm` runs every frame and rewrites the bone quaternion
+ *   from the PoseComposer output, which contains the bind T-pose for arm bones
+ *   when no gesture is active. A lerp from the *current* (T-pose) bone state
+ *   restarts every frame, never converging to the natural hanging pose.
+ *   Absolute write guarantees a fixed final state regardless of upstream input.
+ *
+ * Side mirroring: left arm Z is negated so both arms hang along the body.
+ *
+ * The clamp limits widened above (±1.55 on Z) ensure these idle values pass
+ * through the subsequent _blClampBone unchanged.
+ */
+const _IDLE_E = new THREE.Euler(0, 0, 0, 'XYZ');
+const _IDLE_Q = new THREE.Quaternion();
+function _applyIdleArmPose(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  humanoid: { getNormalizedBoneNode: (n: any) => THREE.Object3D | null },
+): void {
+  const writeIdle = (boneName: string, tx: number, ty: number, tz: number): void => {
+    const bone = humanoid.getNormalizedBoneNode(boneName);
+    if (!bone) return;
+    _IDLE_E.set(tx, ty, tz, 'XYZ');
+    _IDLE_Q.setFromEuler(_IDLE_E);
+    bone.quaternion.copy(_IDLE_Q);
+  };
+
+  // Upper arms: hanging down by the side (Z mirrored).
+  writeIdle('rightUpperArm', _IDLE_UPPER_ARM_X, 0,  _IDLE_UPPER_ARM_Z);
+  writeIdle('leftUpperArm',  _IDLE_UPPER_ARM_X, 0, -_IDLE_UPPER_ARM_Z);
+  // Lower arms: tiny natural elbow flex.
+  writeIdle('rightLowerArm', _IDLE_LOWER_ARM_X, 0, 0);
+  writeIdle('leftLowerArm',  _IDLE_LOWER_ARM_X, 0, 0);
+}
+
+/**
+ * Anatomical hard-clamp applied directly to VRM normalized bones.
+ *
+ * Pipeline position: AFTER `applyFinalPoseToVrm` + `humanoid.update()`.
+ * Last safety net — never strips twist (see _blClampBone comment).
+ * Head, neck, spine are intentionally NOT touched (owned by PoseComposer).
+ *
+ * @param humanoid  VRM humanoid interface
+ * @param idleCtx   When provided AND avatar is truly silent (energy<0.01,
+ *                  !speaking), an idle arm pose is BLENDED IN before the clamp
+ *                  so the avatar never gets stuck in T-pose.
+ */
+export function applyBiomechanicalLayer(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  humanoid: { getNormalizedBoneNode: (n: any) => THREE.Object3D | null },
+  idleCtx?: { speaking: boolean; energy: number },
+): void {
+  // STEP 4 — Idle arm pose: prevents T-pose freeze when no motion is active.
+  // Runs BEFORE clamp so the clamped output respects anatomical bounds.
+  if (idleCtx && !idleCtx.speaking && idleCtx.energy < 0.01) {
+    _applyIdleArmPose(humanoid);
+  }
+
+  const ul = BL_LIMITS.upperArm;
+  const ll = BL_LIMITS.lowerArm;
+
+  _blClampBone(humanoid, 'leftUpperArm',  ul);
+  _blClampBone(humanoid, 'rightUpperArm', ul);
+  _blClampBone(humanoid, 'leftLowerArm',  ll);
+  _blClampBone(humanoid, 'rightLowerArm', ll);
+
+  const sl = { xMin: -0.30, xMax: 0.30, yMin: -0.30, yMax: 0.30, zMin: -0.35, zMax: 0.35 };
+  _blClampBone(humanoid, 'leftShoulder',  sl);
+  _blClampBone(humanoid, 'rightShoulder', sl);
+
+  // Debug surface — live Euler snapshot for console inspection.
+  if (typeof window !== 'undefined') {
+    const lU = humanoid.getNormalizedBoneNode('leftUpperArm');
+    const rU = humanoid.getNormalizedBoneNode('rightUpperArm');
+    const lL = humanoid.getNormalizedBoneNode('leftLowerArm');
+    const rL = humanoid.getNormalizedBoneNode('rightLowerArm');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).__armDebug = {
+      lUpper: lU ? { x: +lU.rotation.x.toFixed(3), y: +lU.rotation.y.toFixed(3), z: +lU.rotation.z.toFixed(3) } : null,
+      rUpper: rU ? { x: +rU.rotation.x.toFixed(3), y: +rU.rotation.y.toFixed(3), z: +rU.rotation.z.toFixed(3) } : null,
+      lLower: lL ? { x: +lL.rotation.x.toFixed(3), y: +lL.rotation.y.toFixed(3), z: +lL.rotation.z.toFixed(3) } : null,
+      rLower: rL ? { x: +rL.rotation.x.toFixed(3), y: +rL.rotation.y.toFixed(3), z: +rL.rotation.z.toFixed(3) } : null,
+    };
+  }
 }

@@ -23,6 +23,7 @@ import {
   getCognitiveMouthOverlay,
   type MouthShape,
 } from '@/app/avatar-agent/motion/facialExpressionBlend';
+import { pushVisemeFrame, resetSpeechFusion } from '@/app/avatar-agent/motion/__speechFusion';
 import { isObservabilityEnabled } from '@/lib/observability/config';
 import { reportLipSyncDriftMs } from '@/lib/observability/audioLipSyncMonitor';
 import { getSpeechEmotionSnapshot } from '@/ai/voice/speechEmotionBridge';
@@ -106,6 +107,26 @@ function readOutputLatencyMsPreferFace(): number {
 const TTS_SYNC_OFFSET_SEC = readEnvOffsetMsPreferFace() / 1000;
 const TTS_PREATTACK_SEC = readPreattackMsPreferFace() / 1000;
 const TTS_OUTPUT_LATENCY_SEC = readOutputLatencyMsPreferFace() / 1000;
+
+// Effective viseme calibration (the single number applied to audio.currentTime each frame).
+// Surfaced on window so devs can verify which env vars are active and tune at runtime.
+const EFFECTIVE_VISEME_OFFSET_SEC =
+  TTS_SYNC_OFFSET_SEC + TTS_PREATTACK_SEC - TTS_OUTPUT_LATENCY_SEC;
+if (typeof window !== 'undefined') {
+  (window as Window & {
+    __lipSyncCalibration?: {
+      syncOffsetMs: number;
+      preattackMs: number;
+      outputLatencyMs: number;
+      effectiveOffsetMs: number;
+    };
+  }).__lipSyncCalibration = {
+    syncOffsetMs: TTS_SYNC_OFFSET_SEC * 1000,
+    preattackMs: TTS_PREATTACK_SEC * 1000,
+    outputLatencyMs: TTS_OUTPUT_LATENCY_SEC * 1000,
+    effectiveOffsetMs: EFFECTIVE_VISEME_OFFSET_SEC * 1000,
+  };
+}
 
 /**
  * Azure viseme id → VRM mouth morph weights (index 0–21).
@@ -312,6 +333,7 @@ export default function LipSyncManager({
   const lastDebugLogAtRef = useRef(0);
   const lastLipDriftConsoleAtRef = useRef(0);
   const lastFaceSyncLogAtRef = useRef(0);
+  const lastSyncTraceLogAtRef = useRef(0);
   const speechEmphasisRef = useRef(0);
   const lipObsFrameRef = useRef(0);
   const utteranceGenTrackedRef = useRef(-1);
@@ -365,6 +387,7 @@ export default function LipSyncManager({
       resetDriftOffset();
       lastVisemeIdRef.current = -2;
       smoothNarrowWeightRef.current = 0.5;
+      resetSpeechFusion();
     };
 
     window.addEventListener('avatar:speak:start', onSpeakStart);
@@ -807,10 +830,47 @@ export default function LipSyncManager({
       }
     }
 
+    // ── [SYNC_TRACE] — explicit audio↔viseme correlation log ──────────────
+    // Throttled to 500ms; gated by DEBUG_AVATAR or NEXT_PUBLIC_DEBUG_LIP_DRIFT
+    // so production console stays quiet unless the user opts in.
+    const syncTraceEnabled =
+      DEBUG_AVATAR || process.env.NEXT_PUBLIC_DEBUG_LIP_DRIFT === 'true';
+    if (
+      syncTraceEnabled &&
+      talking &&
+      audioReady &&
+      queue.length > 0 &&
+      nowMs - lastSyncTraceLogAtRef.current > 500
+    ) {
+      lastSyncTraceLogAtRef.current = nowMs;
+      const audioCt = timelineAudio !== null
+        ? getRawPlaybackTimeSec()
+        : (audio?.currentTime ?? 0);
+      const cueT = lastActiveCueTRef.current;
+      const driftMs = cueT >= 0 ? Math.round((tSec - cueT) * 1000) : null;
+      // eslint-disable-next-line no-console
+      console.log('[SYNC_TRACE]', {
+        audioTime:     +audioCt.toFixed(3),
+        visemeTime:    +tSec.toFixed(3),
+        activeViseme:  lastVisemeIdRef.current,
+        cueTime:       +cueT.toFixed(3),
+        driftMs,
+        offsetMs:      Math.round(EFFECTIVE_VISEME_OFFSET_SEC * 1000),
+        cuesRemaining: queue.length,
+      });
+    }
+
     /** Viseme / jaw targets are independent of torso or arm pose — no skeleton layer clamps mouth weights. */
     setMouthKeys(em, out.aa, out.ih, out.oh, out.ou, out.ee, 1);
     const jawProxy = Math.max(out.aa, out.oh * 0.92, out.ih * 0.45, out.ee * 0.38);
     applyRmsToMouthOpen(em, lipRms, jawProxy, 0.26);
+
+    // ── Push the per-frame viseme magnitude into the speech-fusion bus ───
+    // The fusion layer (in VRMSkeletonManager, after the merge) reads the
+    // smoothed energy and applies additive head/gesture deltas. Sending the
+    // max-of-shapes value mirrors how `jawProxy` represents mouth openness.
+    const visemeMag = Math.max(out.aa, out.ih, out.oh, out.ou, out.ee);
+    pushVisemeFrame(visemeMag, nowMs);
   }, -1);
 
   return null;

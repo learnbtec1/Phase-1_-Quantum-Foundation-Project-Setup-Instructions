@@ -49,6 +49,10 @@ import {
 } from './motion/humanizationBoneApply';
 import {
   applyBiomechanicalCorrections,
+  applyBiomechanicalLayer,
+  detectBothArms,
+  loadAxisMapFromStorage,
+  getAxisMapSnapshot,
   applyIntentMotionState,
   applyNeuralLayer,
   applySubconsciousLayer,
@@ -128,6 +132,22 @@ import {
   validateAvatarPipeline,
   mergeBehaviorEngineMotionScalars,
 } from './motion/__behaviorSync';
+import { applySpeechFusion, peekSpeechEnergy } from './motion/__speechFusion';
+import {
+  computeProceduralLowerBody,
+  applyLowerBodyState,
+  type LowerBodyContext,
+} from './motion/proceduralLowerBody';
+import { applyPersonalityMotion } from './motion/__personalityMotion';
+import { applyMotionDynamics, resetMotionDynamics } from './motion/__motionDynamics';
+import {
+  applyDirectionalMotionModulation,
+  applyAvatarForwardCorrection,
+  classifyForward,
+  getAvatarForward,
+  getFwdCorrectionKey,
+  getArmAxisKey,
+} from './motion/directionalMotionModulation';
 import { blendPoseInto, generateIntentPose } from './motion/intentPoseGenerator';
 import { updateIntentFromBehaviorBrain } from '@/lib/avatar/motionIntentContinuity';
 import { deriveEmbodimentFromLLM, getCognitiveOrchestratorInputOverlay } from '@/lib/ai/cognitiveOrchestrator';
@@ -923,6 +943,36 @@ const noiseBreath = createNoise3D();
 const noiseArm    = createNoise3D(); // organic arm / gesture wave noise
 const noiseJitter = createNoise3D(); // micro-jitter for wrists & head
 
+// ═══════════════════════════════════════════════════════════════════════════
+// EXECUTION-LOOP AUDIT — module-scope state (zero per-frame allocs).
+//
+// Tracks frame count, FPS, stage timestamps, and override detection.
+// One [EXECUTION_DIAGNOSIS] log per second with the complete report.
+// ═══════════════════════════════════════════════════════════════════════════
+const _execLoop = {
+  frameCount:        0,
+  fpsWindowStartMs:  0,
+  fpsWindowFrames:   0,
+  measuredFps:       0,
+  earlyReturnReason: null as string | null,  // last frame's early-return cause
+  // Stage timestamps from the most recent completed frame (ms).
+  s_motionEnd:       0,
+  s_finalPoseEnd:    0,
+  s_humanoid1End:    0,
+  s_biomechEnd:      0,
+  s_humanoid2End:    0,
+  s_frameEnd:        0,
+  s_motionExecuted:  false,
+  s_finalPoseExecuted: false,
+  s_humanoid1Executed: false,
+  s_biomechExecuted: false,
+  s_humanoid2Executed: false,
+  // Override detection snapshots (leftUpperArm raw rotation z).
+  ov_afterBio:       NaN,
+  ov_atFrameEnd:     NaN,
+  lastDiagnosisMs:   0,
+};
+
 type GestureId =
   | 'idle'
   | 'explain'
@@ -1295,6 +1345,19 @@ export function VRMSkeletonManager({
 
   // ── Thinking auto-gesture ─────────────────────────────────────────────────
   const thinkGestureActiveRef = useRef(false); // prevents repeated firing
+  /** Auto-talk gesture cycling state — used by SINGLE_CONTROLLER intent-driven trigger. */
+  const talkGestureActiveRef = useRef(false);
+  /** Earliest ms the auto-trigger may fire next (cool-down between cycles). */
+  const talkGestureNextAtMsRef = useRef(0);
+  /**
+   * Per-utterance semantic-gesture debounce key.
+   * Hash of current utterance text — guarantees a greeting fires `wave` AT MOST
+   * once per utterance even though `useFrame` re-evaluates intent every tick.
+   * Cleared on `avatar:speak:end` so the next utterance is classified fresh.
+   */
+  const lastSemanticUtteranceHashRef = useRef<string>('');
+  /** The semantic intent we already fired this utterance (prevents re-fire). */
+  const lastSemanticIntentFiredRef = useRef<string>('');
   /** Smoothed 0–1 لقبضة اليد اليمنى في explain */
   const explainFingerCurlSmoothRef = useRef(0);
   /** منفصل عن اليمين — كان اليسار يُنعَّم من قيمة اليمين فلا يصل لهدفه */
@@ -1361,6 +1424,14 @@ export function VRMSkeletonManager({
       localSpeakingRef.current = false;
       localSpeakingUntilMsRef.current = 0;
       console.log('[SPEAKING_STATE]', { speaking: false, source: 'avatar:speak:end' });
+      // Allow rhythm / anticipation / inertia state to settle from the current
+      // motion values rather than snapping — the decay is built into the module.
+      // We still reset on end so next utterance starts fresh.
+      resetMotionDynamics();
+      // Clear semantic-gesture per-utterance memory so the next greeting/agree/
+      // think/etc. utterance can re-fire its dedicated gesture.
+      lastSemanticUtteranceHashRef.current = '';
+      lastSemanticIntentFiredRef.current = '';
     };
     window.addEventListener('avatar:speak:start', onStart as EventListener);
     window.addEventListener('avatar:speak:end',   onEnd);
@@ -1544,6 +1615,13 @@ export function VRMSkeletonManager({
           w.__cogniPlayProceduralGesture?.(gesture, durationSec);
         },
       };
+
+      // ── Arm-axis detector + axis map inspector (callable from DevTools) ────
+      // window.__detectArmAxis()      → probe both arms, log [ARM_AXIS_REPORT], no change
+      // window.__detectArmAxis(true)  → probe + patch BONE_AXIS_MAP + save to localStorage
+      // window.__armAxisMap()         → show current BONE_AXIS_MAP state
+      // window.__armDebug             → live per-frame rotation snapshot (from biomechanical layer)
+      // (hooks registered by separate useEffect below — already wired)
     }
 
     // Verify autoUpdateHumanBones is true (needed for normalized→raw propagation)
@@ -2166,6 +2244,102 @@ export function VRMSkeletonManager({
     };
   }, [vrm]);
 
+  // ── Self-calibrating arm-axis system (runs once per VRM load) ─────────────
+  //
+  // On every VRM mount:
+  //   1. Try to restore a previously saved axis map from localStorage (zero cost).
+  //   2. If cache hit  → apply immediately, skip probe, log [ARM_AXIS_LOADED_FROM_CACHE].
+  //   3. If cache miss → run a one-shot probe (read-only, <1ms) and log results.
+  //      The probe does NOT patch automatically; the dev must call
+  //      window.__detectArmAxis(true) once to confirm and persist the result.
+  //
+  // Per-frame work: zero. The probe never runs inside useFrame.
+  // Window API:
+  //   window.__detectArmAxis()      → probe + log, no change
+  //   window.__detectArmAxis(true)  → probe + patch BONE_AXIS_MAP + save to localStorage
+  //   window.__armAxisMap()         → inspect current BONE_AXIS_MAP state
+  //   localStorage.removeItem('cogni_arm_axis_map_v1')  → clear cache for re-probe
+  useEffect(() => {
+    if (!vrm?.humanoid) return;
+    const humanoid = vrm.humanoid;
+
+    // STEP 6 — Model key: scopes all localStorage entries to this specific VRM
+    // so multiple avatars never overwrite each other's calibration data.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const modelKey: string | undefined = (vrm as any).meta?.title || (vrm as any).meta?.name || undefined;
+
+    // ── STEP 1 / 2: Use liftNode (vrm.scene.parent) as correction target ──────
+    // Rotating vrm.scene directly can conflict with VRM's internal lookAt and
+    // floorLock updates. liftNode is the designated transform-adjustment layer
+    // in the scene hierarchy: AvatarRoot → liftNode → vrm.scene.
+    // Fallback: if liftNode is missing (unusual), rotate vrm.scene.
+    const liftNode  = vrm.scene?.parent ?? null;
+    const vrmRoot   = (liftNode ?? vrm.scene) as THREE.Object3D | null;
+
+    // ── STEP 8 — PIPELINE ORDER (enforced here, must not be reordered) ────────
+    // 1. applyAvatarForwardCorrection   ← world forward must be +Z before probe
+    // 2. loadAxisMapFromStorage         ← arm axis cache (model-keyed)
+    // 3. detectBothArms (if no cache)   ← one-shot probe
+    // --- per-frame motion pipeline follows in useFrame ---
+
+    // ── 1. Forward correction ─────────────────────────────────────────────────
+    if (vrmRoot) {
+      try {
+        applyAvatarForwardCorrection(vrmRoot, modelKey);
+      } catch (e) {
+        console.warn('[FORWARD_CORRECTION] Failed:', e);
+      }
+    }
+
+    // ── 2. Register DevTools window hooks ─────────────────────────────────────
+    if (typeof window !== 'undefined') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const w = window as any;
+      w.__detectArmAxis         = (patchMap = false) => detectBothArms(humanoid, patchMap, modelKey);
+      w.__armAxisMap            = () => getAxisMapSnapshot();
+      w.__avatarForward         = () => vrmRoot ? getAvatarForward(vrmRoot) : null;
+      w.__avatarForwardClassify = () => vrmRoot ? classifyForward(vrmRoot) : null;
+      /** window.__setAvatarForwardCorrection(90) → manual override in degrees */
+      w.__setAvatarForwardCorrection = (angleDeg: number) => {
+        if (!vrmRoot) { console.warn('[FORWARD_CORRECTION] no root'); return; }
+        const rad = angleDeg * Math.PI / 180;
+        vrmRoot.rotation.y = rad;
+        vrmRoot.updateWorldMatrix(true, true);
+        try {
+          localStorage.setItem(
+            getFwdCorrectionKey(modelKey),
+            JSON.stringify({ correctionY: rad, classification: 'MANUAL' }),
+          );
+        } catch { /* ignore */ }
+        console.log('[FORWARD_CORRECTION] manual override applied', {
+          angleDeg, rad: +rad.toFixed(4),
+          forwardAfter: getAvatarForward(vrmRoot),
+          modelKey: modelKey ?? 'default',
+        });
+      };
+      /** Clears both forward + arm-axis cache for this model */
+      w.__clearAvatarCalibration = () => {
+        try {
+          localStorage.removeItem(getFwdCorrectionKey(modelKey));
+          localStorage.removeItem(getArmAxisKey(modelKey));
+          console.log('[CALIBRATION] cleared for model', modelKey ?? 'default');
+        } catch { /* ignore */ }
+      };
+      console.log('[ARM_AXIS_HOOK_READY] __detectArmAxis / __armAxisMap / __avatarForward / __clearAvatarCalibration registered', { modelKey: modelKey ?? 'default' });
+    }
+
+    // ── 3. Arm-axis self-calibration (model-keyed — STEP 6) ──────────────────
+    const cached = loadAxisMapFromStorage(modelKey);
+    if (cached) return;
+
+    try {
+      detectBothArms(humanoid, false, modelKey);
+      console.log('[ARM_AXIS_INITIAL_PROBE] Probe complete. Call window.__detectArmAxis(true) to persist.', { modelKey: modelKey ?? 'default' });
+    } catch (e) {
+      console.warn('[ARM_AXIS_INITIAL_PROBE] Failed:', e);
+    }
+  }, [vrm]);
+
   useEffect(() => {
     attachMotionPipelineEventProbes();
     // Idempotent — `initStudentAwarenessListeners` guards with internal flag.
@@ -2186,6 +2360,20 @@ export function VRMSkeletonManager({
 
   useFrame((_, delta) => {
     const safeDelta = Math.min(Math.max(delta, 0), TAB_SAFE_MAX_DELTA);
+
+    // ── EXECUTION-LOOP AUDIT — frame entry ────────────────────────────────────
+    // Reset per-frame stage flags so a missing stage is visible in the report.
+    _execLoop.frameCount += 1;
+    _execLoop.fpsWindowFrames += 1;
+    _execLoop.s_motionExecuted = false;
+    _execLoop.s_finalPoseExecuted = false;
+    _execLoop.s_humanoid1Executed = false;
+    _execLoop.s_biomechExecuted = false;
+    _execLoop.s_humanoid2Executed = false;
+    _execLoop.earlyReturnReason = null;
+    const _execNow = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (_execLoop.fpsWindowStartMs === 0) _execLoop.fpsWindowStartMs = _execNow;
+
     if (isAvatarMotionTraceOn()) {
       motionTraceFrameRef.current += 1;
     }
@@ -2218,6 +2406,7 @@ export function VRMSkeletonManager({
     //     lacks humanoid). Still call vrm.update so expressions/morphs work,
     //     but skip all procedural bone manipulation to avoid null-ref spam.
     if (!ruaRef.current) {
+      _execLoop.earlyReturnReason = 'BONES_NOT_READY (ruaRef.current is null)';
       if (isAvatarMotionTraceOn() && motionTraceFrameRef.current % 100 === 0) {
         motionTraceStopAtGuard(
           'frame-skeleton',
@@ -2427,6 +2616,140 @@ export function VRMSkeletonManager({
         gestureStartRef.current = nowMs;
         gestureAmplitudeMulRef.current = Math.max(gestureAmplitudeMulRef.current, 0.75);
         gestureDurationRef.current = 3000;
+      }
+
+      // ─────────────────────────────────────────────────────────────────────
+      // BEHAVIOR ENGINE — semantic intent → gesture event
+      //
+      // Pipeline:  speech text → detectIntent (rule-based, AR + EN)
+      //                       → SEMANTIC_GESTURE_MAP   (intent → GestureId)
+      //                       → gestureStateRef         (event-driven slot)
+      //                       → applyFinalPoseToVrm     (raw bone write)
+      //                       → applyBiomechanicalLayer (clamp, never overrides)
+      //
+      // Why two triggers (semantic vs. cyclic):
+      //   • Semantic trigger fires AT MOST ONCE per utterance, debounced by
+      //     `lastSemanticUtteranceHashRef`. This is what makes "Hello" wave,
+      //     "نعم" agree, "أفكر" think — discrete, meaningful, time-aligned.
+      //   • Cyclic fallback (`explain` / `point`) keeps long generic utterances
+      //     visually alive when no specific semantic gesture maps. It cycles
+      //     every ~2.4-3.6s with a 600-1100ms pause, mirroring conversational
+      //     hand movement during continuous speech.
+      //
+      // Execution order: this trigger runs INSIDE useFrame, BEFORE the bone
+      // composition stage and BEFORE applyBiomechanicalLayer. The biomechanical
+      // layer is a clamp-only safety net — it never overwrites a fired gesture.
+      //
+      // Safety: respects vrmaActiveRef (no fight with VRMA clip),
+      //         respects thinkGestureActiveRef (will not override think),
+      //         uses absolute writes through the existing gesture slot.
+      const _autoCanFire =
+        !vrmaActiveRef?.current &&
+        speaking &&
+        gestureStateRef.current === 'idle' &&
+        !thinkGestureActiveRef.current &&
+        nowMs >= talkGestureNextAtMsRef.current;
+
+      // Semantic intent for this utterance (rule-based, debounced once per
+      // utterance). LLM-side `ab.intent` is consulted as a secondary signal.
+      let _semanticGesture: GestureId | null = null;
+      let _semanticSource: string = '';
+      if (_autoCanFire) {
+        const _utterText = getEmbodimentUtteranceTextForSemantics() ?? '';
+        if (_utterText.length > 0) {
+          // Compact stable hash: length + first 32 chars covers utterance edits.
+          const _utterHash = `${_utterText.length}:${_utterText.slice(0, 32)}`;
+          if (_utterHash !== lastSemanticUtteranceHashRef.current) {
+            const _detected = detectIntent(_utterText);
+            // Map: rule-based intent → discrete gesture (start of utterance).
+            const SEMANTIC_GESTURE_MAP: Partial<Record<typeof _detected, GestureId>> = {
+              greeting:    'wave',
+              agreeing:    'agree',
+              confirming:  'agree',
+              thinking:    'think',
+              explaining:  'explain',
+              emphasizing: 'point',
+              questioning: 'explain',
+            };
+            const _mapped = SEMANTIC_GESTURE_MAP[_detected];
+            if (_mapped && lastSemanticIntentFiredRef.current !== _detected) {
+              _semanticGesture = _mapped;
+              _semanticSource  = `rule:${_detected}`;
+              lastSemanticUtteranceHashRef.current = _utterHash;
+              lastSemanticIntentFiredRef.current   = _detected;
+            }
+          }
+        }
+        // Secondary: LLM-side intent for greeting (covers utterances where the
+        // rule-based detector finds neutral but the LLM tagged greeting).
+        if (!_semanticGesture && ab.intent === 'greeting') {
+          _semanticGesture = 'wave';
+          _semanticSource  = 'llm:greeting';
+        }
+      }
+
+      if (_semanticGesture) {
+        // ── EVENT-BASED gesture spawn (semantic, once per utterance) ──
+        talkGestureActiveRef.current = true;
+        gestureStateRef.current = _semanticGesture;
+        gestureStartRef.current = nowMs;
+        // Live debug surface — readable from DevTools to verify engine is active.
+        if (typeof window !== 'undefined') {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (window as any).__behaviorEngine = {
+            lastFiredGesture: _semanticGesture,
+            lastFiredSource:  _semanticSource,
+            lastFiredAtMs:    nowMs,
+            firedThisUtterance: lastSemanticIntentFiredRef.current,
+          };
+        }
+        // Wave / agree / think tend to read better at slightly lower amplitude
+        // than explain (which expects open-hand projection). Tune per gesture.
+        const _amp =
+          _semanticGesture === 'wave'  ? 0.95 :
+          _semanticGesture === 'agree' ? 0.62 :
+          _semanticGesture === 'think' ? 0.70 :
+          _semanticGesture === 'point' ? 0.85 :
+          0.80;
+        gestureAmplitudeMulRef.current = Math.max(gestureAmplitudeMulRef.current, _amp);
+        // Wave is naturally longer than a quick agree/point; think is sustained.
+        gestureDurationRef.current =
+          _semanticGesture === 'wave'  ? 2200 + Math.random() * 600 :
+          _semanticGesture === 'think' ? 2800 + Math.random() * 700 :
+          _semanticGesture === 'agree' ? 1100 + Math.random() * 400 :
+          2400 + Math.random() * 1200;
+        // Cool-down so we don't immediately stack another auto-gesture.
+        talkGestureNextAtMsRef.current = nowMs + gestureDurationRef.current + 600 + Math.random() * 500;
+        if (process.env.NODE_ENV === 'development') {
+          console.log('[BEHAVIOR_GESTURE_FIRED]', {
+            gesture:    _semanticGesture,
+            source:     _semanticSource,
+            durationMs: Math.round(gestureDurationRef.current),
+            amplitude:  +gestureAmplitudeMulRef.current.toFixed(2),
+            nextAt:     Math.round(talkGestureNextAtMsRef.current),
+          });
+        }
+      } else if (_autoCanFire && (ab.gesture === 'talk' || ab.intent === 'explaining' || ab.intent === 'emphasizing')) {
+        // ── CYCLIC fallback — keeps long generic utterances alive ──
+        talkGestureActiveRef.current = true;
+        const _autoGesture: GestureId = ab.intent === 'emphasizing' ? 'point' : 'explain';
+        gestureStateRef.current = _autoGesture;
+        gestureStartRef.current = nowMs;
+        gestureAmplitudeMulRef.current = Math.max(gestureAmplitudeMulRef.current, 0.78 + Math.random() * 0.22);
+        gestureDurationRef.current = 2400 + Math.random() * 1200; // 2.4–3.6s natural
+        talkGestureNextAtMsRef.current = nowMs + gestureDurationRef.current + 600 + Math.random() * 500;
+        if (process.env.NODE_ENV === 'development') {
+          console.log('[AUTO_GESTURE_FROM_INTENT]', {
+            gesture:    _autoGesture,
+            intent:     ab.intent,
+            durationMs: Math.round(gestureDurationRef.current),
+            nextAt:     Math.round(talkGestureNextAtMsRef.current),
+          });
+        }
+      } else if (talkGestureActiveRef.current && (gestureStateRef.current === 'idle' || !speaking)) {
+        // Gesture ended naturally OR speech stopped → clear the active flag so
+        // the next cycle (after cool-down) can fire when we resume speaking.
+        talkGestureActiveRef.current = false;
       }
     }
 
@@ -4206,7 +4529,44 @@ export function VRMSkeletonManager({
       const _detected = detectIntent(_utter);
       if (_detected !== 'neutral') _activeIntent = _detected;
     }
-    const _timingWeight = tickGestureTiming(_activeIntent);
+    let _timingWeight = tickGestureTiming(_activeIntent);
+    // Speech-coupling floor: when speaking, ensure intent motion is never attenuated below
+    // `0.3 + energy * 0.4`. Reads previous-frame smoothed energy from the speech-fusion bus
+    // (1-frame lag is imperceptible). Pure floor — never lowers.
+    if (speaking) {
+      const _speechEnergyForTiming = peekSpeechEnergy();
+      const _speechFloor = 0.3 + _speechEnergyForTiming * 0.4;
+      if (_speechFloor > _timingWeight) _timingWeight = _speechFloor;
+    }
+
+    // ── [MOTION_INPUT] diagnostic (STEP 1 — throttled 1 s) ───────────────────
+    {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _dg = (globalThis as any);
+      const _dgNow = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      if (!_dg.__motionInputLastMs || _dgNow - _dg.__motionInputLastMs > 1000) {
+        _dg.__motionInputLastMs = _dgNow;
+        const _inputLog = {
+          speaking,
+          energy:        +peekSpeechEnergy().toFixed(3),
+          timingWeight:  +_timingWeight.toFixed(3),
+          intent:        _activeIntent || '(none)',
+          diagnosis:
+            !speaking ? 'NOT_SPEAKING — motion baseline will be zero' :
+            peekSpeechEnergy() < 0.01 ? 'ENERGY_ZERO — viseme feed inactive' :
+            _timingWeight < 0.05 ? 'TIMING_SUPPRESSED — intent not driving' :
+            'INPUTS_OK',
+        };
+        // eslint-disable-next-line no-console
+        console.log('[MOTION_INPUT]', _inputLog);
+        // Expose for window-level inspection (STEP 2 prerequisite)
+        _dg.__motionInput = _inputLog;
+      }
+    }
+
+    // EXEC-AUDIT: motion stage marker (after intent + timing computed)
+    _execLoop.s_motionEnd = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    _execLoop.s_motionExecuted = true;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const _motionState = ((globalThis as any).__cogniMotionState ??= {
@@ -4230,6 +4590,25 @@ export function VRMSkeletonManager({
       if (_motionState.openGesture === 0) {
         _motionState.openGesture = 0.25 + Math.abs(Math.sin(_tSpeech * 0.7)) * 0.25;
       }
+
+      // ── Intent-driven gesture enrichment (additive, energy-coupled) ──
+      // Adds intent-specific motion ON TOP of the speech baseline above so
+      // each intent has a recognisable signature, even at low energy.
+      const _intentEnergy = peekSpeechEnergy();
+      if (_activeIntent === 'explaining') {
+        // Head nod tracks speech energy; gesture amplitude bumped by 0.3.
+        _motionState.headNod    += _intentEnergy * 0.04;
+        _motionState.openGesture += 0.3;
+      } else if (_activeIntent === 'emphasizing') {
+        // Periodic nod bursts at ~5 Hz, scaled by current speech energy.
+        const _burst = Math.abs(Math.sin(_tSpeech * 5.5));
+        _motionState.headNod    += _burst * 0.18 * Math.max(0.3, _intentEnergy);
+        _motionState.openGesture += 0.3 * Math.max(0.3, _intentEnergy);
+      } else if (_activeIntent === 'questioning') {
+        // Head tilt is already 0.08; add tiny nod tied to energy + micro-pause
+        // (lower-than-explaining nod magnitude reads as questioning cadence).
+        _motionState.headNod    += _intentEnergy * 0.02;
+      }
     }
 
     // Behavior Engine — multiplicative bias on motionState (does not replace baseline).
@@ -4240,22 +4619,228 @@ export function VRMSkeletonManager({
       intensity: embFrame.intent.intensity ?? 0,
     });
 
-    // Optional forced-motion override (debug-only diagnostic flag).
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    if ((typeof window !== 'undefined') && (window as any).__forceMotionState) {
-      const _ft6 = performance.now() * 0.002;
-      _motionState.headNod     = Math.sin(_ft6) * 0.3;
-      _motionState.headTilt    = Math.cos(_ft6) * 0.2;
-      _motionState.openGesture = 1.0;
+    // ── Optional forced-motion override (debug-only) — perceptually smooth blend ──
+    // Position: AFTER mergeBehaviorEngineMotionScalars, BEFORE _VIS_AMP.
+    // Zero-cost when alpha = 0 (branch exits immediately, motionState untouched).
+    // No motion detector / guard is affected (all run inside the merge above).
+    //
+    // Enhancement summary vs prior version:
+    //   1. Delta-based lerp  → real + alpha*(forced−real), identical math, explicit
+    //      delta variable enables clamping in step 3.
+    //   2. Frozen forced-state snapshot → on fade-out we blend from the snapshot
+    //      captured while alpha≈1, not from forced(t), so the source value is
+    //      frozen and cannot oscillate as the sinusoid ticks during fade-out.
+    //   3. Per-channel delta clamp → prevents single-frame spike when forced and
+    //      real motion diverge sharply (threshold 0.18 per channel).
+    //   4. Asymmetric τ: rise 100 ms / fall 280 ms for a smoother perceptual exit.
+    {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _w = (typeof window !== 'undefined' ? (window as any) : undefined);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _g = (globalThis as any);
+
+      // Persistent blend state (initialised once, lives on globalThis).
+      const _blend = (_g.__forceBlendState ??= {
+        active:      false,
+        alpha:       0,
+        target:      0,
+        lastUpdate:  performance.now(),
+        // Enhancement 2: snapshot of forced values captured while alpha ≥ 0.97
+        snapHN:      0,
+        snapHT:      0,
+        snapOG:      0,
+        snapValid:   false,
+      });
+
+      const _nowFB = performance.now();
+      const _dtFB  = Math.max(0, Math.min(100, _nowFB - _blend.lastUpdate));
+      _blend.lastUpdate = _nowFB;
+
+      const _forceEnabled = !!(_w && _w.__forceMotionState);
+      _blend.target = _forceEnabled ? 1 : 0;
+      _blend.active = _forceEnabled || _blend.alpha > 1e-4;
+
+      // Enhancement 4: asymmetric time constants.
+      const _TAU_RISE_MS = 100;
+      const _TAU_FALL_MS = 280;
+      const _tau = (_blend.target > _blend.alpha) ? _TAU_RISE_MS : _TAU_FALL_MS;
+      const _k   = 1 - Math.exp(-_dtFB / _tau);
+      _blend.alpha += (_blend.target - _blend.alpha) * _k;
+      if (_blend.target === 0 && _blend.alpha < 1e-4)       _blend.alpha = 0;
+      else if (_blend.target === 1 && _blend.alpha > 1 - 1e-4) _blend.alpha = 1;
+
+      if (_blend.alpha > 0) {
+        const _ft6 = _nowFB * 0.002;
+        const _liveHN = Math.sin(_ft6) * 0.3;
+        const _liveHT = Math.cos(_ft6) * 0.2;
+        const _liveOG = 1.0;
+
+        // Enhancement 2: capture snapshot when fully forced; reuse it on fade-out
+        // so the source value is frozen (no sinusoidal ticking during the decay).
+        if (_blend.alpha >= 0.97) {
+          _blend.snapHN    = _liveHN;
+          _blend.snapHT    = _liveHT;
+          _blend.snapOG    = _liveOG;
+          _blend.snapValid = true;
+        }
+        const _srcHN = _blend.snapValid ? _blend.snapHN : _liveHN;
+        const _srcHT = _blend.snapValid ? _blend.snapHT : _liveHT;
+        const _srcOG = _blend.snapValid ? _blend.snapOG : _liveOG;
+
+        // Enhancement 3: delta clamp — prevents spike when channels diverge sharply.
+        const _DELTA_CLAMP = 0.18;
+        const _clamp = (v: number) => Math.max(-_DELTA_CLAMP, Math.min(_DELTA_CLAMP, v));
+
+        const _a = _blend.alpha;
+
+        // Enhancement 1: explicit delta blend (real + alpha * clamp(forced − real)).
+        _motionState.headNod     += _clamp(_srcHN - _motionState.headNod)     * _a;
+        _motionState.headTilt    += _clamp(_srcHT - _motionState.headTilt)    * _a;
+        _motionState.openGesture += _clamp(_srcOG - _motionState.openGesture) * _a;
+      } else {
+        // alpha reached exactly 0 — clear snapshot so next activation starts fresh.
+        _blend.snapValid = false;
+      }
+
+      if (_w) {
+        _w.__forceBlendState = {
+          alpha:      +_blend.alpha.toFixed(4),
+          target:     _blend.target,
+          active:     _blend.active,
+          snapValid:  _blend.snapValid,
+        };
+      }
+
+      const _prevTarget = _g.__forceBlendPrevTarget;
+      if (_prevTarget !== _blend.target) {
+        _g.__forceBlendPrevTarget = _blend.target;
+        console.log('[FORCE_BLEND]', {
+          alpha:  +_blend.alpha.toFixed(3),
+          target: _blend.target,
+          edge:   _blend.target === 1 ? 'rising' : 'falling',
+        });
+      } else if (_blend.target === 0 && _blend.alpha === 0 && _g.__forceBlendDoneZero !== true) {
+        _g.__forceBlendDoneZero = true;
+        _g.__forceBlendDoneOne  = false;
+        console.log('[FORCE_BLEND]', { alpha: 0, target: 0, edge: 'fade-out-complete' });
+      } else if (_blend.target === 1 && _blend.alpha === 1 && _g.__forceBlendDoneOne !== true) {
+        _g.__forceBlendDoneOne  = true;
+        _g.__forceBlendDoneZero = false;
+        console.log('[FORCE_BLEND]', { alpha: 1, target: 1, edge: 'fade-in-complete' });
+      }
     }
 
+    // ── Speech + Emotion + Motion fusion (additive only, never overwrites) ──
+    // Position: AFTER mergeBehaviorEngineMotionScalars + force-blend, BEFORE _VIS_AMP.
+    // Reads the latest viseme magnitude pushed by LipSyncManager and adds small,
+    // smoothed deltas to head/gesture channels. Cannot zero motion → all guards
+    // upstream remain valid. `jawOpen` is created on `_motionState` here for
+    // future downstream consumers (no current reader; safe additive field).
+    applySpeechFusion(
+      _motionState as { headNod: number; headTilt: number; openGesture: number; jawOpen?: number },
+      {
+        speaking,
+        emotion: behaviorPayload?.emotion ?? 'neutral',
+        intensity: embFrame.intent.intensity ?? 0,
+        now: typeof performance !== 'undefined' ? performance.now() : Date.now(),
+      },
+    );
+
+    // ── Personality modulation (additive form of multiplication, never zeros) ──
+    // Position: AFTER speech fusion, BEFORE _VIS_AMP. Amplifies / dampens the
+    // already-finalised channels per active profile (teacher / friend / coach /
+    // neutral). Toggle at runtime via `window.__personalityProfile`.
+    applyPersonalityMotion(_motionState, {
+      speaking,
+      energy: peekSpeechEnergy(),
+      timeSec: t,
+      intent: _activeIntent,
+    });
+
+    // ── Motion dynamics: Rhythm · Anticipation · Inertia ──────────────────
+    // Position: AFTER personality, BEFORE _VIS_AMP.
+    // Adds:
+    //   • RHYTHM      — speech-coupled micro-oscillation (adaptive Hz).
+    //   • ANTICIPATION — leading-edge overshoot on intent change / speech start.
+    //   • INERTIA      — momentum carry-through so motion eases out naturally.
+    // All deltas additive; frame-rate-independent via safeDelta.
+    applyMotionDynamics(_motionState, {
+      speaking,
+      energy:   peekSpeechEnergy(),
+      intent:   _activeIntent,
+      timeSec:  t,
+      deltaSec: safeDelta,
+    });
+
+    // ── Direction-aware modulation (forward vs target / camera) ─────────────
+    // AFTER motion dynamics, BEFORE _VIS_AMP. Boost when facing listener;
+    // damp nod/gesture when avatar faces clearly away. Read-only on transforms.
+    // Uses liftNode (vrm.scene.parent) — same root as forward correction — so
+    // the yaw correction applied once at load is picked up here automatically.
+    applyDirectionalMotionModulation(_motionState, {
+      avatarRoot: vrm?.scene?.parent ?? vrm?.scene ?? null,
+      targetWorld: camera.position,
+      energy: peekSpeechEnergy(),
+    });
+
     // Visibility amplification (tight clamps prevent cinematic distortion).
-    const _VIS_AMP = 3.0;
+    // Reduced from 3.0 → 1.3 after +Z-Forward alignment to stop arm over-extension
+    // (V-Pose / arms-flying-up). Final downstream clamps still bound each channel.
+    const _VIS_AMP = 1.3;
     const _ampedMotionState = {
       headNod:     Math.max(-0.3, Math.min(0.3,  _motionState.headNod     * _VIS_AMP)),
       headTilt:    Math.max(-0.3, Math.min(0.3,  _motionState.headTilt    * _VIS_AMP)),
       openGesture: Math.max(0,    Math.min(0.8,  _motionState.openGesture * _VIS_AMP)),
     };
+
+    // ── [MOTION_TRACE] / [FINAL_MOTION_CHECK] — full-frame motion observability ──
+    // Throttled console output covering every stage required by the audit spec:
+    //   energy → intent → timingWeight → motionState → envelope → finalOutput.
+    // Stage-isolating logs ([BEHAVIOR_KILLED_MOTION] etc.) live inside the merge
+    // function; this block is the consolidated post-merge checkpoint.
+    {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _g = (globalThis as any);
+      const _now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const _MOTION_TRACE_MS = 750;
+      if (!_g.__lastMotionTraceLogAt) _g.__lastMotionTraceLogAt = -Infinity;
+      if (_now - _g.__lastMotionTraceLogAt > _MOTION_TRACE_MS) {
+        _g.__lastMotionTraceLogAt = _now;
+        const _energy = peekSpeechEnergy();
+        const _envelope = speaking ? Math.max(_energy, 0.5) : _energy;
+        const _suppressed =
+          speaking &&
+          Math.abs(_ampedMotionState.headNod) < 0.001 &&
+          _ampedMotionState.openGesture < 0.001;
+        // eslint-disable-next-line no-console
+        console.log('[MOTION_TRACE]', {
+          energy:        +_energy.toFixed(3),
+          intent:        _activeIntent || '(none)',
+          speaking,
+          timingWeight:  +_timingWeight.toFixed(3),
+          envelope:      +_envelope.toFixed(3),
+          proceduralOnly: isProceduralOnlyMotion(),
+          motionState: {
+            headNod:     +_motionState.headNod.toFixed(3),
+            headTilt:    +_motionState.headTilt.toFixed(3),
+            openGesture: +_motionState.openGesture.toFixed(3),
+          },
+          finalOutput: {
+            headNod:     +_ampedMotionState.headNod.toFixed(3),
+            headTilt:    +_ampedMotionState.headTilt.toFixed(3),
+            openGesture: +_ampedMotionState.openGesture.toFixed(3),
+          },
+          suppressed: _suppressed,
+        });
+        // eslint-disable-next-line no-console
+        console.log('[FINAL_MOTION_CHECK]', {
+          energy:      +_energy.toFixed(3),
+          headNod:     +_ampedMotionState.headNod.toFixed(3),
+          openGesture: +_ampedMotionState.openGesture.toFixed(3),
+          ok:          !_suppressed,
+        });
+      }
+    }
     // Expose timing weight to presence/idle layers (priority attenuation).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (globalThis as any).__intentAttenuation = _timingWeight;
@@ -5185,6 +5770,35 @@ export function VRMSkeletonManager({
       (globalThis as any).__fp3Before = _before;
     }
 
+    // ── [POSE_STAGE_1] snapshot: what motionState delivers to the pipeline ──────
+    {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _dg = (globalThis as any);
+      const _dgNow = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      if (!_dg.__poseStageLastMs || _dgNow - _dg.__poseStageLastMs > 1000) {
+        _dg.__poseStageLastMs = _dgNow;
+        const _luaQ = finalPose.get('lua') ?? finalPose.get('leftUpperArm');
+        const _ruaQ = finalPose.get('rua') ?? finalPose.get('rightUpperArm');
+        const _headQ = finalPose.get('head');
+        const _qFmt = (q: THREE.Quaternion | undefined) =>
+          q ? { x: +q.x.toFixed(3), y: +q.y.toFixed(3), z: +q.z.toFixed(3), w: +q.w.toFixed(3) } : null;
+        const _stage1 = {
+          motionState: {
+            headNod:     +(_motionState.headNod ?? 0).toFixed(3),
+            openGesture: +(_motionState.openGesture ?? 0).toFixed(3),
+          },
+          finalPoseHasArms: !!(finalPose.get('lua') || finalPose.get('leftUpperArm')),
+          finalPoseSize:    finalPose.size,
+          luaQuat:  _qFmt(_luaQ ?? undefined),
+          ruaQuat:  _qFmt(_ruaQ ?? undefined),
+          headQuat: _qFmt(_headQ ?? undefined),
+        };
+        // eslint-disable-next-line no-console
+        console.log('[POSE_STAGE_1]', _stage1);
+        _dg.__poseStage1 = _stage1;
+      }
+    }
+
     safeCall('finalPoseToVrm', () => applyFinalPoseToVrm({
       finalPose,
       humanoid: vrm.humanoid ?? null,
@@ -5194,6 +5808,106 @@ export function VRMSkeletonManager({
       boneRefs: {},          // ← always resolves live from vrm.humanoid
       delta: safeDelta,
     }), undefined);
+
+    // EXEC-AUDIT: applyFinalPose stage marker
+    _execLoop.s_finalPoseEnd = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    _execLoop.s_finalPoseExecuted = true;
+
+    // ── [POSE_STAGE_FINAL] + [FINAL_DIAGNOSIS] (throttled 1 s) ──────────────
+    {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _dg = (globalThis as any);
+      const _dgNow = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      if (!_dg.__poseFinalLastMs || _dgNow - _dg.__poseFinalLastMs > 1000) {
+        _dg.__poseFinalLastMs = _dgNow;
+
+        const _luaLive  = vrm.humanoid?.getNormalizedBoneNode('leftUpperArm'  as never);
+        const _ruaLive  = vrm.humanoid?.getNormalizedBoneNode('rightUpperArm' as never);
+        const _headLive = vrm.humanoid?.getNormalizedBoneNode('head'          as never);
+        const _llaLive  = vrm.humanoid?.getNormalizedBoneNode('leftLowerArm'  as never);
+
+        const _bFmt = (b: THREE.Object3D | null | undefined) =>
+          b ? { x: +b.rotation.x.toFixed(3), y: +b.rotation.y.toFixed(3), z: +b.rotation.z.toFixed(3) } : null;
+
+        const _luaRot  = _bFmt(_luaLive);
+        const _ruaRot  = _bFmt(_ruaLive);
+        const _headRot = _bFmt(_headLive);
+        const _llaRot  = _bFmt(_llaLive);
+
+        const _armNonZero = !!(_luaRot && (Math.abs(_luaRot.x) + Math.abs(_luaRot.y) + Math.abs(_luaRot.z)) > 0.05);
+        const _motionActive = speaking && peekSpeechEnergy() > 0.01;
+        const _inputOk = _motionActive && _timingWeight > 0.05;
+        const _poseReached = _armNonZero;
+
+        // Swing-twist NaN guard (STEP 6)
+        const _swingNaN =
+          _luaLive && (isNaN(_luaLive.quaternion.x) || isNaN(_luaLive.quaternion.w));
+
+        let _rootCause = 'UNKNOWN';
+        if (_swingNaN)                             _rootCause = 'NaN_IN_QUATERNION — swing-twist produced invalid result';
+        else if (!_motionActive)                   _rootCause = 'MOTION_INACTIVE — not speaking OR energy=0';
+        else if (!_inputOk)                        _rootCause = 'TIMING_SUPPRESSED — timingWeight near 0';
+        else if (!finalPose.get('lua') && !finalPose.get('leftUpperArm'))
+                                                   _rootCause = 'ARM_MISSING_FROM_POSE — finalPose has no arm key';
+        else if (!_poseReached)                    _rootCause = 'POSE_NOT_REACHING_BONES — applyFinalPoseToVrm not writing arm bones';
+        else                                       _rootCause = 'NONE — motion pipeline appears healthy';
+
+        const _diagnosis = {
+          motionActive:     _motionActive,
+          speakingFlag:     speaking,
+          energyLevel:      +peekSpeechEnergy().toFixed(3),
+          timingWeight:     +_timingWeight.toFixed(3),
+          poseResetWorking: finalPose.size > 0,
+          armBoneInFinalPose: !!(finalPose.get('lua') || finalPose.get('leftUpperArm')),
+          bonesStable:      !_swingNaN,
+          armRotNonZero:    _armNonZero,
+          axisCorrect:      !!(typeof _dg.__armAxisMap === 'function'),
+          liveBones: { lua: _luaRot, rua: _ruaRot, head: _headRot, lla: _llaRot },
+          rootCause:        _rootCause,
+        };
+
+        // eslint-disable-next-line no-console
+        console.log('[POSE_STAGE_FINAL]', {
+          lua: _luaRot, rua: _ruaRot, head: _headRot, lla: _llaRot,
+        });
+        // eslint-disable-next-line no-console
+        console.log('[FINAL_DIAGNOSIS]', _diagnosis);
+        _dg.__finalDiagnosis = _diagnosis;
+
+        // Expose callable diagnostic for DevTools
+        if (typeof window !== 'undefined' && !(window as Window & { __runDiagnostic?: () => void }).__runDiagnostic) {
+          (window as Window & { __runDiagnostic?: () => void }).__runDiagnostic = () => {
+            // eslint-disable-next-line no-console
+            console.table({
+              motionInput:   _dg.__motionInput,
+              poseStage1:    _dg.__poseStage1,
+              finalDiagnosis: _dg.__finalDiagnosis,
+              armDebug:      _dg.__armDebug,
+            });
+          };
+        }
+      }
+    }
+
+    // ── Procedural lower-body (idle weight shift + lean + knee breath) ────────
+    // Position: AFTER vrm.update() AND AFTER applyFinalPoseToVrm so the VRM heartbeat
+    // and the upper-body finalPose chain have already finished. Compose with the
+    // additive pattern (`bone.rotation.x += dx`, `bone.position.x += dx`) so any
+    // rotations / positions written by `vrm.update` are layered on top of (not
+    // replaced by) our procedural deltas.
+    //
+    // Floor-lock note: `floorLockV121.ts` only zeroes `vrm.scene.position` /
+    // quaternion — it does NOT lock `hips.position`, so the hipsOffset write is safe.
+    {
+      const _lowerBodyCtx: LowerBodyContext = {
+        time:      typeof performance !== 'undefined' ? performance.now() * 0.001 : 0,
+        speaking,
+        intent:    _activeIntent,
+        intensity: embFrame?.intent?.intensity ?? peekSpeechEnergy(),
+      };
+      const _lbState = computeProceduralLowerBody(_lowerBodyCtx);
+      safeCall('applyLowerBodyPose', () => applyLowerBodyState(vrm, _lbState), undefined);
+    }
 
     // ── BONE AUTHORITY: snapshot bones AFTER applyFinalPoseToVrm ──────────────
     // Compared to _liveBefore for VRM-override detection (any drift beyond
@@ -5241,7 +5955,207 @@ export function VRMSkeletonManager({
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (vrm.humanoid as any).update?.();
+        _execLoop.s_humanoid1Executed = true;
       } catch { /* ignore — humanoid.update() not public in all versions */ }
+    }
+    // EXEC-AUDIT: first humanoid.update marker
+    _execLoop.s_humanoid1End = typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+    // ── Biomechanical safety net (last writer, normalized bones) ─────────────
+    // Runs AFTER applyFinalPoseToVrm + humanoid.update() — the final guardian
+    // for arm/shoulder bones. Per-axis Euler clamping stops any upstream axis
+    // error or accumulation from producing a V-pose or hyper-extended elbow.
+    //
+    // idleCtx: when energy<0.01 && !speaking, a natural arm-hang pose is
+    // blended in before the clamp — prevents the T-pose freeze symptom.
+    if (vrm.humanoid) {
+      const _bioIdleCtx = { speaking, energy: peekSpeechEnergy() };
+      safeCall(
+        'biomechanicalLayer',
+        () => applyBiomechanicalLayer(vrm.humanoid!, _bioIdleCtx),
+        undefined,
+      );
+      // EXEC-AUDIT: biomechanical stage marker
+      _execLoop.s_biomechEnd = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      _execLoop.s_biomechExecuted = true;
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // CRITICAL FIX — Re-propagate normalized → raw AFTER biomechanical layer.
+      //
+      // Bug history: humanoid.update() ran ONLY before biomechanicalLayer (above).
+      // The clamp + idle pose written in biomechanicalLayer wrote to NORMALIZED
+      // bones, but raw bones (which the renderer actually uses for skinning)
+      // kept the unclamped pre-biomechanical values from the previous
+      // humanoid.update(). Result: arms appeared in T-pose / went backward
+      // even though the normalized values were correct.
+      //
+      // Calling humanoid.update() AGAIN here propagates the biomechanical
+      // output to raw bones so what we computed = what gets rendered.
+      // ═══════════════════════════════════════════════════════════════════════
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (vrm.humanoid as any).update?.();
+        _execLoop.s_humanoid2Executed = true;
+      } catch { /* ignore — humanoid.update() not public in all versions */ }
+
+      // EXEC-AUDIT: second humanoid.update marker + override-detection snapshot
+      _execLoop.s_humanoid2End = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const _luaPost = (vrm.humanoid as any).getRawBoneNode?.('leftUpperArm') as
+          | THREE.Object3D
+          | undefined;
+        _execLoop.ov_afterBio = _luaPost ? _luaPost.rotation.z : NaN;
+      } catch { /* ignore */ }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FINAL HARD GROUND ENFORCEMENT — uses RAW bones (post second humanoid.update).
+    //
+    // Reads the actual rendered foot world Y from raw bones (the bones that
+    // skin the mesh) and snaps the avatar so feet land EXACTLY on world floor.
+    // Runs as the absolute last writer in the frame; nothing after this can
+    // re-introduce floating.
+    //
+    // Throttled [FINAL_DIAGNOSIS] log gives a one-line snapshot per second of
+    // the actual rendered state (raw bone arm rotations + foot Y).
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (vrm.humanoid && vrm.scene?.parent) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _hRaw = vrm.humanoid as { getRawBoneNode?: (n: any) => THREE.Object3D | undefined };
+      const _liftNode = vrm.scene.parent;
+      const _lFootRaw = _hRaw.getRawBoneNode?.('leftFoot');
+      const _rFootRaw = _hRaw.getRawBoneNode?.('rightFoot');
+
+      if (_lFootRaw && _rFootRaw) {
+        _liftNode.updateMatrixWorld(true);
+        const _lp = new THREE.Vector3();
+        const _rp = new THREE.Vector3();
+        _lFootRaw.getWorldPosition(_lp);
+        _rFootRaw.getWorldPosition(_rp);
+        const _avgRawFootY = (_lp.y + _rp.y) * 0.5;
+
+        // Per-frame snap with deadband (no fight with normal sway).
+        // Target floor is world Y = 0 (matches WORLD_FLOOR_Y).
+        // For the bounded room, FloorLockRuntime handles its own targetFloorY
+        // via runWorldFloorAntiDriftFrame; this hard snap only acts when
+        // the deviation is significant (> 5 mm) so we don't double-correct.
+        if (Number.isFinite(_avgRawFootY) && Math.abs(_avgRawFootY) > 0.005) {
+          _liftNode.position.y -= _avgRawFootY;
+        }
+
+        // Throttled diagnosis (1 s).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const _dg = (globalThis as any);
+        const _now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        if (!_dg.__finalGroundLastMs || _now - _dg.__finalGroundLastMs > 1000) {
+          _dg.__finalGroundLastMs = _now;
+          const _luaRaw = _hRaw.getRawBoneNode?.('leftUpperArm');
+          const _ruaRaw = _hRaw.getRawBoneNode?.('rightUpperArm');
+          const _llaRaw = _hRaw.getRawBoneNode?.('leftLowerArm');
+          const _rlaRaw = _hRaw.getRawBoneNode?.('rightLowerArm');
+          const _eFmt = (b: THREE.Object3D | undefined) =>
+            b ? { x: +b.rotation.x.toFixed(3), y: +b.rotation.y.toFixed(3), z: +b.rotation.z.toFixed(3) } : null;
+          const _liftValid = vrm.scene.parent === _liftNode;
+          if (!_liftValid) {
+            // eslint-disable-next-line no-console
+            console.error('[LIFT_NODE_INVALID]', 'vrm.scene.parent is NOT the liftNode — grounding will fail');
+          }
+          // eslint-disable-next-line no-console
+          console.log('[REAL_FOOT_WORLD]', +_avgRawFootY.toFixed(4));
+          // eslint-disable-next-line no-console
+          console.log('[GROUND_APPLIED]', +_liftNode.position.y.toFixed(4));
+
+          // ── Speech-lifecycle integration (window.__speechLifecycle) ────────
+          // Read-only — never modifies the guard state.  Surfaces race
+          // conditions inline in [FINAL_DIAGNOSIS] so a single console line
+          // tells you both the rendered state AND any speech-event misorder.
+          const _speech = (typeof window !== 'undefined'
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ? ((window as any).__speechLifecycle as
+                | {
+                    isSpeaking: boolean;
+                    lastStartMs: number;
+                    lastEndMs: number;
+                    blockedCount: { prematureEnd: number; overlappingStart: number; debounced: number };
+                    forcedEndCount: number;
+                  }
+                | undefined)
+            : undefined) ?? null;
+
+          const _speechInfo = _speech
+            ? {
+                isSpeaking:     _speech.isSpeaking,
+                sinceStartMs:   Number.isFinite(_speech.lastStartMs) ? Math.round(_now - _speech.lastStartMs) : null,
+                sinceEndMs:     Number.isFinite(_speech.lastEndMs)   ? Math.round(_now - _speech.lastEndMs)   : null,
+                blocked:        { ..._speech.blockedCount },
+                forcedEndCount: _speech.forcedEndCount,
+              }
+            : null;
+
+          // Race-condition flag — first match wins (highest severity → lowest).
+          // Mirrors the user spec exactly: STUCK_SPEAKING > PREMATURE_END_BLOCKED > START_NOT_PROPAGATED.
+          let _raceWarning: string | null = null;
+          if (_speechInfo) {
+            if (
+              _speechInfo.isSpeaking &&
+              _speechInfo.sinceStartMs !== null &&
+              _speechInfo.sinceStartMs > 60000
+            ) {
+              _raceWarning = 'STUCK_SPEAKING';
+            } else if ((_speechInfo.blocked?.prematureEnd ?? 0) > 0) {
+              _raceWarning = 'PREMATURE_END_BLOCKED';
+            } else if (
+              !_speechInfo.isSpeaking &&
+              _speechInfo.sinceStartMs !== null &&
+              _speechInfo.sinceStartMs < 200
+            ) {
+              _raceWarning = 'START_NOT_PROPAGATED';
+            } else if ((_speechInfo.blocked?.overlappingStart ?? 0) > 0) {
+              _raceWarning = 'OVERLAPPING_START_BLOCKED';
+            } else if ((_speechInfo.forcedEndCount ?? 0) > 0) {
+              _raceWarning = 'FORCED_END_RECOVERY';
+            }
+          }
+
+          // Geometry / motion issue — race-condition takes precedence so it's
+          // the FIRST thing surfaced when both apply (race usually causes the
+          // motion symptom downstream).
+          const _geometryIssue =
+            !_liftValid ? 'LIFT_NODE_INVALID — vrm.scene parent is wrong' :
+            !Number.isFinite(_avgRawFootY) ? 'RAW_FEET_INVALID — bone world position NaN' :
+            Math.abs(_avgRawFootY) > 0.05 ? 'FLOATING — feet not converged to floor' :
+            (_luaRaw && _luaRaw.rotation.x > 0.4) ? 'BACKWARD_ARM — left upper arm exceeds forward bound' :
+            (_luaRaw && Math.abs(_luaRaw.rotation.x) < 0.01 && Math.abs(_luaRaw.rotation.z) < 0.01 && !speaking) ? 'T_POSE_DETECTED — idle pose did not apply' :
+            'OK';
+
+          // eslint-disable-next-line no-console
+          console.log('[FINAL_DIAGNOSIS]', {
+            realFootY:    +_avgRawFootY.toFixed(4),
+            liftNodeY:    +_liftNode.position.y.toFixed(4),
+            grounded:     Math.abs(_avgRawFootY) < 0.01,
+            liftNodeValid: _liftValid,
+            rawArm: {
+              lUpper: _eFmt(_luaRaw),
+              rUpper: _eFmt(_ruaRaw),
+              lLower: _eFmt(_llaRaw),
+              rLower: _eFmt(_rlaRaw),
+            },
+            speech: _speechInfo,
+            race:   _raceWarning,
+            issue:  _raceWarning ? `${_raceWarning} (geometry: ${_geometryIssue})` : _geometryIssue,
+          });
+        }
+      } else {
+        // Foot bones not available — log once per session.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const _dg = (globalThis as any);
+        if (!_dg.__rawFootMissingLogged) {
+          _dg.__rawFootMissingLogged = true;
+          // eslint-disable-next-line no-console
+          console.warn('[REAL_FOOT_WORLD] Raw foot bones not available — falling back to FloorLockRuntime only.');
+        }
+      }
     }
 
     // ── REMOVED: post-VRM "failsafe" direct bone writes (`+=` block) ─────────
@@ -5541,6 +6455,111 @@ export function VRMSkeletonManager({
     }
 
     prevMotionSourceRef.current = motionSource;
+
+    // ── EXECUTION-LOOP AUDIT — frame end marker + throttled report ───────────
+    _execLoop.s_frameEnd = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _luaEnd = (vrm.humanoid as any)?.getRawBoneNode?.('leftUpperArm') as
+        | THREE.Object3D
+        | undefined;
+      _execLoop.ov_atFrameEnd = _luaEnd ? _luaEnd.rotation.z : NaN;
+    } catch { /* ignore */ }
+
+    // FPS measurement: 1-second sliding window.
+    if (_execLoop.s_frameEnd - _execLoop.fpsWindowStartMs >= 1000) {
+      _execLoop.measuredFps = _execLoop.fpsWindowFrames;
+      _execLoop.fpsWindowFrames = 0;
+      _execLoop.fpsWindowStartMs = _execLoop.s_frameEnd;
+    }
+
+    // [EXECUTION_DIAGNOSIS] — one log per second, full report.
+    if (_execLoop.s_frameEnd - _execLoop.lastDiagnosisMs > 1000) {
+      _execLoop.lastDiagnosisMs = _execLoop.s_frameEnd;
+
+      // Order check: timestamps must be non-decreasing (motion ≤ finalPose ≤ h1 ≤ bio ≤ h2 ≤ end).
+      const _tStages = [
+        _execLoop.s_motionEnd,
+        _execLoop.s_finalPoseEnd,
+        _execLoop.s_humanoid1End,
+        _execLoop.s_biomechEnd,
+        _execLoop.s_humanoid2End,
+        _execLoop.s_frameEnd,
+      ];
+      let _orderCorrect = true;
+      for (let i = 1; i < _tStages.length; i++) {
+        if (_tStages[i] < _tStages[i - 1]) { _orderCorrect = false; break; }
+      }
+
+      // Override detection: did anything move leftUpperArm.rotation.z between
+      // the second humanoid.update and the frame end?
+      const _ovDelta = Math.abs(_execLoop.ov_atFrameEnd - _execLoop.ov_afterBio);
+      const _overrideDetected =
+        Number.isFinite(_ovDelta) && _ovDelta > 1e-4;
+
+      // Motion-active heuristic: read snapshot from [MOTION_INPUT].
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _mi = (globalThis as any).__motionInput as
+        | { speaking?: boolean; energy?: number }
+        | undefined;
+      const _motionActive = !!_mi?.speaking || (_mi?.energy ?? 0) > 0.01;
+
+      const _allStagesOk =
+        _execLoop.s_motionExecuted &&
+        _execLoop.s_finalPoseExecuted &&
+        _execLoop.s_humanoid1Executed &&
+        _execLoop.s_biomechExecuted &&
+        _execLoop.s_humanoid2Executed;
+
+      let _rootCause: string;
+      if (_execLoop.earlyReturnReason)        _rootCause = `EARLY_RETURN — ${_execLoop.earlyReturnReason}`;
+      else if (!_allStagesOk)                 _rootCause = 'STAGE_SKIPPED — pipeline did not reach all stages';
+      else if (!_orderCorrect)                _rootCause = 'ORDER_VIOLATION — stage timestamps not monotonic';
+      else if (_overrideDetected)             _rootCause = `OVERRIDE_DETECTED — leftUpperArm.z drifted ${_ovDelta.toFixed(4)} after second humanoid.update`;
+      else if (_execLoop.measuredFps < 30)    _rootCause = `LOW_FPS — measured ${_execLoop.measuredFps} fps`;
+      else                                    _rootCause = 'OK';
+
+      const _report = {
+        loopRunning:        true, // we are inside useFrame, so it's running
+        fpsStable:          _execLoop.measuredFps >= 30,
+        measuredFps:        _execLoop.measuredFps,
+        orderCorrect:       _orderCorrect,
+        motionActive:       _motionActive,
+        overridesDetected:  _overrideDetected,
+        earlyReturnFound:   _execLoop.earlyReturnReason !== null,
+        stages: {
+          motion:        _execLoop.s_motionExecuted,
+          applyFinalPose: _execLoop.s_finalPoseExecuted,
+          humanoidUpdate1: _execLoop.s_humanoid1Executed,
+          biomechanical: _execLoop.s_biomechExecuted,
+          humanoidUpdate2: _execLoop.s_humanoid2Executed,
+        },
+        timings: {
+          motionToFinalPose:    +(_execLoop.s_finalPoseEnd - _execLoop.s_motionEnd).toFixed(2),
+          finalPoseToHumanoid1: +(_execLoop.s_humanoid1End - _execLoop.s_finalPoseEnd).toFixed(2),
+          humanoid1ToBio:       +(_execLoop.s_biomechEnd - _execLoop.s_humanoid1End).toFixed(2),
+          bioToHumanoid2:       +(_execLoop.s_humanoid2End - _execLoop.s_biomechEnd).toFixed(2),
+          humanoid2ToEnd:       +(_execLoop.s_frameEnd - _execLoop.s_humanoid2End).toFixed(2),
+          totalFrameMs:         +(_execLoop.s_frameEnd - _execLoop.s_motionEnd).toFixed(2),
+        },
+        ovBoneZ: {
+          afterBio:   Number.isFinite(_execLoop.ov_afterBio)   ? +_execLoop.ov_afterBio.toFixed(4)   : null,
+          atFrameEnd: Number.isFinite(_execLoop.ov_atFrameEnd) ? +_execLoop.ov_atFrameEnd.toFixed(4) : null,
+          delta:      Number.isFinite(_ovDelta) ? +_ovDelta.toFixed(4) : null,
+        },
+        frameCount: _execLoop.frameCount,
+        rootCause:  _rootCause,
+      };
+
+      // eslint-disable-next-line no-console
+      console.log('[EXECUTION_DIAGNOSIS]', _report);
+
+      // Expose for live inspection from DevTools.
+      if (typeof window !== 'undefined') {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).__executionDiagnosis = _report;
+      }
+    }
 
     // ── BONE AUTHORITY: end-of-frame root-cause emit + close trace group ──────
     // emitRootCauseIfAny is rate-limited internally (≥90 frames between logs)

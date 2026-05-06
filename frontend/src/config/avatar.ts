@@ -136,9 +136,14 @@ export const MANUAL_FLOOR_Y = WORLD_FLOOR_Y;
 
 /**
  * Default placement for `office.glb` + VRM in `AvatarCanvas` (metres, Y-up).
- * Office is scaled (~0.52); avatar Y is lowered so the figure stands on the room floor
- * (not on the desk mesh), and +Z moves them into the room volume behind the desk
- * (camera sits on −Z looking toward +Z).
+ *
+ * Coordinate convention: +Y up, +Z forward (VRM native).
+ * Camera sits on −Z, looks toward +Z (avatar face direction).
+ *
+ * avatarPosition.Y = 0   → avatar root at world floor; `applyFootFloorCalib` (liftNode)
+ *                           handles the sole→foot-bone gap automatically so feet land exactly
+ *                           on WORLD_FLOOR_Y = 0 regardless of model rig.
+ * avatarPosition.Z = 0   → avatar centred in world XZ; no desk-Z offset needed.
  *
  * Override fine-tuning with `NEXT_PUBLIC_AVATAR_STAND_Y_OFFSET` (added to avatar Y).
  */
@@ -146,21 +151,19 @@ export const AVATAR_OFFICE_SCENE_DEFAULTS = {
   /** Locked room root position — same as `FINAL_ROOM_POSITION`. */
   officePosition: FINAL_ROOM_POSITION,
   officeScale: 1.0,
-  // Avatar at desk (Z=-0.7). World frame: +Z forward (VRM native); camera uses −Z offset in AvatarCanvas.
-  // Y=0.30 = floor level (simulates seated-at-desk position from camera angle).
-  avatarPosition: [0, 0.30, -0.7] as [number, number, number],
+  // Y=0 → applyFootFloorCalib snaps feet to WORLD_FLOOR_Y (no manual offset needed).
+  // Z=0 → centred; camera placed at [0, eyeY, -distance] looking at [0, lookY, 0].
+  avatarPosition: [0, 0, 0] as [number, number, number],
   avatarScale: 1.0,
   /**
-   * @deprecated Legacy sideline sample (−X world offset). **Not used by `AvatarCanvas` runtime** —
-   * production camera is `[avatarX, eyeY, avatarZ − distance]` on world **−Z**, sight line toward **+Z**
-   * (avatar front). Numeric tuple kept only for backwards-compatible snapshots / tooling.
+   * @deprecated Legacy sideline sample kept for backwards-compatible snapshots / tooling only.
+   * AvatarCanvas runtime camera is computed from avatarX/Z + eye-height + Z-offset constants.
    */
-  cameraPosition: [-3.2, 1.55, -0.7] as [number, number, number],
+  cameraPosition: [0, 1.55, -5.0] as [number, number, number],
   /**
-   * @deprecated Legacy orbit anchor paired with `cameraPosition` above. **`AvatarCanvas`** sets
-   * `OrbitControls.target` from avatar face height + `avatarZ`; do not assume these literals drive prod.
+   * @deprecated Orbit anchor — AvatarCanvas sets OrbitControls.target from avatar face + avatarZ.
    */
-  orbitTarget: [0, 1.25, -0.7] as [number, number, number],
+  orbitTarget: [0, 1.42, 0] as [number, number, number],
 } as const;
 
 /**

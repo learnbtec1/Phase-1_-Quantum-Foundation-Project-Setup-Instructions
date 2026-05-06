@@ -30,6 +30,7 @@ import { useBrainStore } from '@/store/useBrainStore';
 import { initBrainPersistence, flushBrainPersistence } from '@/lib/brainPersistence';
 import { recordPersonalitySessionVisit } from '@/ai/avatar/personalityMemory';
 import { initMasterClockSession } from '@/lib/avatar/masterClock';
+import { initSpeechLifecycleGuard } from '@/lib/avatar/speechLifecycleGuard';
 import { applyBrainStatePayload, transitionFsmToListening } from '@/lib/avatar/behaviorExecutionContract';
 import type { BrainStatePayload } from '@/lib/avatar/brainStatePayload';
 import { clearAudioTimeline, patchTimelineCues, setPlaybackAudio, clearVisemeTimelineCues, type AudioTimelineSource } from '@/lib/avatar/audioTimeline';
@@ -112,10 +113,50 @@ function FloorLockRuntime({
   footTargetWorldY?: number;
 }) {
   const liftDebugFrameRef = useRef(0);
+  const finalStateLogMsRef = useRef(0);
   useFrame(() => {
     const g = groupRef.current;
     if (g) {
       runWorldFloorAntiDriftFrame(vrm, liftNode, g, footTargetWorldY);
+    }
+    // ── [FINAL_STATE] throttled diagnostic (1 s) ─────────────────────────────
+    // Single-line summary covering foot grounding + arm idle state. Lets you
+    // confirm at a glance: feet at floor, liftNode steady, arms not in T-pose.
+    const _now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (_now - finalStateLogMsRef.current > 1000) {
+      finalStateLogMsRef.current = _now;
+      let footY: number | null = null;
+      try {
+        const h = vrm.humanoid as {
+          getNormalizedBoneNode?: (n: string) => THREE.Object3D | undefined;
+        };
+        const lf = h.getNormalizedBoneNode?.('leftFoot');
+        const rf = h.getNormalizedBoneNode?.('rightFoot');
+        if (lf && rf && g) {
+          g.updateMatrixWorld(true);
+          const lp = new THREE.Vector3(); lf.getWorldPosition(lp);
+          const rp = new THREE.Vector3(); rf.getWorldPosition(rp);
+          footY = (lp.y + rp.y) * 0.5;
+        }
+      } catch { /* ignore */ }
+      const w = typeof window !== 'undefined'
+        ? (window as Window & {
+            __armDebug?: unknown;
+            __motionInput?: { speaking?: boolean; energy?: number };
+          })
+        : null;
+      const speaking = !!w?.__motionInput?.speaking;
+      const energy = w?.__motionInput?.energy ?? 0;
+      // eslint-disable-next-line no-console
+      console.log('[FINAL_STATE]', {
+        footY: footY === null ? null : +footY.toFixed(4),
+        liftNodeY: +liftNode.position.y.toFixed(4),
+        targetFloorY: typeof footTargetWorldY === 'number' ? footTargetWorldY : getWorldFloorY(),
+        isIdle: !speaking && energy < 0.01,
+        speaking,
+        energy,
+        armRotation: w?.__armDebug ?? null,
+      });
     }
     if (process.env.NODE_ENV === 'development' && DEBUG_AVATAR) {
       liftDebugFrameRef.current += 1;
@@ -211,18 +252,20 @@ function FloorClickDetector({
 }
 
 /** Office panorama / equirect path — elevated wide framing. */
-const OFFICE_CAMERA_FACE_Y = 2.5;
+// Camera eye height: 1.55 m targets face centre of a 1.70-1.75 m VRM avatar.
+const OFFICE_CAMERA_FACE_Y = 1.55;
 /** Bounded 6×6 room: eye height ≈1.6 m — matches real interior perspective (less “top-down”). */
-const OFFICE_CAMERA_FACE_Y_BOUNDED = 1.62;
-const OFFICE_CAMERA_Z_OFFSET = 5;
+const OFFICE_CAMERA_FACE_Y_BOUNDED = 1.55;
+const OFFICE_CAMERA_Z_OFFSET = 3.5;
 /**
  * Bounded room: camera on **−Z** world axis at `avatarZ − offset`, sight line **+Z** toward avatar face.
  * VRM native forward is **+Z**; offset magnitude (~5.5–6 m) matches the bounded-room framing FOV.
  */
-const OFFICE_CAMERA_Z_OFFSET_BOUNDED_ROOM = 5.78;
-const OFFICE_LOOK_AT_Y_OFFSET = 1.25;
+const OFFICE_CAMERA_Z_OFFSET_BOUNDED_ROOM = 4.2;
+/** Look-at height from avatar feet - face centre of a 1.70 m VRM (both modes). */
+const OFFICE_LOOK_AT_Y_OFFSET = 1.55;
 /** Look-at ≈ face/chest height from avatar root (feet) — aligns with avatar integration. */
-const OFFICE_LOOK_AT_Y_OFFSET_BOUNDED = 1.42;
+const OFFICE_LOOK_AT_Y_OFFSET_BOUNDED = 1.55;
 /** Tight horizontal FOV for bounded room atlas / façade (see product art direction). */
 const BOUNDED_ROOM_CAMERA_FOV = 40;
 const OFFICE_CAMERA_LABEL_Y = 0.3;
@@ -433,6 +476,10 @@ export default function AvatarCanvas({
   const spontaneousBehaviorEnabled = true;
 
   useEffect(() => {
+    // Speech-lifecycle guard MUST init first — registers capture-phase listeners
+    // for `avatar:speak:start` / `avatar:speak:end` before any consumer effect
+    // attaches. Blocks premature/overlapping events with [SPEAK_RACE_CONDITION].
+    initSpeechLifecycleGuard();
     initGestureNormalizer();
     initBrainPersistence();
     initMasterClockSession();

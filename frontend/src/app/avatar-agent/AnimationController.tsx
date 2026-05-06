@@ -120,6 +120,134 @@ const _avatarWorldScratch = new THREE.Vector3();
 const _toCamScratch = new THREE.Vector3();
 const _camAnchorScratch = new THREE.Vector3();
 const _fusedEyeScratch = new THREE.Vector3();
+const _eyeLocalScratch = new THREE.Vector3();
+const _avatarFwdScratch = new THREE.Vector3();
+const _avatarQuatScratch = new THREE.Quaternion();
+
+/** One-time log + auto-detect cache for the +Z-Forward yaw-inversion lookAt fix. */
+let _behaviorFixLogged = false;
+let _lookAtInvertX: boolean | null = null;
+let _orientationAuditAdvancedDone = false;
+
+/**
+ * Precise orientation audit for a VRM avatar imported from Blender.
+ *
+ * Reads-only. Determines forward direction in world space, classifies the
+ * orientation, performs a real lookAt round-trip on the head bone to detect
+ * X-axis inversion, and prints a clear diagnosis with a recommended fix.
+ *
+ * Safety:
+ *   - DOES NOT mutate any bone permanently (head quaternion is restored).
+ *   - DOES NOT apply auto-corrections — purely diagnostic.
+ *   - Pipeline-safe: invoked at module level and gated by a one-shot flag.
+ */
+function runOrientationAuditAdvanced(
+  avatarRoot: THREE.Object3D,
+  vrm: VRM | null,
+): void {
+  // STEP 1 — ROOT
+  const quat = new THREE.Quaternion();
+  avatarRoot.getWorldQuaternion(quat);
+
+  // STEP 2 — FORWARD VECTOR
+  const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(quat);
+
+  // eslint-disable-next-line no-console
+  console.log('[FORWARD_VECTOR]', {
+    x: +forward.x.toFixed(3),
+    y: +forward.y.toFixed(3),
+    z: +forward.z.toFixed(3),
+  });
+
+  // STEP 3 — CLASSIFICATION
+  const forwardZ = forward.z;
+  let classification: 'FACING_PLUS_Z' | 'FACING_MINUS_Z' | 'SIDEWAYS_OR_MISALIGNED' =
+    'SIDEWAYS_OR_MISALIGNED';
+  let isCorrect = false;
+  let isInverted = false;
+
+  if (forwardZ > 0.5) {
+    classification = 'FACING_PLUS_Z';
+    isCorrect = true;
+  } else if (forwardZ < -0.5) {
+    classification = 'FACING_MINUS_Z';
+    isInverted = true;
+  }
+
+  // STEP 4 — LOOKAT TEST (real round-trip on head bone)
+  let lookAtInverted = false;
+  try {
+    const head =
+      vrm?.humanoid?.getNormalizedBoneNode?.('head' as never) as THREE.Object3D | null | undefined;
+    const lookAt = (vrm as { lookAt?: { lookAt?: (p: THREE.Vector3) => void } } | null)?.lookAt;
+
+    if (head && lookAt?.lookAt) {
+      const originalRot = head.quaternion.clone();
+
+      // target to +X (world right)
+      const testTarget = new THREE.Vector3(1, 0, 0);
+      lookAt.lookAt(testTarget);
+
+      // read new orientation
+      const newQuat = head.quaternion.clone();
+
+      // delta = new * inverse(original)
+      const delta = new THREE.Quaternion()
+        .copy(newQuat)
+        .multiply(originalRot.clone().invert());
+
+      const euler = new THREE.Euler().setFromQuaternion(delta, 'YXZ');
+
+      // If yaw rotation went left (negative Y) when commanded to +X (right) → inverted.
+      if (euler.y < 0) {
+        lookAtInverted = true;
+      }
+
+      // restore original head pose (no permanent mutation)
+      head.quaternion.copy(originalRot);
+    }
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn('[LOOKAT_TEST_FAILED]', e);
+  }
+
+  // STEP 5 — FINAL REPORT
+  const report = {
+    forwardZ: +forwardZ.toFixed(3),
+    classification,
+    isCorrect,
+    isInverted,
+    lookAtInverted,
+    requiresFix: isInverted || lookAtInverted,
+  };
+  // eslint-disable-next-line no-console
+  console.log('[ORIENTATION_AUDIT_ADVANCED]', report);
+
+  // STEP 6 — RECOMMENDATIONS (no auto-apply)
+  if (isInverted || lookAtInverted) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      [
+        '[FIX_RECOMMENDATION]',
+        '',
+        '1. Blender Fix (Preferred):',
+        '   Ensure the avatar faces -Z in Blender before export so it lands on +Z at runtime.',
+        '',
+        '2. Runtime Fix:',
+        '   avatarRoot.rotation.y = Math.PI',
+        '',
+        '3. LookAt-only Fix:',
+        '   if (lookAtInverted) → invert X axis in lookAt target',
+        '   target.x *= -1',
+      ].join('\n'),
+    );
+  }
+
+  if (typeof window !== 'undefined') {
+    (window as Window & { __orientationAuditAdvanced?: typeof report }).__orientationAuditAdvanced =
+      report;
+  }
+}
 
 /**
  * Try the canonical name first, then all dual-alias alternatives.
@@ -873,16 +1001,86 @@ export function AnimationController({
     }
 
     const vrmaBlocksLookAt = vrmaActiveRef?.current === true;
+
+    // ── +Z-Forward yaw-inversion fix ────────────────────────────────────────
+    // Detect once on first valid frame whether horizontal eye tracking needs an
+    // X sign-flip. When the avatar root is rotated ~180° on Y, three-vrm's
+    // lookAt routes "world right (+X)" to its local −X. With the new global
+    // standard (root identity, model pre-fixed +Z forward) the auto-detect
+    // typically resolves to false. A runtime override is honoured so devs can
+    // force the flip per spec STEP 3 if their specific rig still feels mirrored:
+    //
+    //   window.__lookAtForceInvertX = true  // force flip ON
+    //   window.__lookAtForceInvertX = false // force flip OFF
+    //   window.__lookAtForceInvertX = undefined → fall through to auto-detect
+    if (group && _lookAtInvertX === null) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _override = (window as any).__lookAtForceInvertX;
+      group.getWorldQuaternion(_avatarQuatScratch);
+      _avatarFwdScratch.set(0, 0, 1).applyQuaternion(_avatarQuatScratch);
+      const _autoDetect = _avatarFwdScratch.z < -0.5;
+      _lookAtInvertX = typeof _override === 'boolean' ? _override : _autoDetect;
+      if (!_behaviorFixLogged) {
+        _behaviorFixLogged = true;
+        // eslint-disable-next-line no-console
+        console.log('[BEHAVIOR_FIX_APPLIED]', true, {
+          lookAtInvertX: _lookAtInvertX,
+          source:        typeof _override === 'boolean' ? 'override' : 'auto',
+          avatarFwdZ:    +_avatarFwdScratch.z.toFixed(3),
+          visAmp:        1.3,
+          armAntiVPose:  true,
+        });
+        // eslint-disable-next-line no-console
+        console.log('[GLOBAL_ORIENTATION_UNIFIED]', true, {
+          standard: '+Z forward, +Y up, +X right',
+          camera:   'world −Z looking toward +Z',
+          rootRotation: 'identity (Blender pre-fixed VRM)',
+          visAmp: 1.3,
+          armAntiVPose: true,
+          lookAtInvertX: _lookAtInvertX,
+          finalPoseAfterVrmUpdate: true,
+          gestureCalibIdentity: true,
+        });
+      }
+
+      // ── Precise orientation audit (one-shot, read-only diagnostic) ────────
+      if (!_orientationAuditAdvancedDone) {
+        _orientationAuditAdvancedDone = true;
+        try {
+          runOrientationAuditAdvanced(group, vrm ?? null);
+        } catch (auditErr) {
+          // eslint-disable-next-line no-console
+          console.warn('[ORIENTATION_AUDIT_FAILED]', auditErr);
+        }
+        // Expose a manual re-run hook for live debugging from the console.
+        if (typeof window !== 'undefined') {
+          (window as Window & {
+            __runOrientationAudit?: () => void;
+          }).__runOrientationAudit = () => runOrientationAuditAdvanced(group, vrm ?? null);
+        }
+      }
+    }
+
+    /** Apply (world → local → flip X → world) when inversion is detected, otherwise pass through. */
+    const _lookAtTarget = (worldVec: THREE.Vector3): THREE.Vector3 => {
+      if (!_lookAtInvertX || !group) return worldVec;
+      _eyeLocalScratch.copy(worldVec);
+      group.worldToLocal(_eyeLocalScratch);
+      _eyeLocalScratch.x = -_eyeLocalScratch.x;
+      group.localToWorld(_eyeLocalScratch);
+      return _eyeLocalScratch;
+    };
+
     if (!vrmaBlocksLookAt && lookAt?.lookAt && group) {
       lookAt.autoUpdate = false;
-      lookAt.lookAt(eyeAccumRef.current);
+      lookAt.lookAt(_lookAtTarget(eyeAccumRef.current));
     } else if (vrmaBlocksLookAt && lookAt?.lookAt && group) {
       // VRMA owns head — still nudge eye target so pupils aren’t frozen in world space.
       lookAt.autoUpdate = false;
       _eyeWorldScratch.copy(eyeAccumRef.current);
       _eyeWorldScratch.x += Math.sin(t * 2.05 + eyeBobPhaseARef.current) * 0.019;
       _eyeWorldScratch.y += Math.cos(t * 1.68 + eyeBobPhaseBRef.current) * 0.015;
-      lookAt.lookAt(_eyeWorldScratch);
+      lookAt.lookAt(_lookAtTarget(_eyeWorldScratch));
     }
   }, -2);
 

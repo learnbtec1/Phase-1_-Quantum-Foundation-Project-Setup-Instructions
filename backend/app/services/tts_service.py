@@ -486,6 +486,18 @@ async def synthesize_edge_tts_async(text: str, voice: Optional[str] = None) -> b
     t = (text or "").strip()
     if not t:
         raise ValueError("TTS text cannot be empty")
+
+    # Phonetic middleware — last layer before the TTS engine sees the text.
+    # Adds Jordanian-specific tashkeel on high-frequency function words so
+    # Edge's Arabic voices articulate them with Levantine cadence.  Idempotent;
+    # skips if text is already substantially diacritized.  No-op when the env
+    # flag `PHONETIC_FILTER_DISABLED=true` is set.
+    try:
+        from app.services.phonetic_filter import filter_for_tts
+        t = filter_for_tts(t)
+    except Exception as _phon_err:  # pragma: no cover — defensive only
+        logger.warning("[EdgeTTS] phonetic_filter skipped: %s", _phon_err)
+
     v = (voice or edge_tts_voice_name()).strip() or "ar-JO-TaimNeural"
 
     fd, path = tempfile.mkstemp(suffix=".mp3", prefix="cogni_edge_")

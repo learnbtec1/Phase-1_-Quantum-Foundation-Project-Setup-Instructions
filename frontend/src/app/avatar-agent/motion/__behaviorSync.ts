@@ -51,6 +51,7 @@ import {
   type BehaviorState as BehaviorEnginePlan,
 } from './__behaviorEngine';
 import { computeTimingState, applyTimingToMotion } from './__behaviorTiming';
+import { computeHumanBehavior, type HumanState } from './__humanBehaviorEngine';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PART 1 — Types & aggregator
@@ -1247,16 +1248,71 @@ let _lastMotionZeroLogMs = -Infinity;
 const MOTION_ZERO_LOG_MS = 600;
 let _lastMotionGuardLogMs = -Infinity;
 const MOTION_GUARD_LOG_MS = 600;
+let _lastHumanBehaviorLogMs = -Infinity;
+const HUMAN_BEHAVIOR_LOG_MS = 500;
+
+let _lastHumanState: HumanState | null = null;
 
 /** Counters surfaced via `window.__avatarMotionGuardStats` for tests / overlay. */
 const _guardStats = {
   motionZero: 0,
   behaviorKilled: 0,
   timingKilled: 0,
+  humanKilled: 0,
   finalOverride: 0,
   guardApplied: 0,
+  guardFailure: 0,
   settlingClamped: 0,
+  pipelineOrderError: 0,
+  variationTooPredictable: 0,
+  humanStatic: 0,
+  timingInvalid: 0,
 };
+
+// ── Audit ringbuffers (for STEP 4 / STEP 5 detectors) ─────────────────────
+const _AMP_HISTORY_LEN = 64;
+const _ampHistory: number[] = [];
+const _gestHistory: number[] = [];
+let _lastVariationAuditMs = -Infinity;
+const VARIATION_AUDIT_MS = 1500;
+let _lastHumanStaticLogMs = -Infinity;
+const HUMAN_STATIC_LOG_MS = 1500;
+let _lastTimingInvalidLogMs = -Infinity;
+const TIMING_INVALID_LOG_MS = 1200;
+let _lastPipelineOrderLogMs = -Infinity;
+const PIPELINE_ORDER_LOG_MS = 2000;
+let _lastGuardFailureLogMs = -Infinity;
+const GUARD_FAILURE_LOG_MS = 700;
+let _lastIdleConflictLogMs = -Infinity;
+const IDLE_CONFLICT_LOG_MS = 1500;
+
+function _stddev(arr: number[]): number {
+  if (arr.length < 2) return 0;
+  let sum = 0;
+  for (const v of arr) sum += v;
+  const m = sum / arr.length;
+  let s2 = 0;
+  for (const v of arr) s2 += (v - m) * (v - m);
+  return Math.sqrt(s2 / arr.length);
+}
+
+/** Lag-1 autocorrelation, normalised to [-1, 1]. Returns 0 for empty / degenerate input. */
+function _lag1Autocorr(arr: number[]): number {
+  if (arr.length < 8) return 0;
+  let sum = 0;
+  for (const v of arr) sum += v;
+  const m = sum / arr.length;
+  let num = 0;
+  let den = 0;
+  for (let i = 1; i < arr.length; i++) {
+    const a = arr[i - 1] - m;
+    const b = arr[i] - m;
+    num += a * b;
+    den += a * a;
+  }
+  if (den < 1e-9) return 0;
+  return num / den;
+}
 
 /** Effective-zero threshold for motion scalars (avoids float-noise false negatives). */
 const _MOTION_EPS = 0.0005;
@@ -1269,18 +1325,6 @@ function _energy(m: { headNod: number; openGesture: number }): number {
 function _dynamicFloor(intensity01: number, lo: number, hi: number): number {
   const i = Math.max(0, Math.min(1, intensity01));
   return lo + (hi - lo) * i;
-}
-
-/**
- * Smooth two-octave sinusoidal noise in ~[0.9, 1.1].
- * Avoids per-frame rng jitter (which would buzz the rig); coupled to monotonic clock so
- * head and arm channels can be desynchronised by `phaseOffset`.
- */
-function _variationMul(now: number, phaseOffset: number): number {
-  const a = Math.sin(now * 0.0023 + phaseOffset);
-  const b = Math.sin(now * 0.0037 + phaseOffset + 1.7);
-  const n = (a + b) * 0.5;
-  return 1 + 0.1 * n;
 }
 
 /**
@@ -1319,20 +1363,35 @@ export function mergeBehaviorEngineMotionScalars(
   const timing = computeTimingState({ speaking: opts.speaking, now });
   applyTimingToMotion(motion, timing, now);
 
-  // PART 2 — variation noise: keeps motion alive without robotic constancy.
-  const jitterHead = _variationMul(now, 0);
-  const jitterGesture = _variationMul(now, 1.3);
-  motion.headNod *= jitterHead;
-  motion.openGesture *= jitterGesture;
+  // afterTiming snapshot — strictly after the timing envelope, before the human layer.
+  // (Earlier code took this snapshot too late, hiding human-layer kills inside the
+  //  TIMING_KILLED detector.  Fixed: distinct snapshot site enables HUMAN_KILLED detection.)
+  const afterTiming = { headNod: motion.headNod, openGesture: motion.openGesture };
+  const afterTimingEnergy = _energy(afterTiming);
 
-  // PART 3 — speech-intensity link: above ~0.35 intent intensity, modestly amplify motion.
-  // Final clamp by `_VIS_AMP` block in VRMSkeletonManager prevents over-shoot.
+  // ── HUMAN BEHAVIOR LAYER (sits between timing and final guard) ────────────
+  // 3-octave noise, drift memory, micro interruptions, micro bursts, channel asymmetry,
+  // gaze and blink scheduling. Outputs are multiplicative on motion + small additive headTilt.
   const intensity01 = Math.max(0, Math.min(1, opts.intensity));
-  const speechBoost = 1 + 0.28 * Math.max(0, intensity01 - 0.35);
-  motion.headNod *= speechBoost;
-  motion.openGesture *= speechBoost;
+  const speechEnergy01 = Math.max(0, Math.min(1, _lastBehaviorState?.speechEnergy ?? 0));
+  const human = computeHumanBehavior({
+    speaking: opts.speaking,
+    intent: opts.intent ?? '',
+    emotion: opts.emotion ?? '',
+    intensity: intensity01,
+    speechEnergy: speechEnergy01,
+    timestamp: now,
+  });
+  _lastHumanState = human;
 
-  // PART 1 — dynamic floors (lerp(0.02, 0.08, intensity) for guard; tighter for settling).
+  motion.headNod *= human.headMovement;
+  motion.openGesture *= human.gestureAmplitude;
+  motion.headTilt += human.headTilt;
+
+  const afterHuman = { headNod: motion.headNod, openGesture: motion.openGesture };
+  const afterHumanEnergy = _energy(afterHuman);
+
+  // Dynamic floors (lerp(0.02, 0.08, intensity) for guard; tighter for settling).
   const settlingFloor = _dynamicFloor(intensity01, 0.015, 0.04);
   const guardFloor = _dynamicFloor(intensity01, 0.02, 0.08);
 
@@ -1347,11 +1406,8 @@ export function mergeBehaviorEngineMotionScalars(
     }
   }
 
-  const afterTiming = { headNod: motion.headNod, openGesture: motion.openGesture };
-  const afterTimingEnergy = _energy(afterTiming);
-
   let guardApplied = false;
-  if (opts.speaking && afterTimingEnergy <= _MOTION_EPS) {
+  if (opts.speaking && afterHumanEnergy <= _MOTION_EPS) {
     motion.headNod = motion.headNod === 0 ? guardFloor : motion.headNod;
     motion.openGesture = motion.openGesture === 0 ? guardFloor : motion.openGesture;
     if (Math.abs(motion.headNod) < guardFloor) {
@@ -1369,11 +1425,57 @@ export function mergeBehaviorEngineMotionScalars(
     baseEnergy > _MOTION_EPS && afterBehaviorEnergy <= _MOTION_EPS;
   const timingKilled =
     afterBehaviorEnergy > _MOTION_EPS && afterTimingEnergy <= _MOTION_EPS;
+  const humanKilled =
+    afterTimingEnergy > _MOTION_EPS && afterHumanEnergy <= _MOTION_EPS;
   const finalOverride =
-    afterTimingEnergy > _MOTION_EPS && finalEnergy <= _MOTION_EPS;
+    afterHumanEnergy > _MOTION_EPS && finalEnergy <= _MOTION_EPS;
   if (behaviorKilled) _guardStats.behaviorKilled += 1;
   if (timingKilled) _guardStats.timingKilled += 1;
+  if (humanKilled) _guardStats.humanKilled += 1;
   if (finalOverride) _guardStats.finalOverride += 1;
+
+  // ── STEP 4 — Human layer audit (rolling window + log on collapse) ────────
+  _ampHistory.push(human.gestureAmplitude);
+  _gestHistory.push(human.headMovement);
+  if (_ampHistory.length > _AMP_HISTORY_LEN) _ampHistory.shift();
+  if (_gestHistory.length > _AMP_HISTORY_LEN) _gestHistory.shift();
+
+  const ampStd = _stddev(_ampHistory);
+  const gestStd = _stddev(_gestHistory);
+  const humanStatic =
+    _ampHistory.length === _AMP_HISTORY_LEN && ampStd < 1e-4 && gestStd < 1e-4;
+  if (humanStatic) _guardStats.humanStatic += 1;
+
+  // ── STEP 5 — Variation autocorrelation (predictability) ──────────────────
+  let ampAuto = 0;
+  let gestAuto = 0;
+  let variationTooPredictable = false;
+  if (_ampHistory.length === _AMP_HISTORY_LEN) {
+    ampAuto = _lag1Autocorr(_ampHistory);
+    gestAuto = _lag1Autocorr(_gestHistory);
+    variationTooPredictable = Math.abs(ampAuto) > 0.985 || Math.abs(gestAuto) > 0.985;
+    if (variationTooPredictable) _guardStats.variationTooPredictable += 1;
+  }
+
+  // ── STEP 6 — Timing duration validation ──────────────────────────────────
+  let timingInvalid = false;
+  let timingInvalidReason = '';
+  if (timing.phase === 'anticipation') {
+    if (timing.duration < 100 || timing.duration > 500) {
+      timingInvalid = true;
+      timingInvalidReason = `anticipation duration ${timing.duration.toFixed(0)}ms outside [100,500]`;
+    }
+  } else if (timing.phase === 'settling') {
+    if (timing.duration < 200 || timing.duration > 800) {
+      timingInvalid = true;
+      timingInvalidReason = `settling duration ${timing.duration.toFixed(0)}ms outside [200,800]`;
+    }
+  }
+  if (timingInvalid) _guardStats.timingInvalid += 1;
+
+  // ── STEP 7 — Hard guard invariant: speaking ⇒ final > 0 ──────────────────
+  const guardFailure = opts.speaking && finalEnergy <= _MOTION_EPS;
+  if (guardFailure) _guardStats.guardFailure += 1;
 
   if (typeof window !== 'undefined') {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1381,28 +1483,38 @@ export function mergeBehaviorEngineMotionScalars(
     w.__behaviorEnginePlan = plan;
     w.__behaviorEngineMotionMul = mul;
     w.__behaviorTimingState = timing;
+    w.__humanBehaviorState = human;
     w.__avatarMotionGuardStats = _guardStats;
     w.__avatarLastPipelineMotion = {
       base: baseMotion,
       afterBehavior,
       afterTiming,
+      afterHuman,
       final: finalMotion,
+    };
+    w.__avatarVariationStats = {
+      ampStd: +ampStd.toFixed(4),
+      gestStd: +gestStd.toFixed(4),
+      ampAutocorr: +ampAuto.toFixed(3),
+      gestAutocorr: +gestAuto.toFixed(3),
+      sampleCount: _ampHistory.length,
     };
   }
 
   if (_logEnabled()) {
     if (now - _lastPipelineTraceMs > _cooldown(PIPELINE_TRACE_MS)) {
       _lastPipelineTraceMs = now;
-      console.log('[PIPELINE_TRACE]', {
+      console.log('[MOTION_FLOW]', {
         speaking: opts.speaking,
         intent: input.intent || '(none)',
         emotion: input.emotion || 'neutral',
         timingPhase: timing.phase,
         motion: {
-          base:           { hn: +baseMotion.headNod.toFixed(3),     og: +baseMotion.openGesture.toFixed(3) },
-          afterBehavior:  { hn: +afterBehavior.headNod.toFixed(3),  og: +afterBehavior.openGesture.toFixed(3) },
-          afterTiming:    { hn: +afterTiming.headNod.toFixed(3),    og: +afterTiming.openGesture.toFixed(3) },
-          final:          { hn: +finalMotion.headNod.toFixed(3),    og: +finalMotion.openGesture.toFixed(3) },
+          base:          { hn: +baseMotion.headNod.toFixed(3),    og: +baseMotion.openGesture.toFixed(3) },
+          afterBehavior: { hn: +afterBehavior.headNod.toFixed(3), og: +afterBehavior.openGesture.toFixed(3) },
+          afterTiming:   { hn: +afterTiming.headNod.toFixed(3),   og: +afterTiming.openGesture.toFixed(3) },
+          afterHuman:    { hn: +afterHuman.headNod.toFixed(3),    og: +afterHuman.openGesture.toFixed(3) },
+          final:         { hn: +finalMotion.headNod.toFixed(3),   og: +finalMotion.openGesture.toFixed(3) },
         },
       });
     }
@@ -1419,19 +1531,42 @@ export function mergeBehaviorEngineMotionScalars(
         baseEnergy: +baseEnergy.toFixed(3),
         afterBehaviorEnergy: +afterBehaviorEnergy.toFixed(3),
         afterTimingEnergy: +afterTimingEnergy.toFixed(3),
+        afterHumanEnergy: +afterHumanEnergy.toFixed(3),
         finalEnergy: +finalEnergy.toFixed(3),
         timingPhase: timing.phase,
       });
     }
 
     if (
-      (behaviorKilled || timingKilled || finalOverride) &&
+      (behaviorKilled || timingKilled || humanKilled || finalOverride) &&
       now - _lastOverrideLogMs > _cooldown(OVERRIDE_LOG_MS)
     ) {
       _lastOverrideLogMs = now;
       if (behaviorKilled) console.warn('[BEHAVIOR_KILLED_MOTION]', { base: baseMotion, afterBehavior });
       if (timingKilled)   console.warn('[TIMING_KILLED_MOTION]',   { afterBehavior, afterTiming, phase: timing.phase });
-      if (finalOverride)  console.warn('[FINAL_OVERRIDE]',         { afterTiming, final: finalMotion });
+      if (humanKilled)    console.warn('[HUMAN_KILLED_MOTION]',    { afterTiming, afterHuman, headMul: +human.headMovement.toFixed(3), gestureMul: +human.gestureAmplitude.toFixed(3) });
+      if (finalOverride)  console.warn('[FINAL_OVERRIDE]',         { afterHuman, final: finalMotion });
+
+      // [MOTION_SUPPRESSION] — unified single-line marker naming the FIRST stage
+      // that drove motion below `_MOTION_EPS`. Emitted alongside the per-stage logs
+      // above so a tail-grep gives an immediate root-cause name.
+      let suppressedAt: 'BASE' | 'BEHAVIOR' | 'TIMING' | 'HUMAN' | 'FINAL' | null = null;
+      if (baseEnergy <= _MOTION_EPS) suppressedAt = 'BASE';
+      else if (afterBehaviorEnergy <= _MOTION_EPS) suppressedAt = 'BEHAVIOR';
+      else if (afterTimingEnergy <= _MOTION_EPS) suppressedAt = 'TIMING';
+      else if (afterHumanEnergy <= _MOTION_EPS) suppressedAt = 'HUMAN';
+      else if (finalEnergy <= _MOTION_EPS) suppressedAt = 'FINAL';
+      if (suppressedAt) {
+        console.warn('[MOTION_SUPPRESSION]', {
+          stage: suppressedAt,
+          speaking: opts.speaking,
+          base: +baseEnergy.toFixed(3),
+          afterBehavior: +afterBehaviorEnergy.toFixed(3),
+          afterTiming: +afterTimingEnergy.toFixed(3),
+          afterHuman: +afterHumanEnergy.toFixed(3),
+          final: +finalEnergy.toFixed(3),
+        });
+      }
     }
 
     if (guardApplied && now - _lastMotionGuardLogMs > _cooldown(MOTION_GUARD_LOG_MS)) {
@@ -1440,6 +1575,89 @@ export function mergeBehaviorEngineMotionScalars(
         speaking: opts.speaking,
         injectedHeadNod: +motion.headNod.toFixed(3),
         injectedOpenGesture: +motion.openGesture.toFixed(3),
+      });
+    }
+
+    if (
+      guardFailure &&
+      now - _lastGuardFailureLogMs > _cooldown(GUARD_FAILURE_LOG_MS)
+    ) {
+      _lastGuardFailureLogMs = now;
+      console.error('[MOTION_GUARD_FAILURE]', {
+        speaking: opts.speaking,
+        flow: { base: baseMotion, afterBehavior, afterTiming, afterHuman, final: finalMotion },
+        guardFloor: +guardFloor.toFixed(3),
+      });
+    }
+
+    if (
+      humanStatic &&
+      now - _lastHumanStaticLogMs > _cooldown(HUMAN_STATIC_LOG_MS)
+    ) {
+      _lastHumanStaticLogMs = now;
+      console.warn('[HUMAN_STATIC_ERROR]', {
+        ampStd: +ampStd.toFixed(5),
+        gestStd: +gestStd.toFixed(5),
+        sampleCount: _ampHistory.length,
+        sampleAmp: _ampHistory[_ampHistory.length - 1],
+      });
+    }
+
+    if (
+      variationTooPredictable &&
+      now - _lastVariationAuditMs > _cooldown(VARIATION_AUDIT_MS)
+    ) {
+      _lastVariationAuditMs = now;
+      console.warn('[VARIATION_TOO_PREDICTABLE]', {
+        ampAutocorr: +ampAuto.toFixed(3),
+        gestAutocorr: +gestAuto.toFixed(3),
+        ampStd: +ampStd.toFixed(4),
+        gestStd: +gestStd.toFixed(4),
+      });
+    }
+
+    if (
+      timingInvalid &&
+      now - _lastTimingInvalidLogMs > _cooldown(TIMING_INVALID_LOG_MS)
+    ) {
+      _lastTimingInvalidLogMs = now;
+      console.warn('[TIMING_INVALID]', {
+        phase: timing.phase,
+        duration: +timing.duration.toFixed(0),
+        reason: timingInvalidReason,
+      });
+    }
+
+    // STEP 9 — Idle-vs-speech conflict heuristic (visible at this layer):
+    // if speaking but base motion already collapsed AND guard had to inject, the upstream
+    // intent/baseline produced no motion this frame — most often because idle dominated.
+    if (
+      opts.speaking &&
+      baseEnergy <= _MOTION_EPS &&
+      guardApplied &&
+      now - _lastIdleConflictLogMs > _cooldown(IDLE_CONFLICT_LOG_MS)
+    ) {
+      _lastIdleConflictLogMs = now;
+      console.warn('[IDLE_CONFLICT]', {
+        baseEnergy: +baseEnergy.toFixed(3),
+        intent: input.intent || '(none)',
+        speaking: opts.speaking,
+      });
+    }
+
+    // STEP 1 — Order self-check: in this function the order is fixed by code structure,
+    // but if a future refactor breaks the contract (e.g. afterTiming snapshot moves past
+    // the human layer) the inequality below will catch it.
+    if (
+      _energy(afterTiming) > _energy(afterHuman) * 100 &&
+      now - _lastPipelineOrderLogMs > _cooldown(PIPELINE_ORDER_LOG_MS)
+    ) {
+      _lastPipelineOrderLogMs = now;
+      _guardStats.pipelineOrderError += 1;
+      console.error('[PIPELINE_ORDER_ERROR]', {
+        msg: 'afterTiming should be ≥ afterHuman / behaviorMul; magnitude inversion detected',
+        afterTiming,
+        afterHuman,
       });
     }
   }
@@ -1463,10 +1681,29 @@ export function mergeBehaviorEngineMotionScalars(
       duration: timing.duration,
     });
   }
+
+  if (_logEnabled() && now - _lastHumanBehaviorLogMs > _cooldown(HUMAN_BEHAVIOR_LOG_MS)) {
+    _lastHumanBehaviorLogMs = now;
+    console.log('[HUMAN_BEHAVIOR]', {
+      intent: input.intent || '(none)',
+      emotion: input.emotion || 'neutral',
+      gestureAmplitude: +human.gestureAmplitude.toFixed(3),
+      headMovement:     +human.headMovement.toFixed(3),
+      gazeTarget:       human.gazeTarget,
+      phase:            human.phase,
+      blinkIntent:      human.blinkIntent,
+      microBurst:       +human.microBurst.toFixed(2),
+      microInterruption:+human.microInterruption.toFixed(2),
+    });
+  }
 }
 
 export function getMotionGuardStats(): Readonly<typeof _guardStats> {
   return _guardStats;
+}
+
+export function getLastHumanState(): HumanState | null {
+  return _lastHumanState;
 }
 
 // ── Window helpers ────────────────────────────────────────────────────────
@@ -1484,4 +1721,5 @@ if (typeof window !== 'undefined') {
   w.__avatarStabilityScore    = getStabilityScore;
   w.__avatarResetSelfHealStats = resetSelfHealStats;
   w.__avatarGetMotionGuardStats = getMotionGuardStats;
+  w.__avatarLastHumanState     = getLastHumanState;
 }
