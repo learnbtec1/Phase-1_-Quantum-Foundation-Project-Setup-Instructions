@@ -312,6 +312,11 @@ function clampHeadEuler(x: number, y: number, z: number): [number, number, numbe
 const SK_E = new THREE.Euler();
 const SK_Q = new THREE.Quaternion();
 const SK_Q2 = new THREE.Quaternion();
+
+/** Throttled arm-space forensics (window.__ARM_FORENSICS) — scratch only. */
+const _ARM_FORENSICS_E_LUA = new THREE.Euler(0, 0, 0, 'YXZ');
+const _ARM_FORENSICS_E_RUA = new THREE.Euler(0, 0, 0, 'YXZ');
+const _ARM_FORENSICS_FWD = new THREE.Vector3();
 const GEN_E = new THREE.Euler();
 const GEN_Q = new THREE.Quaternion();
 const SK_AXIS_X = new THREE.Vector3(1, 0, 0);
@@ -2883,7 +2888,7 @@ export function VRMSkeletonManager({
             if (_hashChanged) {
               lastSemanticUtteranceHashRef.current = _utterHash;
             }
-            const _det = detectIntentDetailed(_utterText);
+            const _det = detectIntentDetailed(_utterText, ab.intent);
             const decision = resolveSemanticGesture({
               detectedIntent: _det.intent,
               ruleConfidence: _det.confidence,
@@ -2901,6 +2906,21 @@ export function VRMSkeletonManager({
                 : null;
             if (typeof window !== 'undefined') {
               const cur = getCurrentBehavior();
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (window as any).__ARABIC_INTENT_DEBUG = {
+                originalText: _utterText.slice(0, 500),
+                normalizedText: _det.normalizedText.slice(0, 500),
+                detectedIntent: _det.intent,
+                confidence: _det.confidence,
+                llmIntent: ab.intent ?? '',
+                finalSemanticGesture: decision.gesture,
+                gestureScheduled: !!ev,
+                fallbackToNeutral: decision.gesture === 'idle',
+                failureReason:
+                  decision.gesture === 'idle'
+                    ? (decision.debugCooldownHit ? 'cooldown' : decision.sourceIntent)
+                    : _det.reason,
+              };
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               (window as any).__SEMANTIC_GESTURE_DEBUG = {
                 semanticIntent: _det.intent,
@@ -3657,7 +3677,16 @@ export function VRMSkeletonManager({
       if (!useIdlePose && (key === 'rua' || key === 'lua')) {
         applyUpperArmGestureCalib(SK_Q);
       }
-      map.set(key, SK_Q.clone());
+      // Bind-relative delta — same contract as slerpBoneFromBind / head+neck.
+      // Plain Euler→quat was absolute in the wrong space; blending from bind (PoseComposer)
+      // made authored “forward” read as backward/inward when bind ≠ identity.
+      const bq = m.get(key);
+      if (bq) {
+        SK_Q2.copy(bq).multiply(SK_Q);
+        map.set(key, SK_Q2.clone());
+      } else {
+        map.set(key, SK_Q.clone());
+      }
     };
 
     const slerpBoneFromBind = (
@@ -3772,7 +3801,20 @@ export function VRMSkeletonManager({
       );
     }
 
-    if (g === 'explain') {
+    /** Phase 4: DevTools — `window.__VRM_ARM_FORENSIC_OUTWARD = true` → idle hang + ±45° Z abduction test. */
+    const armForensicOutward =
+      typeof window !== 'undefined' &&
+      (window as Window & { __VRM_ARM_FORENSIC_OUTWARD?: boolean }).__VRM_ARM_FORENSIC_OUTWARD === true;
+
+    if (armForensicOutward && luaRef.current && ruaRef.current) {
+      const q45 = Math.PI / 4;
+      const id = ARM_IDLE;
+      const useIdleMap = motionSource !== 'GESTURE';
+      slerpArmEuler(luaRef.current, id.luaX, id.luaY, id.luaZ + q45, 1, undefined, useIdleMap);
+      slerpArmEuler(ruaRef.current, id.ruaX, id.ruaY, id.ruaZ - q45, 1, undefined, useIdleMap);
+      slerpArmEuler(rlaRef.current, id.rlaX, 0, id.rlaZ, 1, true, useIdleMap);
+      slerpArmEuler(llaRef.current, id.llaX, 0, id.llaZ, 1, true, useIdleMap);
+    } else if (g === 'explain') {
       const cal = (_calibrationRef.current?.gesture === 'explain') ? _calibrationRef.current.pose : null;
       // موجة عضوية خفيفة: سعة صغيرة (0.09) وتردد منخفض (1.4 Hz) + ضوضاء لمنع التكرار.
       // لا نضرب بـ gestureAmp لأنه يضخّم الموجة حتى 2.4× أثناء الكلام (يبدو كتصفيق).
@@ -5539,7 +5581,32 @@ export function VRMSkeletonManager({
             (globalThis as any).__motionLayerLastLog = _now;
             const ts = getGestureTimingSnapshot();
             const _utterNow = getEmbodimentUtteranceTextForSemantics() ?? '';
-            const _detailed = detectIntentDetailed(_utterNow);
+            const _detailed = detectIntentDetailed(_utterNow, _llmIntent);
+            const _decPreview = resolveSemanticGesture({
+              detectedIntent: _detailed.intent,
+              ruleConfidence: _detailed.confidence,
+              llmIntent: _llmIntent,
+              utteranceText: _utterNow,
+              utteranceHash: '',
+              speaking,
+              listening: false,
+              nowMs,
+              stableMotionEnergy,
+            });
+            if (typeof window !== 'undefined') {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (window as any).__ARABIC_INTENT_DEBUG = {
+                originalText: _utterNow.slice(0, 500),
+                normalizedText: _detailed.normalizedText.slice(0, 500),
+                detectedIntent: _detailed.intent,
+                confidence: _detailed.confidence,
+                llmIntent: _llmIntent,
+                finalSemanticGesture: _decPreview.gesture,
+                gestureScheduled: !!getCurrentBehavior(),
+                fallbackToNeutral: _decPreview.gesture === 'idle',
+                failureReason: _detailed.reason,
+              };
+            }
             console.log('[INTENT]', _activeIntent);
             console.log('[INTENT_ACTIVE]', _activeIntent !== 'neutral' && _activeIntent !== '');
             console.log('[INTENT_TRACE]', {
@@ -5548,6 +5615,7 @@ export function VRMSkeletonManager({
               confidence: _detailed.confidence,
               reason: _detailed.reason,
               utterSample: _utterNow.slice(0, 80),
+              normalizedSample: _detailed.normalizedText.slice(0, 80),
             });
             console.log('[FILE_EXECUTED] motionLayers', {
               intent: _activeIntent,
@@ -6426,6 +6494,70 @@ export function VRMSkeletonManager({
           | undefined;
         _execLoop.ov_afterBio = _luaPost ? _luaPost.rotation.z : NaN;
       } catch { /* ignore */ }
+
+      // ── Phase 2: window.__ARM_FORENSICS (every 30 frames, post skinning propagation) ──
+      if (
+        typeof window !== 'undefined' &&
+        (_execLoop.frameCount % 30 === 0) &&
+        luaRef.current &&
+        ruaRef.current
+      ) {
+        _ARM_FORENSICS_E_LUA.setFromQuaternion(luaRef.current.quaternion, 'YXZ');
+        _ARM_FORENSICS_E_RUA.setFromQuaternion(ruaRef.current.quaternion, 'YXZ');
+        const luaLocalEuler = {
+          x: +_ARM_FORENSICS_E_LUA.x.toFixed(4),
+          y: +_ARM_FORENSICS_E_LUA.y.toFixed(4),
+          z: +_ARM_FORENSICS_E_LUA.z.toFixed(4),
+        };
+        const ruaLocalEuler = {
+          x: +_ARM_FORENSICS_E_RUA.x.toFixed(4),
+          y: +_ARM_FORENSICS_E_RUA.y.toFixed(4),
+          z: +_ARM_FORENSICS_E_RUA.z.toFixed(4),
+        };
+        _ARM_FORENSICS_FWD.set(1, 0, 0).transformDirection(luaRef.current.matrixWorld).normalize();
+        const luaWorldForward = {
+          x: +_ARM_FORENSICS_FWD.x.toFixed(3),
+          y: +_ARM_FORENSICS_FWD.y.toFixed(3),
+          z: +_ARM_FORENSICS_FWD.z.toFixed(3),
+        };
+        _ARM_FORENSICS_FWD.set(1, 0, 0).transformDirection(ruaRef.current.matrixWorld).normalize();
+        const ruaWorldForward = {
+          x: +_ARM_FORENSICS_FWD.x.toFixed(3),
+          y: +_ARM_FORENSICS_FWD.y.toFixed(3),
+          z: +_ARM_FORENSICS_FWD.z.toFixed(3),
+        };
+        const bLua = m.get('lua');
+        const bRua = m.get('rua');
+        const luaDeltaFromBind = bLua
+          ? +(
+              2 *
+              Math.acos(THREE.MathUtils.clamp(Math.abs(bLua.dot(luaRef.current.quaternion)), 0, 1))
+            ).toFixed(4)
+          : 0;
+        const ruaDeltaFromBind = bRua
+          ? +(
+              2 *
+              Math.acos(THREE.MathUtils.clamp(Math.abs(bRua.dot(ruaRef.current.quaternion)), 0, 1))
+            ).toFixed(4)
+          : 0;
+        const leftArmMovingBackward = _ARM_FORENSICS_E_LUA.x < -0.25;
+        const rightArmMovingBackward = _ARM_FORENSICS_E_RUA.x > 0.25;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).__ARM_FORENSICS = {
+          luaLocalEuler,
+          ruaLocalEuler,
+          luaWorldForward,
+          ruaWorldForward,
+          luaDeltaFromBind,
+          ruaDeltaFromBind,
+          leftArmMovingBackward,
+          rightArmMovingBackward,
+          additiveOrderCorrect: true,
+          bindAppliedTwice: false,
+          dominantWriter: motionSource,
+          finalGestureWeight: +gestureLayerW.toFixed(4),
+        };
+      }
 
       // ── window.__motionLayers + window.__MOTION_AUTHORITY_MAP (throttled 16 frames) ──
       // Read from DevTools: window.__motionLayers / window.__MOTION_AUTHORITY_MAP

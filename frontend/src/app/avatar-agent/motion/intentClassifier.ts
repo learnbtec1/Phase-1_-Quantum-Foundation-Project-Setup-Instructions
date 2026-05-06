@@ -1,9 +1,15 @@
 'use client';
 /**
- * Intent Classifier (rule-based, Arabic + English)
- * Pure keyword-based mapper from raw utterance text to a motion intent label.
- * Used by VRMSkeletonManager as a fallback / augmentation for LLM-provided intent.
+ * Intent Classifier — rule-based Arabic + English recovery for embodiment.
+ * Arabic text is normalized first ({@link normalizeForIntentClassification}) so
+ * dialect spelling and hamza/alef variants still match.
  */
+
+import {
+  normalizeForIntentClassification,
+  canonicalizeLlmIntentLabel,
+  type CanonicalIntentLabel,
+} from './arabicIntentNormalize';
 
 export type DetectedIntent =
   | 'explaining'
@@ -22,75 +28,253 @@ export type IntentResult = {
   confidence: number;
   /** Which rule fired (for debugging). */
   reason: string;
+  /** Post-normalization surface (for DevTools). */
+  normalizedText: string;
 };
 
-const EXPLAIN_AR = /(اشرح|يشرح|بشرح|شرح|يعني|لأن|بمعنى|بالتالي|أي أن|مثلاً|مثلا|باختصار)/u;
+// ─── English (unchanged baseline, applied on trimmed raw for Latin cues) ─────
+const QUESTION_EN = /\b(what|why|how|when|where|who|which|is it|are you|do you|can you|could you)\b|\?/i;
+const CONFIRM_EN = /\b(yes|yeah|yep|correct|right|sure|absolutely|exactly|ok|okay)\b/i;
+const THINK_EN = /\b(hmm|uhh|let me think|thinking|wait|one moment|i'm not sure|maybe|perhaps)\b/i;
+const GREET_EN = /\b(hi|hello|hey|good morning|good evening|welcome|how are you)\b/i;
+const AGREE_EN = /\b(i agree|agreed|i'm with you|you're right|that's right|true)\b/i;
+const DISAGREE_EN = /\b(i disagree|i don't agree|wrong|not true|that's wrong|incorrect)\b/i;
+const EMPHASIZE_EN = /\b(important|crucial|must|have to|pay attention|focus|key point)\b/i;
 const EXPLAIN_EN = /\b(explain|clarify|means|therefore|because|in other words|for example|e\.g\.|in summary|let me)\b/i;
 
-const QUESTION_AR = /(هل|ماذا|لماذا|كيف|متى|أين|من هو|من هي|أي|أيّ|ألا|أليس|\?|؟)/u;
-const QUESTION_EN = /\b(what|why|how|when|where|who|which|is it|are you|do you|can you|could you)\b|\?/i;
+// ─── Arabic: priority order is enforced in detectIntentDetailed, not regex union ─
 
-const CONFIRM_AR = /(نعم|أجل|أكيد|صحيح|صح|تمام|موافق|طبعًا|طبعا|بالضبط|بالتأكيد)/u;
-const CONFIRM_EN = /\b(yes|yeah|yep|correct|right|sure|absolutely|exactly|ok|okay)\b/i;
+/** GREETING — must run before generic كيف questioning */
+const GREET_AR = new RegExp(
+  [
+    'السلام عليكم',
+    'مرحبا',
+    'مرحبه',
+    'اهلا',
+    'اهلا وسهلا',
+    'هلا',
+    'يا هلا',
+    'صباح الخير',
+    'مساء الخير',
+    'كيفك',
+    'كيف حالك',
+    'كيف الحال',
+    'حياك',
+    'حياكم',
+  ].join('|'),
+  'u',
+);
 
-const THINK_AR = /(انتظر|افكر|أفكر|لحظة|لحظه|دعني أفكر|هممم|آه|مممم)/u;
-const THINK_EN = /\b(hmm|uhh|let me think|thinking|wait|one moment|i'm not sure|maybe|perhaps)\b/i;
+/** THINKING — before explaining so "خليني أفكر" does not become explain */
+const THINK_AR = new RegExp(
+  [
+    'خليني افكر',
+    'خلينا نفكر',
+    'همم+',
+    'ممكن يكون',
+    'ممكن ان',
+    'ممكن إن',
+    'احتمال',
+    'دقيقه',
+    'دقيقة',
+    'لحظه',
+    'لحظة',
+    'انتظر',
+  ].join('|'),
+  'u',
+);
 
-const GREET_AR = /(أهلا|أهلاً|مرحبا|مرحباً|السلام عليكم|صباح|مساء|كيفك|كيف حالك)/u;
-const GREET_EN = /\b(hi|hello|hey|good morning|good evening|welcome|how are you)\b/i;
+/** EMPHASIS — strong phrases first (shared انتبه/ركز handled here only when boosted) */
+const EMPHASIS_STRONG_AR = new RegExp(
+  ['مهم جدا', 'مهمه جدا', 'اكيد', 'طبعا', 'طبعه', 'ممتاز', 'ضروري', 'لازم', 'يجب'].join('|'),
+  'u',
+);
 
-const AGREE_AR = /(موافق|معك حق|أتفق|أوافق|صح كلامك)/u;
-const AGREE_EN = /\b(i agree|agreed|i'm with you|you're right|that's right|true)\b/i;
+/** EXPLAINING — Jordanian / MSA teaching cues */
+const EXPLAIN_AR = new RegExp(
+  [
+    'خليني اشرح',
+    'خلينا نشرح',
+    'ركز معي',
+    'انتبه',
+    'الفكره',
+    'الفكرة',
+    'يعني',
+    'ببساطه',
+    'ببساطة',
+    'خلينا نشوف',
+    'لاحظ',
+    'بالتالي',
+    'بمعنى',
+    'مثلا',
+    'باختصار',
+    'اشرح',
+    'يشرح',
+    'بشرح',
+    'شرح',
+    'لان',
+    'لأن',
+    'اي ان',
+    'أي أن',
+  ].join('|'),
+  'u',
+);
 
-const DISAGREE_AR = /(لا أتفق|أعارض|غير صحيح|مش صح|هذا خطأ|خطأ)/u;
-const DISAGREE_EN = /\b(i disagree|i don't agree|wrong|not true|that's wrong|incorrect)\b/i;
+/** EMPHASIS — single-token (after explain-specific phrases) */
+const EMPHASIS_WEAK_AR = /(^|\s)(انتبه|ركز)(?!\s*معي)(\s|$)/u;
 
-const EMPHASIZE_AR = /(مهم جدًا|الأهم|انتبه|ركز|يجب|لازم|ضروري)/u;
-const EMPHASIZE_EN = /\b(important|crucial|must|have to|pay attention|focus|key point)\b/i;
+/** QUESTIONING — dialect شو؛ avoid swallowing greeting كيفك via GREET_AR first */
+const QUESTION_AR = new RegExp(
+  [
+    'شو رايك',
+    'شو رأيك',
+    'فهمت',
+    'عندك سؤال',
+    'صح\\s*\\?',
+    'واضح\\s*\\?',
+    'صح؟',
+    'واضح؟',
+    'ليش',
+    '\\?',
+    '؟',
+    'هل ',
+    'ماذا',
+    'لماذا',
+    'متى ',
+    'اين ',
+    'أين ',
+    'من هو',
+    'من هي',
+    '(^|\\s)كيف(\\s|$)',
+  ].join('|'),
+  'u',
+);
+
+const CONFIRM_AR = /(نعم|اجل|أجل|اكيد|صحيح|صح|تمام|موافق|طبعا|بالضبط|بالتاكيد)/u;
+const AGREE_AR = /(موافق|معك حق|اتفق|أتفق|اوافق|أوافق|صح كلامك)/u;
+const DISAGREE_AR = /(لا اتفق|لا أتفق|اعارض|أعارض|غير صحيح|مش صح|هذا خطأ|خطأ)/u;
+
+function containsGreetingCue(t: string): boolean {
+  return GREET_AR.test(t);
+}
+
+/** If generic كيف match, treat as questioning only when not a greeting phrase */
+function matchesQuestioningArabic(t: string): boolean {
+  if (!QUESTION_AR.test(t)) return false;
+  if (/(^|\s)كيف(\s|$)/u.test(t) && containsGreetingCue(t)) return false;
+  return true;
+}
+
+function matchEnglish(textRaw: string): IntentResult | null {
+  const t = textRaw.trim();
+  if (QUESTION_EN.test(t)) return { intent: 'questioning', confidence: 0.85, reason: 'en-question-word', normalizedText: t };
+  if (EMPHASIZE_EN.test(t)) return { intent: 'emphasizing', confidence: 0.8, reason: 'en-emphasis', normalizedText: t };
+  if (DISAGREE_EN.test(t)) return { intent: 'disagreeing', confidence: 0.85, reason: 'en-disagree', normalizedText: t };
+  if (AGREE_EN.test(t)) return { intent: 'agreeing', confidence: 0.8, reason: 'en-agree', normalizedText: t };
+  if (CONFIRM_EN.test(t)) return { intent: 'confirming', confidence: 0.75, reason: 'en-confirm', normalizedText: t };
+  if (THINK_EN.test(t)) return { intent: 'thinking', confidence: 0.7, reason: 'en-hesitation', normalizedText: t };
+  if (EXPLAIN_EN.test(t)) return { intent: 'explaining', confidence: 0.65, reason: 'en-explain', normalizedText: t };
+  if (GREET_EN.test(t)) return { intent: 'greeting', confidence: 0.65, reason: 'en-greet', normalizedText: t };
+  return null;
+}
+
+function matchArabicOrdered(norm: string): IntentResult | null {
+  if (GREET_AR.test(norm)) {
+    return { intent: 'greeting', confidence: 0.92, reason: 'ar-greet', normalizedText: norm };
+  }
+  if (THINK_AR.test(norm)) {
+    return { intent: 'thinking', confidence: 0.78, reason: 'ar-hesitation', normalizedText: norm };
+  }
+  if (EMPHASIS_STRONG_AR.test(norm)) {
+    return { intent: 'emphasizing', confidence: 0.82, reason: 'ar-emphasis-strong', normalizedText: norm };
+  }
+  if (EXPLAIN_AR.test(norm)) {
+    return { intent: 'explaining', confidence: 0.74, reason: 'ar-explain', normalizedText: norm };
+  }
+  if (EMPHASIS_WEAK_AR.test(norm)) {
+    return { intent: 'emphasizing', confidence: 0.72, reason: 'ar-emphasis-weak', normalizedText: norm };
+  }
+  if (matchesQuestioningArabic(norm)) {
+    return { intent: 'questioning', confidence: 0.88, reason: 'ar-question-marker', normalizedText: norm };
+  }
+  if (DISAGREE_AR.test(norm)) {
+    return { intent: 'disagreeing', confidence: 0.85, reason: 'ar-disagree', normalizedText: norm };
+  }
+  if (AGREE_AR.test(norm)) {
+    return { intent: 'agreeing', confidence: 0.8, reason: 'ar-agree', normalizedText: norm };
+  }
+  if (CONFIRM_AR.test(norm)) {
+    return { intent: 'confirming', confidence: 0.75, reason: 'ar-confirm', normalizedText: norm };
+  }
+  return null;
+}
+
+/**
+ * Merge LLM canonical label when rules miss (Arabic models often omit punctuation cues).
+ */
+export function mergeRuleIntentWithLlmCanon(
+  rule: IntentResult,
+  llmRaw: string | null | undefined,
+): IntentResult {
+  if (rule.reason === 'empty-input') return rule;
+  if (rule.intent !== 'neutral') return rule;
+  const canon = canonicalizeLlmIntentLabel(llmRaw);
+  if (!canon) return rule;
+
+  const map: Record<CanonicalIntentLabel, DetectedIntent | ''> = {
+    '': 'neutral',
+    greeting: 'greeting',
+    explaining: 'explaining',
+    questioning: 'questioning',
+    thinking: 'thinking',
+    emphasizing: 'emphasizing',
+    listening: 'neutral',
+    confirming: 'confirming',
+    disagreeing: 'disagreeing',
+    agreeing: 'agreeing',
+  };
+  const intent = map[canon];
+  if (!intent || intent === 'neutral') return rule;
+  return {
+    intent,
+    confidence: 0.56,
+    reason: `llm-fallback:${canon}`,
+    normalizedText: rule.normalizedText,
+  };
+}
 
 /**
  * Classify a raw text utterance into a motion intent.
- * Checks rules in priority order so multi-match text still returns the most
- * salient intent (e.g. a question with "نعم" still maps to questioning).
  */
 export function detectIntent(text: string): DetectedIntent {
-  if (!text) return 'neutral';
-  const t = text.trim();
-  if (t.length === 0) return 'neutral';
-
-  if (QUESTION_AR.test(t) || QUESTION_EN.test(t))   return 'questioning';
-  if (EMPHASIZE_AR.test(t) || EMPHASIZE_EN.test(t)) return 'emphasizing';
-  if (DISAGREE_AR.test(t) || DISAGREE_EN.test(t))   return 'disagreeing';
-  if (AGREE_AR.test(t) || AGREE_EN.test(t))         return 'agreeing';
-  if (CONFIRM_AR.test(t) || CONFIRM_EN.test(t))     return 'confirming';
-  if (THINK_AR.test(t) || THINK_EN.test(t))         return 'thinking';
-  if (EXPLAIN_AR.test(t) || EXPLAIN_EN.test(t))     return 'explaining';
-  if (GREET_AR.test(t) || GREET_EN.test(t))         return 'greeting';
-
-  return 'neutral';
+  return detectIntentDetailed(text).intent;
 }
 
-/** Rich form — same rules but also returns confidence + reason for logs. */
-export function detectIntentDetailed(text: string): IntentResult {
-  const t = (text ?? '').trim();
-  if (t.length === 0) return { intent: 'neutral', confidence: 0, reason: 'empty-input' };
+/** Rich form — normalization + Arabic-first priority + English fallback + optional LLM merge hook at call site */
+export function detectIntentDetailed(text: string, llmIntent?: string | null): IntentResult {
+  const raw = (text ?? '').trim();
+  const normalizedText = normalizeForIntentClassification(raw);
 
-  if (QUESTION_AR.test(t))   return { intent: 'questioning',  confidence: 0.9, reason: 'ar-question-marker' };
-  if (QUESTION_EN.test(t))   return { intent: 'questioning',  confidence: 0.85, reason: 'en-question-word' };
-  if (EMPHASIZE_AR.test(t))  return { intent: 'emphasizing',  confidence: 0.8, reason: 'ar-emphasis' };
-  if (EMPHASIZE_EN.test(t))  return { intent: 'emphasizing',  confidence: 0.8, reason: 'en-emphasis' };
-  if (DISAGREE_AR.test(t))   return { intent: 'disagreeing',  confidence: 0.85, reason: 'ar-disagree' };
-  if (DISAGREE_EN.test(t))   return { intent: 'disagreeing',  confidence: 0.85, reason: 'en-disagree' };
-  if (AGREE_AR.test(t))      return { intent: 'agreeing',     confidence: 0.8, reason: 'ar-agree' };
-  if (AGREE_EN.test(t))      return { intent: 'agreeing',     confidence: 0.8, reason: 'en-agree' };
-  if (CONFIRM_AR.test(t))    return { intent: 'confirming',   confidence: 0.75, reason: 'ar-confirm' };
-  if (CONFIRM_EN.test(t))    return { intent: 'confirming',   confidence: 0.75, reason: 'en-confirm' };
-  if (THINK_AR.test(t))      return { intent: 'thinking',     confidence: 0.7, reason: 'ar-hesitation' };
-  if (THINK_EN.test(t))      return { intent: 'thinking',     confidence: 0.7, reason: 'en-hesitation' };
-  if (EXPLAIN_AR.test(t))    return { intent: 'explaining',   confidence: 0.65, reason: 'ar-explain' };
-  if (EXPLAIN_EN.test(t))    return { intent: 'explaining',   confidence: 0.65, reason: 'en-explain' };
-  if (GREET_AR.test(t))      return { intent: 'greeting',     confidence: 0.6, reason: 'ar-greet' };
-  if (GREET_EN.test(t))      return { intent: 'greeting',     confidence: 0.6, reason: 'en-greet' };
+  if (raw.length === 0 && normalizedText.length === 0) {
+    return { intent: 'neutral', confidence: 0, reason: 'empty-input', normalizedText: '' };
+  }
 
-  return { intent: 'neutral', confidence: 0.3, reason: 'no-rule-match' };
+  const ar = matchArabicOrdered(normalizedText);
+  if (ar) return mergeRuleIntentWithLlmCanon(ar, llmIntent);
+
+  const en = matchEnglish(normalizedText) ?? matchEnglish(raw);
+  if (en) {
+    const merged = { ...en, normalizedText };
+    return mergeRuleIntentWithLlmCanon(merged, llmIntent);
+  }
+
+  const fallback: IntentResult = {
+    intent: 'neutral',
+    confidence: 0,
+    reason: 'no-rule-match',
+    normalizedText,
+  };
+  return mergeRuleIntentWithLlmCanon(fallback, llmIntent);
 }
+
+export { canonicalizeLlmIntentLabel, normalizeForIntentClassification };

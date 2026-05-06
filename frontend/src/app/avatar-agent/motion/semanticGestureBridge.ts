@@ -15,6 +15,7 @@
  */
 
 import type { DetectedIntent } from './intentClassifier';
+import { canonicalizeLlmIntentLabel } from './arabicIntentNormalize';
 
 export type SemanticGestureDecision = {
   gesture:
@@ -139,7 +140,8 @@ export function resolveSemanticGesture(input: ResolveSemanticGestureInput): Sema
   }
 
   // ── Greeting / welcome (warm, not streamer wave spam) ───────────────────
-  const llmGreet = (input.llmIntent ?? '').toLowerCase() === 'greeting';
+  const llmCanon = canonicalizeLlmIntentLabel(input.llmIntent);
+  const llmGreet = llmCanon === 'greeting';
   if (intent === 'greeting' || llmGreet) {
     if (nowBlocked('welcome', input.nowMs, CD.waveWelcome)) {
       return idle('welcome-cooldown', true);

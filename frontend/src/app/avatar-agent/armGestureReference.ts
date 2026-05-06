@@ -8,7 +8,8 @@
  *
  * ╔══════════════════════════════════════════════════════════════════════╗
  * ║  SOURCE OF TRUTH — normalized rightUpperArm local Euler YXZ (empirical) ║
- * ║  slerpArmEuler: SK_E.set(ex, ey, ez, 'YXZ')                             ║
+ * ║  slerpArmEuler: Euler YXZ → local delta Q, then bindPose.multiply(Q)       ║
+ * ║    (same bind-relative contract as shoulders / head in VRMSkeletonManager). ║
  * ║                                                                         ║
  * ║  RIGHT upper arm (rua):                                                ║
  * ║    PRIMARY forward reach = −ruaX (dominant channel; do not use Y)        ║

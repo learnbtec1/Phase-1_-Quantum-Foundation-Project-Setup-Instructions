@@ -1220,11 +1220,11 @@ export function applyIntentMotionState(
 //             Z (wrist-plane)      : ±0.30
 //
 // Safety rules (per system-wide contract):
-//   • Read quaternion → Euler XYZ → clamp → setFromEuler (absolute, never +=)
+//   • Read quaternion → Euler YXZ → clamp → setFromEuler (absolute, never +=)
 //   • No world-space transforms — normalized bone = local space already correct
 //   • Writes `window.__armDebug` for quick console inspection
 
-const _BL_E  = new THREE.Euler(0, 0, 0, 'XYZ');
+const _BL_E  = new THREE.Euler(0, 0, 0, 'YXZ');
 const _BL_Q  = new THREE.Quaternion();
 
 // ─── Soft-clamp (non-destructive) ────────────────────────────────────────────
@@ -1348,7 +1348,7 @@ function _blClampBone(
 ): void {
   const bone = humanoid.getNormalizedBoneNode(boneName);
   if (!bone) return;
-  _BL_E.setFromQuaternion(bone.quaternion, 'XYZ');
+  _BL_E.setFromQuaternion(bone.quaternion, 'YXZ');
   _BL_E.x = softClamp(_BL_E.x, limits.xMin, limits.xMax);
   _BL_E.y = softClamp(_BL_E.y, limits.yMin, limits.yMax);
   _BL_E.z = softClamp(_BL_E.z, limits.zMin, limits.zMax);
@@ -1379,7 +1379,7 @@ function _blClampBone(
  * The clamp limits widened above (±1.55 on Z) ensure these values pass the
  * subsequent _blClampBone pass unchanged.
  */
-const _IDLE_E = new THREE.Euler(0, 0, 0, 'XYZ');
+const _IDLE_E = new THREE.Euler(0, 0, 0, 'YXZ');
 const _IDLE_Q = new THREE.Quaternion();
 function _applyIdleArmPose(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1388,7 +1388,7 @@ function _applyIdleArmPose(
   const writeIdle = (boneName: string, tx: number, ty: number, tz: number): void => {
     const bone = humanoid.getNormalizedBoneNode(boneName);
     if (!bone) return;
-    _IDLE_E.set(tx, ty, tz, 'XYZ');
+    _IDLE_E.set(tx, ty, tz, 'YXZ');
     _IDLE_Q.setFromEuler(_IDLE_E);
     bone.quaternion.copy(_IDLE_Q);
   };
