@@ -12,6 +12,7 @@
 import * as THREE from 'three';
 import type { BonePoseMap } from './PoseComposer';
 import { isPoseKeyProcedurallySuppressed } from './proceduralSuppressionContext';
+import { isDebugMotion } from '@/lib/logging/runtimeLog';
 
 const _e = new THREE.Euler(0, 0, 0, 'YXZ');
 const _qDelta = new THREE.Quaternion();
@@ -342,7 +343,11 @@ export function applyNeuralLayer(
 
   _neural.frameCount += 1;
   // Throttled debug — max ~1/s AND max ~1 per 60 frames at high FPS (no console flood).
-  if (_neural.frameCount % 60 === 0 && nowMs - _neural.lastDebugMs > 1000) {
+  if (
+    isDebugMotion() &&
+    _neural.frameCount % 60 === 0 &&
+    nowMs - _neural.lastDebugMs > 1000
+  ) {
     _neural.lastDebugMs = nowMs;
     console.log('[NEURAL_LAYER]', {
       noise:  Number(n.toFixed(4)),
@@ -480,7 +485,11 @@ export function applySubconsciousLayer(
 
   _sub.frameCount += 1;
   // Throttled debug — max ~1/s AND max ~1 per 60 frames (guards against console spam).
-  if (_sub.frameCount % 60 === 0 && nowMs - _sub.lastDebugMs > 1000) {
+  if (
+    isDebugMotion() &&
+    _sub.frameCount % 60 === 0 &&
+    nowMs - _sub.lastDebugMs > 1000
+  ) {
     _sub.lastDebugMs = nowMs;
     console.log('[SUBCONSCIOUS]', {
       breath:    Number(breath.toFixed(4)),
@@ -549,7 +558,9 @@ export function setBoneAxisMap(override: Partial<typeof BONE_AXIS_MAP>): void {
   for (const [k, v] of Object.entries(override)) {
     if (v) BONE_AXIS_MAP[k] = { ...BONE_AXIS_MAP[k], ...v };
   }
-  console.log('[AXIS_MAP_OVERRIDE]', BONE_AXIS_MAP);
+  if (isDebugMotion()) {
+    console.log('[AXIS_MAP_OVERRIDE]', BONE_AXIS_MAP);
+  }
 }
 
 // ─── Arm Axis Detector ────────────────────────────────────────────────────────
@@ -635,7 +646,9 @@ export function loadAxisMapFromStorage(modelKey?: string): StoredAxisMap | null 
     }
 
     if (applied > 0) {
-      console.log('[ARM_AXIS_LOADED_FROM_CACHE]', { ...parsed, modelKey: modelKey ?? 'default' });
+      if (isDebugMotion()) {
+        console.log('[ARM_AXIS_LOADED_FROM_CACHE]', { ...parsed, modelKey: modelKey ?? 'default' });
+      }
       return parsed;
     }
     return null;
@@ -655,7 +668,9 @@ function _saveAxisMapToStorage(
     if (lua) payload.lua = { axis: lua.liftAxis, sign: lua.liftSign };
     if (rua) payload.rua = { axis: rua.liftAxis, sign: rua.liftSign };
     localStorage.setItem(_axisStorageKey(modelKey), JSON.stringify(payload));
-    console.log('[ARM_AXIS_SAVED_TO_CACHE]', { ...payload, modelKey: modelKey ?? 'default' });
+    if (isDebugMotion()) {
+      console.log('[ARM_AXIS_SAVED_TO_CACHE]', { ...payload, modelKey: modelKey ?? 'default' });
+    }
   } catch { /* storage unavailable */ }
 }
 
@@ -815,21 +830,23 @@ export function detectArmAxis(
     rejected,
   };
 
-  console.log('[ARM_AXIS_DETECT]', {
-    bone:        boneName || bone.name,
-    liftAxis,
-    liftSign,
-    rawScores:   { x: +rawScores.x.toFixed(4),   y: +rawScores.y.toFixed(4),   z: +rawScores.z.toFixed(4) },
-    twistScores: { x: +twistScores.x.toFixed(4), y: +twistScores.y.toFixed(4), z: +twistScores.z.toFixed(4) },
-    finalScores: {
-      x: finalScores.x === -Infinity ? '-∞' : +finalScores.x.toFixed(4),
-      y: finalScores.y === -Infinity ? '-∞' : +finalScores.y.toFixed(4),
-      z: finalScores.z === -Infinity ? '-∞' : +finalScores.z.toFixed(4),
-    },
-    confidence:  +confidence.toFixed(4),
-    rejected,
-    childCount,
-  });
+  if (isDebugMotion()) {
+    console.log('[ARM_AXIS_DETECT]', {
+      bone:        boneName || bone.name,
+      liftAxis,
+      liftSign,
+      rawScores:   { x: +rawScores.x.toFixed(4),   y: +rawScores.y.toFixed(4),   z: +rawScores.z.toFixed(4) },
+      twistScores: { x: +twistScores.x.toFixed(4), y: +twistScores.y.toFixed(4), z: +twistScores.z.toFixed(4) },
+      finalScores: {
+        x: finalScores.x === -Infinity ? '-∞' : +finalScores.x.toFixed(4),
+        y: finalScores.y === -Infinity ? '-∞' : +finalScores.y.toFixed(4),
+        z: finalScores.z === -Infinity ? '-∞' : +finalScores.z.toFixed(4),
+      },
+      confidence:  +confidence.toFixed(4),
+      rejected,
+      childCount,
+    });
+  }
 
   return result;
 }
@@ -862,11 +879,13 @@ export function detectBothArms(
     if (ruaResult) BONE_AXIS_MAP['rua'] = { ...BONE_AXIS_MAP['rua'], open: { axis: ruaResult.liftAxis, sign: ruaResult.liftSign } };
     // Persist (model-keyed — STEP 6)
     _saveAxisMapToStorage(luaResult, ruaResult, modelKey);
-    console.log('[ARM_AXIS_PATCHED_AND_SAVED]', {
-      lua: luaResult ? `${luaResult.liftAxis}·${luaResult.liftSign > 0 ? '+1' : '-1'}` : 'NOT_FOUND',
-      rua: ruaResult ? `${ruaResult.liftAxis}·${ruaResult.liftSign > 0 ? '+1' : '-1'}` : 'NOT_FOUND',
-    });
-  } else {
+    if (isDebugMotion()) {
+      console.log('[ARM_AXIS_PATCHED_AND_SAVED]', {
+        lua: luaResult ? `${luaResult.liftAxis}·${luaResult.liftSign > 0 ? '+1' : '-1'}` : 'NOT_FOUND',
+        rua: ruaResult ? `${ruaResult.liftAxis}·${ruaResult.liftSign > 0 ? '+1' : '-1'}` : 'NOT_FOUND',
+      });
+    }
+  } else if (isDebugMotion()) {
     console.log('[ARM_AXIS_REPORT]', {
       lua: luaResult
         ? { liftAxis: luaResult.liftAxis, liftSign: luaResult.liftSign, confidence: +luaResult.confidence.toFixed(4), rejected: luaResult.rejected }
@@ -1242,11 +1261,24 @@ const _BASE_LOWER_ARM: BoneLimits = { xMin: -0.05, xMax:  1.60, yMin: -0.30, yMa
 const _FOLD_GESTURES   = new Set(['wave', 'clap', 'think']);
 // Gestures that require cross-body upper-arm reach (luaX positive).
 const _CROSS_GESTURES  = new Set(['wave', 'clap']);
+/** Timeline + library ids: open-palm / reach semantics need wider X and Z than generic idle. */
+const _SEMANTIC_OPEN_GESTURES = new Set([
+  'explain',
+  'emphasis',
+  'emphasizing',
+  'listening',
+  'thinking',
+  'welcome',
+  'point',
+]);
 
 function _upperArmLimits(gesture: string | undefined): BoneLimits {
   if (gesture && _CROSS_GESTURES.has(gesture)) {
     // Allow luaX = +1.20 (cross-body for wave / clap); xMin = -1.35 for rua forward raise.
     return { xMin: -1.35, xMax: 1.20, yMin: -0.50, yMax: 0.50, zMin: -1.55, zMax: 1.55 };
+  }
+  if (gesture && _SEMANTIC_OPEN_GESTURES.has(gesture)) {
+    return { xMin: -1.34, xMax: 0.95, yMin: -0.58, yMax: 0.58, zMin: -1.72, zMax: 1.72 };
   }
   return _BASE_UPPER_ARM;
 }
@@ -1256,6 +1288,9 @@ function _lowerArmLimits(gesture: string | undefined): BoneLimits {
     // Allow rlaZ / llaZ down to -2.30 for forearm fold (wave / clap / think).
     // elbow flex (rlaX) kept the same; wrist-plane (Y) unchanged.
     return { xMin: -0.05, xMax: 1.60, yMin: -0.30, yMax: 0.30, zMin: -2.30, zMax: 2.30 };
+  }
+  if (gesture && _SEMANTIC_OPEN_GESTURES.has(gesture)) {
+    return { xMin: -0.05, xMax: 1.68, yMin: -0.42, yMax: 0.42, zMin: -0.72, zMax: 0.72 };
   }
   return _BASE_LOWER_ARM;
 }
@@ -1285,12 +1320,12 @@ export type BiomechContext = {
 // output (which contains the bind T-pose for arms when no gesture is active).
 // Each frame the lerp restarted from T-pose → only ~18% movement was visible.
 // With absolute write, arms snap to the natural pose every frame and stay there.
-const _IDLE_UPPER_ARM_X    = -0.05;  // tiny forward (relaxed shoulders)
-const _IDLE_UPPER_ARM_Z    =  1.40;  // hanging-down — right arm; left mirrored
-const _IDLE_LOWER_ARM_X    =  0.10;  // ~6° elbow flex (matches ARM_IDLE)
+const _IDLE_UPPER_ARM_X    = -0.06;  // tiny forward (relaxed shoulders)
+const _IDLE_UPPER_ARM_Z    =  1.48;  // hanging-down — right arm; left mirrored (clearer than bind T)
+const _IDLE_LOWER_ARM_X    =  0.14;  // ~8° elbow flex (matches ARM_IDLE direction)
 // Shoulder roll-down: a tiny negative Z on shoulders closes the V-pose gap
 // and gives a "weight-bearing" look instead of the military-at-attention bind.
-const _IDLE_SHOULDER_Z     =  0.08;  // rightShoulder drops slightly; left mirrors
+const _IDLE_SHOULDER_Z     =  0.10;  // rightShoulder drops slightly; left mirrors
 
 /**
  * Soft-clamp a single live VRM normalized bone to anatomical limits.

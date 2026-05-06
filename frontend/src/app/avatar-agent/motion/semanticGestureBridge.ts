@@ -9,6 +9,9 @@
  * Execution path: VRMSkeletonManager → {@link resolveSemanticGesture} →
  * {@link pushBehaviorFromSemanticDecision} in `behaviorTimeline.ts` →
  * `tickBehaviorTimeline` → legacy gesture refs. No direct bone writes here.
+ *
+ * FORENSIC_CP: bridge cooldowns تحكم التكرار؛ لكن جدولة الذراع أثناء الكلام الطويل تعتمد أيضًا على
+ * `talkGestureNextAtMsRef` في VRMSkeletonManager (لا تعتمد على hash النص وحده).
  */
 
 import type { DetectedIntent } from './intentClassifier';

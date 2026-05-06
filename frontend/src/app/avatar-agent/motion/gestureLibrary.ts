@@ -36,8 +36,8 @@ export const GestureLibrary = {
       spine: { rx: -0.012, ry: 0, rz: 0 },
       leftShoulder: { rx: 0, ry: 0, rz: 0.016 },
       rightShoulder: { rx: 0, ry: 0, rz: -0.014 },
-      lua: { rx: 0, ry: 0.018, rz: 0.024 },
-      rua: { rx: 0, ry: -0.016, rz: -0.02 },
+      lua: { rx: 0, ry: 0.022, rz: 0.03 },
+      rua: { rx: 0, ry: -0.02, rz: -0.026 },
     },
   } satisfies GestureClipDef,
 
@@ -79,8 +79,8 @@ export const GestureLibrary = {
       spine: { rx: -0.011, ry: 0, rz: 0 },
       leftShoulder: { rx: 0, ry: 0, rz: 0.014 },
       rightShoulder: { rx: 0, ry: 0, rz: -0.013 },
-      lua: { rx: 0, ry: 0.014, rz: 0.02 },
-      rua: { rx: 0, ry: -0.013, rz: -0.018 },
+      lua: { rx: 0, ry: 0.018, rz: 0.026 },
+      rua: { rx: 0, ry: -0.017, rz: -0.024 },
     },
   } satisfies GestureClipDef,
 } as const;

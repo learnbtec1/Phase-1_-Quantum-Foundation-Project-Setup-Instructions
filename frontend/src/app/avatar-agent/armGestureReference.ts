@@ -56,10 +56,10 @@ export type ArmEulerOffset = {
  * Forward/back primary channels start at X=0; hang is Z (right +Z down, left −Z down).
  */
 export const ARM_IDLE: ArmEulerOffset = {
-  ruaX:  0.0,  ruaY:  0.0,  ruaZ: +1.4,
-  luaX:  0.0,  luaY:  0.0,  luaZ: -1.4,
-  rlaX:  0.08, rlaZ:  0.0,
-  llaX:  0.08, llaZ:  0.0,
+  ruaX:  0.0,  ruaY: -0.04, ruaZ: +1.48,
+  luaX:  0.0,  luaY:  0.04, luaZ: -1.48,
+  rlaX:  0.12, rlaZ:  0.0,
+  llaX:  0.12, llaZ:  0.0,
   rhX:   0.0,  rhY:   0.0,  rhZ:   0.0,
   lhX:   0.0,  lhY:   0.0,  lhZ:   0.0,
 };
@@ -108,8 +108,12 @@ export const ARM_OFFSETS: Record<ArmGestureId, ArmEulerOffset> = {
   },
   explain: {
     ...ZERO,
-    ruaX: -0.8,
-    luaX: +0.8,
+    ruaX: -0.95,
+    ruaY: -0.05,
+    luaX: +0.95,
+    luaY: 0.05,
+    rlaX: 0.06,
+    llaX: 0.06,
   },
   clap: {
     ...ZERO,

@@ -94,5 +94,3 @@ export function detectIntentDetailed(text: string): IntentResult {
 
   return { intent: 'neutral', confidence: 0.3, reason: 'no-rule-match' };
 }
-
-console.log('[FILE_CREATED] intentClassifier.ts loaded');

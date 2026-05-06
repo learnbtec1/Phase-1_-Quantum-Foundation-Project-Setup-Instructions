@@ -50,6 +50,8 @@ const MIN_BETWEEN_SCHEDULER_PLAYS_SPEAKING_MS = 1500;
 let started = false;
 let intervalId: number | null = null;
 let lastSchedulerPlayAt = 0;
+/** Last `minBetween` used in `schedulerTick` — for `getMotionSchedulerCooldownDebug`. */
+let lastSchedulerMinBetweenMs = MIN_BETWEEN_SCHEDULER_PLAYS_MS;
 /** Throttle noisy trace logs (normal tick skips). */
 let lastTraceSched2LogAt = 0;
 let lastTraceSched6LogAt = 0;
@@ -105,6 +107,7 @@ async function schedulerTick(): Promise<void> {
       ? 850 + Math.floor(Math.random() * 350)
       : MIN_BETWEEN_SCHEDULER_PLAYS_SPEAKING_MS
     : MIN_BETWEEN_SCHEDULER_PLAYS_MS;
+  lastSchedulerMinBetweenMs = minBetween;
   const minSinceAction = speaking ? MIN_SINCE_LAST_ACTION_SPEAKING_MS : MIN_SINCE_LAST_ACTION_MS;
 
   const vrmaBlockingAmbient =
@@ -300,6 +303,23 @@ async function schedulerTick(): Promise<void> {
     humanTiming: false,
     behaviorBrain: true,
   });
+}
+
+/** DevTools: cooldown gate the ambient scheduler uses (matches last tick’s `minBetween`). */
+export function getMotionSchedulerCooldownDebug(now: number = perfNow()): {
+  blocking: boolean;
+  msUntilNext: number;
+  lastPlayAt: number;
+  minBetweenMs: number;
+} {
+  const elapsed = now - lastSchedulerPlayAt;
+  const minBetween = lastSchedulerMinBetweenMs;
+  return {
+    blocking: elapsed < minBetween,
+    msUntilNext: Math.max(0, minBetween - elapsed),
+    lastPlayAt: lastSchedulerPlayAt,
+    minBetweenMs: minBetween,
+  };
 }
 
 /** Idempotent — starts one 100–200ms loop for ambient motion scheduling. */

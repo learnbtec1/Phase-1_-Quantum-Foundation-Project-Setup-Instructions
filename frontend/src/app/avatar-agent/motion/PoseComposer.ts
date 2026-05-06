@@ -362,12 +362,13 @@ export function applyFinalPoseToVrm(params: {
     if (!obj) continue;
     if (
       motionPoseDebug &&
+      isDebugMotion() &&
       ARM_BONE_MAP[key] &&
       typeof performance !== 'undefined'
     ) {
       const n = performance.now();
       if (n >= __applyFinalPoseBoneLogNextAt) {
-        __applyFinalPoseBoneLogNextAt = n + 1200;
+        __applyFinalPoseBoneLogNextAt = n + 2000;
         // eslint-disable-next-line no-console -- DEBUG: confirm arm mapping path
         console.log('APPLYING TO BONE:', mappedKey, '(pose key:', key, ')');
       }

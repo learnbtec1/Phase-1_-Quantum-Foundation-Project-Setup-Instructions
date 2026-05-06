@@ -36,6 +36,7 @@ import {
 import { getEmbodimentState } from '@/lib/avatar/embodimentState';
 import { getSmoothedUnifiedEnergy } from '@/lib/avatar/unifiedEnergyModel';
 import { getCogniTeachingStance } from '@/lib/avatar/cogniPersonaStance';
+import { recordContinuousMotionActivity } from '@/lib/behavior/behaviorMotionBrain';
 
 const _e = new THREE.Euler(0, 0, 0, 'YXZ');
 const _qDelta = new THREE.Quaternion();
@@ -508,5 +509,15 @@ export function applyLayeredProceduralStack(
       gains: Object.fromEntries(maskedGains),
       tSec: Number(ctx.tSec.toFixed(2)),
     });
+  }
+
+  // FORENSIC_CP: طبقة الرأس/الصدر الإجرائية ≠ إيماءات الذراع؛ يجب أن يحدِّث ساعة النشاط المستمر
+  // حتى لا يظهر [MOTION] NO MOTION FOR TOO LONG بينما الحركة ظاهرة على الرأس.
+  if (
+    seq.envelope > 0.035 ||
+    plan.smoothedEnergy > 0.22 ||
+    [...maskedGains.values()].some((v) => v > 0.08)
+  ) {
+    recordContinuousMotionActivity();
   }
 }

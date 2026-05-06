@@ -84,7 +84,6 @@ import {
   resolveSemanticGesture,
   resetSemanticGestureBridgeState,
 } from './motion/semanticGestureBridge';
-console.log('[FILE_IMPORTED] biomechanicalCorrectionLayer, fingerMicroLayer, gazeIntentLayer, gestureTiming, intentClassifier, behaviorTimeline');
 import { installVrmHumanoidBypassProbe } from '@/app/avatar-agent/motion/proceduralV2';
 import {
   tickHumanization,
@@ -198,7 +197,8 @@ import { getBreathEmotionRateMul } from '@/ai/avatar/microExpressionLayer';
 import { useBrainStore } from '@/store/useBrainStore';
 import { AVATAR_BEHAVIOR_SINGLE_CONTROLLER } from '@/config/avatar';
 import { nowMs as masterClockNowMs, sessionElapsedSec } from '@/lib/avatar/masterClock';
-import { recordActivity } from '@/lib/avatar/motionDiagnostics';
+import { recordActivity, getMotionTraceOverlayState } from '@/lib/avatar/motionDiagnostics';
+import { getMotionSchedulerCooldownDebug } from '@/lib/avatar/motionScheduler';
 import { isDebugMotion, logDebug, logDebugThrottledCallback } from '@/lib/logging/runtimeLog';
 import {
   attachMotionPipelineEventProbes,
@@ -810,7 +810,7 @@ const INTENT_SLERP_ATTACK = 3.05; // was 2.2 — faster reach to peak
 const INTENT_SLERP_HOLD  = 0.88; // was 0.65 — slightly snappier hold tracking
 const INTENT_SLERP_DECAY = 0.52; // was 0.38 — decay still soft but not sluggish
 // Hold micro-oscillation: simulates sustained muscle activation at peak
-const INTENT_HOLD_OSC_AMP  = 0.048; // ±4.8% of target amplitude
+const INTENT_HOLD_OSC_AMP  = 0.052; // ±5.2% of target amplitude
 const INTENT_HOLD_OSC_FREQ = 6.5;   // Hz — subtle but visible
 
 /** بعد تغيّر الإيماءة: يبطّئ معدلات slerp ثم يعود للكامل (يقلّل القفزات). أقصر = استجابة أسرع. */
@@ -836,7 +836,7 @@ const ANT_SHOULDER_R_THINK = -0.028;
 const ANT_HIP_Z_POINT = 0;
 const ANT_HIP_Z_EXPLAIN = 0;
 /** تضخيم مؤقت لـ gBlend على الذراعين/الموجات في نافذة المتابعة */
-const FOLLOW_ARM_BLEND_BUMP = 0.11;
+const FOLLOW_ARM_BLEND_BUMP = 0.14;
 
 // ─── Biomechanics Enhancement Layer ─────────────────────────────────────────
 // Organic motion: blend sine wave with simplex-noise for non-repeating feel
@@ -851,7 +851,7 @@ const BIO_GRAVITY_DROOP   = 0.036;  // droop added to Z when arm extended
 // Anticipation ease-out curve power (< 1 = fast attack, slow release)
 const BIO_ANT_CURVE_POW   = 0.58;
 // Follow-through overshoot amplitude (stacks on top of FOLLOW_ARM_BLEND_BUMP)
-const BIO_FOLLOW_OVERSHOOT = 0.054;
+const BIO_FOLLOW_OVERSHOOT = 0.072;
 // Breathing → shoulder coupling
 const BIO_BREATHE_SHLDR   = 0.016;  // shoulder Y lift per unit of breath
 const BIO_BREATHE_ARM     = 0.005;  // idle arm Z drift per unit of breath
@@ -1340,6 +1340,8 @@ export function VRMSkeletonManager({
    * feel different from frame to frame, eliminating the "same pose every time" feel.
    */
   const gestureAmplitudeMulRef = useRef(1.0);
+  /** Exponential smoothing state for upper-arm / shoulder gesture targets (follow-through lag). */
+  const smoothedGestureArmRef = useRef<Map<string, THREE.Quaternion>>(new Map());
 
   /**
    * PHASE 3 — Gesture Context Object.
@@ -1368,6 +1370,8 @@ export function VRMSkeletonManager({
   const voiceHeadPitchSmRef = useRef(0);
   const voiceHeadYawSmRef   = useRef(0);
   const lastGestureFrameLogMsRef = useRef(0);
+  /** Throttle [MOTION_AUTHORITY_HARD] when idle blend wins despite timeline gesture. */
+  const lastMotionAuthorityHardWarnMsRef = useRef(0);
   const lastIdleZLogMsRef = useRef(0);
   /** Throttled `NEXT_PUBLIC_DEBUG_TRACE` frame counter (useFrame). */
   const motionTraceFrameRef = useRef(0);
@@ -2647,12 +2651,16 @@ export function VRMSkeletonManager({
       audioRms01 = 0.40;
       audioRmsSource = 'safety-guard';
     }
-    // ── TASK 4: [PIPER_RMS] + [FINAL_RMS] debug log (throttled 250 ms) ─────────
-    if (speaking && typeof performance !== 'undefined') {
+    // ── TASK 4: [PIPER_RMS] + [FINAL_RMS] — debug only, ≤ ~0.5/s (motion debug env)
+    if (
+      isDebugMotion() &&
+      speaking &&
+      typeof performance !== 'undefined'
+    ) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const _piperLast = (globalThis as any).__piperRmsLogLastMs ?? 0;
       const _piperNow  = performance.now();
-      if (_piperNow - _piperLast > 250) {
+      if (_piperNow - _piperLast > 2000) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (globalThis as any).__piperRmsLogLastMs = _piperNow;
         console.log('[PIPER_RMS]', {
@@ -2720,14 +2728,14 @@ export function VRMSkeletonManager({
       };
     }
 
-    // ── [ENERGY_FLOW] — always-on throttled probe (250ms) ─────────────────────
+    // ── [ENERGY_FLOW] — gated + throttled (≤ ~0.5/s) when NEXT_PUBLIC_DEBUG_MOTION*
     // Captures the exact values that drive motion so we can verify the
     // audioRms01 → tickUnifiedEnergy → getSmoothedUnifiedEnergy chain.
-    if (typeof performance !== 'undefined') {
+    if (isDebugMotion() && typeof performance !== 'undefined') {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const _efLast = (globalThis as any).__energyFlowLogLastMs ?? 0;
       const _efNow  = performance.now();
-      if (_efNow - _efLast > 250) {
+      if (_efNow - _efLast > 2000) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (globalThis as any).__energyFlowLogLastMs = _efNow;
         // Accumulate a rolling 4-sample window so we can answer
@@ -2863,12 +2871,18 @@ export function VRMSkeletonManager({
         }
       }
 
+      // FORENSIC_CP: semanticBridge — كان يُقيَّد بـ utteranceHash فيُطلق التايملاين مرة واحدة لكل نص ثابت،
+      // فيبقى الذراع IDLE طوال الجملة الطويلة رغم [PROCEDURAL EXECUTED] (رأس فقط).
       if (_autoCanFire) {
         const _utterText = getEmbodimentUtteranceTextForSemantics() ?? '';
         if (_utterText.length > 0) {
           const _utterHash = `${_utterText.length}:${_utterText.slice(0, 32)}`;
-          if (_utterHash !== lastSemanticUtteranceHashRef.current) {
-            lastSemanticUtteranceHashRef.current = _utterHash;
+          const _hashChanged = _utterHash !== lastSemanticUtteranceHashRef.current;
+          const _scheduleDue = nowMs >= talkGestureNextAtMsRef.current;
+          if (_hashChanged || _scheduleDue) {
+            if (_hashChanged) {
+              lastSemanticUtteranceHashRef.current = _utterHash;
+            }
             const _det = detectIntentDetailed(_utterText);
             const decision = resolveSemanticGesture({
               detectedIntent: _det.intent,
@@ -2898,6 +2912,7 @@ export function VRMSkeletonManager({
                 activeGestureTimeline: ev?.type ?? cur?.type ?? 'idle',
                 fallbackToIdle: decision.gesture === 'idle',
                 ruleReason: _det.reason,
+                firedOn: _hashChanged ? 'utterance-change' : 'schedule-cooldown',
               };
             }
             if (ev) {
@@ -2926,6 +2941,7 @@ export function VRMSkeletonManager({
                   intensity: +ev.intensity.toFixed(2),
                   queueDepth: getBehaviorQueueDepth(),
                   nextAt: Math.round(talkGestureNextAtMsRef.current),
+                  trigger: _hashChanged ? 'hash' : 'cooldown',
                 });
               }
             }
@@ -3053,6 +3069,16 @@ export function VRMSkeletonManager({
     if (proceduralOnly && motionSource === 'VRMA') {
       motionSource = rawG !== 'idle' ? 'GESTURE' : 'IDLE';
     }
+    // FORENSIC_CP: إن وُجد حدث تايملاين بنسبة ظهور، لا يجوز أن يبقى المصدر IDLE (إصلاح انزلاق السلطة).
+    if (
+      !vrmaActive &&
+      motionSource === 'IDLE' &&
+      _behaviorFrame.event !== null &&
+      _behaviorFrame.envelope > 0.06 &&
+      _behaviorFrame.event.type !== 'idle'
+    ) {
+      motionSource = 'GESTURE';
+    }
     const g = rawG;
 
     if (motionSource === 'IDLE' && prevMotionSourceRef.current === 'GESTURE') {
@@ -3062,7 +3088,8 @@ export function VRMSkeletonManager({
     const elapsed = nowMs - gestureStartRef.current;
     const dur = Math.max(1, gestureDurationRef.current);
     let progress = Math.min(1, elapsed / dur);
-    if (!vrmaActive && g !== 'idle' && progress >= 1) {
+    // FORENSIC_CP: لا تُصفّر الإيماءة بالمدّة إذا كان التايملاين لا يزال يعرض حدثًا (منع desync).
+    if (!vrmaActive && g !== 'idle' && progress >= 1 && !_behaviorFrame.event) {
       if (process.env.NODE_ENV === 'development') {
         avatarDebug('[Gesture] Transition to idle after duration');
       }
@@ -4682,6 +4709,30 @@ export function VRMSkeletonManager({
       }
     }
 
+    // Conversational inertia (visual): lag upper arms + shoulders toward authored gesture.
+    if (isProceduralGestureFrame && rawG !== 'idle' && !VRMA_ISOLATION_TEST) {
+      const _gsm = smoothedGestureArmRef.current;
+      const _smoothArmBone = (bone: string, tauSec: number) => {
+        const tgt = gesturePose.get(bone);
+        if (!tgt) return;
+        let sm = _gsm.get(bone);
+        if (!sm) {
+          sm = tgt.clone();
+          _gsm.set(bone, sm);
+        } else {
+          const a = 1 - Math.exp(-safeDelta / tauSec);
+          sm.slerp(tgt, THREE.MathUtils.clamp(a, 0, 1));
+        }
+        gesturePose.set(bone, sm.clone());
+      };
+      _smoothArmBone('lua', 0.084);
+      _smoothArmBone('rua', 0.084);
+      _smoothArmBone('leftShoulder', 0.118);
+      _smoothArmBone('rightShoulder', 0.118);
+    } else if (!isProceduralGestureFrame) {
+      smoothedGestureArmRef.current.clear();
+    }
+
     const finalPose = blendPoseLayers({
       bind: m,
       idle: idlePose,
@@ -4721,6 +4772,84 @@ export function VRMSkeletonManager({
       },
     });
     detectPoseLoss(finalPose);
+
+    // ── window.__MOTION_AUTHORITY_FORENSICS (نهاية سلطة الخلط الأولى) ─────────
+    if (typeof window !== 'undefined' && _execLoop.frameCount % 16 === 0) {
+      const _bLua = m.get('lua');
+      const _fLua = finalPose.get('lua');
+      let finalArmMagnitude = 0;
+      if (_bLua && _fLua) {
+        finalArmMagnitude =
+          2 *
+          Math.acos(THREE.MathUtils.clamp(Math.abs(_fLua.dot(_bLua)), 0, 1));
+      }
+      const gesturePoseWritten = gesturePose.has('lua') && gesturePose.has('rua');
+      const gesturePoseApplied = gesturePoseWritten && gestureLayerW > 0.08;
+      const idleOverwriteDetected =
+        !!_behaviorFrame.event &&
+        idleLayerW > 0.88 &&
+        gestureLayerW < 0.18;
+      const vrmaOverwriteDetected = vrmaLayerW > 0.25 && motionSource === 'VRMA';
+      const wEff = {
+        idle: idleLayerW,
+        gesture: gestureLayerW,
+        vrma: vrmaLayerW,
+        generative: generativeLayerW,
+      };
+      const dominant = Object.entries(wEff).sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'bind';
+      let overwrittenBy = 'none';
+      if (idleOverwriteDetected) overwrittenBy = 'idleBlendHighVsLowGestureWeight';
+      else if (vrmaOverwriteDetected) overwrittenBy = 'vrmaLayer';
+      const overlay = getMotionTraceOverlayState();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__MOTION_AUTHORITY_FORENSICS = {
+        currentMotionSource: motionSource,
+        gestureEnvelope: +_behaviorFrame.envelope.toFixed(4),
+        gestureLayerWeight: +gestureLayerW.toFixed(4),
+        idleLayerWeight: +idleLayerW.toFixed(4),
+        finalDominantLayer: dominant,
+        finalArmMagnitude: +finalArmMagnitude.toFixed(4),
+        gesturePoseWritten,
+        gesturePoseApplied,
+        finalPoseApplied: finalPose.size > 0,
+        overwrittenBy,
+        idleOverwriteDetected,
+        vrmaOverwriteDetected,
+        finalBlendWeights: {
+          idle: +idleLayerW.toFixed(3),
+          gesture: +gestureLayerW.toFixed(3),
+          vrma: +vrmaLayerW.toFixed(3),
+          generative: +generativeLayerW.toFixed(3),
+        },
+        motionDiagnosticsState: overlay,
+        authorityWinner:
+          dominant === 'gesture'
+            ? 'blend:gesture'
+            : dominant === 'idle'
+              ? 'blend:idle'
+              : dominant === 'vrma'
+                ? 'blend:vrma'
+                : 'blend:generative',
+        timelineEventType: _behaviorFrame.event?.type ?? null,
+        gestureStateRef: gestureStateRef.current,
+      };
+      if (
+        idleOverwriteDetected &&
+        nowMs - lastMotionAuthorityHardWarnMsRef.current > 2800
+      ) {
+        lastMotionAuthorityHardWarnMsRef.current = nowMs;
+        // eslint-disable-next-line no-console
+        console.warn('[MOTION_AUTHORITY_HARD]', {
+          reason: 'Timeline has active gesture but blend weights favor idle',
+          timelineType: _behaviorFrame.event?.type,
+          envelope: +_behaviorFrame.envelope.toFixed(3),
+          gestureLayerW: +gestureLayerW.toFixed(3),
+          idleLayerW: +idleLayerW.toFixed(3),
+          motionSource,
+        });
+      }
+    }
+
     // Snapshot tracked keys so layers below can diff-register their authority.
     const _authoritySnap = new Map<string, string>();
     captureSignatureSnapshot(finalPose, TRACKED_POSE_KEYS, _authoritySnap);
@@ -5190,12 +5319,12 @@ export function VRMSkeletonManager({
         // computed unconditionally above (PART 1 root-cause hoist).  Here we
         // only consume them.
 
-        // ── [PHASE_2] + [MOTION_STATE] log (throttled 250ms) ─────────────────
-        if (typeof performance !== 'undefined') {
+        // ── [PHASE_2] + [MOTION_STATE] log — motion debug only, ≤ ~0.5/s ───────
+        if (isDebugMotion() && typeof performance !== 'undefined') {
           const _msNow = performance.now();
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const _msLast = (globalThis as any).__motionStateLogLastMs ?? 0;
-          if (_msNow - _msLast > 250) {
+          if (_msNow - _msLast > 2000) {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             (globalThis as any).__motionStateLogLastMs = _msNow;
             const _allZero =
@@ -5225,12 +5354,12 @@ export function VRMSkeletonManager({
           }
         }
 
-        // ── [VISIBLE_MOTION] + [LAYER_BALANCE] logs (throttled 250ms) ──────────
-        if (typeof performance !== 'undefined') {
+        // ── [VISIBLE_MOTION] + [LAYER_BALANCE] — motion debug only, ≤ ~0.5/s ──
+        if (isDebugMotion() && typeof performance !== 'undefined') {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const _vmLast = (globalThis as any).__visMotionLogLastMs ?? 0;
           const _vmNow  = performance.now();
-          if (_vmNow - _vmLast > 250) {
+          if (_vmNow - _vmLast > 2000) {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             (globalThis as any).__visMotionLogLastMs = _vmNow;
             console.log('[VISIBLE_MOTION]', {
@@ -5261,10 +5390,11 @@ export function VRMSkeletonManager({
         // ── Capture bone rotations BEFORE intent apply ────────────────────
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const _shouldTrace = (() => {
+          if (!isDebugMotion()) return false;
           const _nowT = typeof performance !== 'undefined' ? performance.now() : 0;
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const _lastT = (globalThis as any).__frameTraceLastMs ?? 0;
-          if (_nowT - _lastT < 500) return false;
+          if (_nowT - _lastT < 2000) return false;
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           (globalThis as any).__frameTraceLastMs = _nowT;
           return true;
@@ -6371,6 +6501,66 @@ export function VRMSkeletonManager({
           emotion:       { valence: +_tlEmotion.valence.toFixed(2), arousal: +_tlEmotion.arousal.toFixed(2) },
           queueDepth:    getBehaviorQueueDepth(),
           lastAudit:     getLastBehaviorAudit(),
+        };
+
+        const _schedRec = getMotionSchedulerCooldownDebug(
+          typeof performance !== 'undefined' ? performance.now() : Date.now(),
+        );
+        const _gestureDom =
+          isProceduralGestureFrame && rawG !== 'idle' && gestureLayerW >= 0.42;
+        const _idleOv =
+          isProceduralGestureFrame && rawG !== 'idle' && gestureLayerW < 0.36;
+        const _clampSup =
+          isProceduralGestureFrame && gBlend > 0.22 && intentArm < gBlend * 0.4;
+        const _gestRead =
+          gestureLayerW >= 0.38 &&
+          _behaviorFrame.envelope >= 0.18 &&
+          intentArm >= 0.26;
+        const _inertOk =
+          !!_behaviorFrame.inertiaActive ||
+          (getLastBehaviorAudit()?.inertiaWorking ?? false);
+        let _recRoot: string = 'blend and layers nominal';
+        if (_idleOv) _recRoot = 'gesture blend weight still low vs idle on upper body';
+        else if (_schedRec.blocking) _recRoot = 'ambient scheduler cooldown window active';
+        else if (_clampSup) _recRoot = 'intent curve or biomechanical envelope reducing arm delta';
+        else if (!_gestRead) {
+          _recRoot = 'timeline envelope or gesture layer weight below readability threshold';
+        }
+        const _visComplete =
+          _gestureDom &&
+          !_idleOv &&
+          !_schedRec.blocking &&
+          _gestRead &&
+          _inertOk &&
+          !_clampSup;
+        const _armsOwner =
+          motionSource === 'GESTURE'
+            ? 'TimelineGesture→gesturePose'
+            : motionSource === 'VRMA'
+              ? 'VRMA clip'
+              : speaking
+                ? 'Intent/speech layers'
+                : 'IdlePose+humanization';
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).__MOTION_RECOVERY_DEBUG = {
+          gestureDominant: _gestureDom,
+          idleOverriding: _idleOv,
+          schedulerBlocking: _schedRec.blocking,
+          clampSuppressing: _clampSup,
+          gestureAmplitudeReadable: _gestRead,
+          inertiaWorking: _inertOk,
+          visualRecoveryComplete: _visComplete,
+          dominantRuntimeOwner: {
+            upperBody:
+              motionSource === 'GESTURE'
+                ? 'gesturePose(spine,chest)+presence'
+                : motionSource === 'VRMA'
+                  ? 'vrmaForBlend'
+                  : 'idlePose+humanization',
+            arms: _armsOwner,
+            head: 'LookAt+gazeIntent+intentMotion',
+          },
+          rootCause: _recRoot,
         };
       }
 

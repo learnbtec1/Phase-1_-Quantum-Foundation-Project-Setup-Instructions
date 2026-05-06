@@ -428,6 +428,7 @@ export function computeBehaviorFrame(
  * Idempotent within a single frame as long as `now` is monotonic.
  */
 export function tickBehaviorTimeline(now: number): BehaviorFrame {
+  // FORENSIC_CP: مصدر سلطة الذراع في VRMSkeletonManager؛ لا يُخلط مع motionSequencer في motionComposition (رأس).
   // Advance: drop completed event(s) and pop next if available.
   while (_current && (now - _current.startTime) >= _current.duration) {
     const completed = _current;
