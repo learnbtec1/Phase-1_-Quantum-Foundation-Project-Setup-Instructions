@@ -1,0 +1,23 @@
+[SUMMARY]
+Runtime health acceptable.
+
+Primary failure:
+gestureEmbodimentCollapse (88% confidence)
+
+Most affected file:
+motionScheduler.ts
+
+Most affected subsystem:
+scheduler
+
+Evidence:
+gestureWeight=0.44
+idleWeight=1.00
+recurring (ema window): SCHED_BLOCKED_MIN_BETWEEN (ema=164.11); SCHED_DISPATCH_OK (ema=14.49); SCHED_BLOCKED_IDLE_RANDOM (ema=7.50)
+
+Recommended fix:
+Raise gesture blend authority during active timeline events / speaking (PoseComposer weights).
+
+Dominant correlation chain:
+gestureInvisible → idleOverwrite → weakGestureEnvelope → schedulerCooldown → intentNeutralCollapse
+confidence=88.2%

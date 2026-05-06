@@ -36,6 +36,7 @@ import {
   flushPersonalityMemory,
   initPersonalityMemory,
 } from '@/ai/avatar/personalityMemory';
+import { initCogniPersonalityResolverSideChannel } from '@/lib/avatar/resolveCogniPersonality';
 
 const KEY_LTM = 'cogni:ltm';
 const KEY_CTX = 'cogni:ctx';
@@ -84,6 +85,7 @@ export function initBrainPersistence(): void {
   initPersistentEmotionalMemory();
   initPersonalityEvolution();
   initPersonalityMemory();
+  initCogniPersonalityResolverSideChannel();
   initOpinionEngine();
 
   // 1. Restore longTermMemory

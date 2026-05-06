@@ -1,0 +1,129 @@
+{
+  "timestamp": "2026-05-06T23:26:10.695Z",
+  "embodimentHealthScore": 84,
+  "currentDominantRootCause": "Temporal chain: idle authority dominating during speech (conf=0.92)",
+  "mostProblematicSubsystem": "motion_authority",
+  "mostProblematicFile": "VRMSkeletonManager.tsx",
+  "mostProblematicFunction": "schedulerTick",
+  "activeEmbodimentFailures": [
+    {
+      "id": "idle_overwriting_gesture_authority",
+      "subsystem": "motion_authority",
+      "severity": "critical",
+      "summary": "Idle layer dominates during speech — gesture authority likely collapsed",
+      "evidence": [
+        "idleW=1.00",
+        "gestureW=0.44"
+      ],
+      "inspectTargets": [
+        "frontend/src/app/avatar-agent/VRMSkeletonManager.tsx",
+        "frontend/src/app/avatar-agent/motion/behaviorTimeline.ts",
+        "frontend/src/app/avatar-agent/motion/motionScheduler.ts",
+        "frontend/src/app/avatar-agent/motion/semanticGestureBridge.ts",
+        "frontend/src/app/avatar-agent/motion/PoseComposer.ts",
+        "frontend/src/app/avatar-agent/motion/biomechanicalCorrectionLayer.ts",
+        "frontend/src/lib/avatar/unifiedEnergyModel.ts",
+        "frontend/src/app/avatar-agent/LipSyncManager.tsx"
+      ],
+      "confidence": 0.76
+    }
+  ],
+  "activeBehavioralContradictions": [],
+  "activeLipsyncFailures": [],
+  "activeAuthorityFailures": [
+    {
+      "id": "idle_overwriting_gesture_authority",
+      "subsystem": "motion_authority",
+      "severity": "critical",
+      "summary": "Idle layer dominates during speech — gesture authority likely collapsed",
+      "evidence": [
+        "idleW=1.00",
+        "gestureW=0.44"
+      ],
+      "inspectTargets": [
+        "frontend/src/app/avatar-agent/VRMSkeletonManager.tsx",
+        "frontend/src/app/avatar-agent/motion/behaviorTimeline.ts",
+        "frontend/src/app/avatar-agent/motion/motionScheduler.ts",
+        "frontend/src/app/avatar-agent/motion/semanticGestureBridge.ts",
+        "frontend/src/app/avatar-agent/motion/PoseComposer.ts",
+        "frontend/src/app/avatar-agent/motion/biomechanicalCorrectionLayer.ts",
+        "frontend/src/lib/avatar/unifiedEnergyModel.ts",
+        "frontend/src/app/avatar-agent/LipSyncManager.tsx"
+      ],
+      "confidence": 0.76
+    }
+  ],
+  "activeSpatialFailures": [],
+  "activeSchedulerFailures": [],
+  "activeSemanticFailures": [],
+  "activePersonalityContradictions": [
+    {
+      "id": "personality_dissonance_high_expr_idle_dom",
+      "a": "configured expressiveness high",
+      "b": "motion stack dominated by idle / low gesture variance",
+      "confidence": 0.61
+    },
+    {
+      "id": "personality_dissonance_calm_hyperfluid",
+      "a": "calm_teacher personality bias",
+      "b": "motion fluidity reads unusually volatile",
+      "confidence": 0.42
+    }
+  ],
+  "activeTemporalCollapseChains": [
+    {
+      "chainId": "idle authority dominating during speech",
+      "steps": [
+        "SPEAKING",
+        "HIGH_IDLE_WEIGHT",
+        "GESTURE_LOST",
+        "VISUAL_COLLAPSE"
+      ],
+      "confidence": 0.92
+    }
+  ],
+  "currentAvatarEmbodimentState": {
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "speaking": true,
+    "gestureEnvelope": 0,
+    "gestureLayerW": 0.44,
+    "idleLayerW": 1,
+    "timelinePhaseTag": "GESTURE_ACTIVE",
+    "facialProbe": {
+      "mouthOpenApprox": 0.3476581228141573,
+      "lipRms": 0.13424611357452756,
+      "speaking": true,
+      "visemeQueueLen": 90,
+      "playheadSec": 6.207999999999998,
+      "lastCueTSec": 6.16,
+      "driftMs": 47.999999999998266,
+      "jawVarianceEma": 0.009389857283843636
+    },
+    "intentProbe": {
+      "activeIntent": "questioning",
+      "llmIntent": "thinking",
+      "intentReason": "ar-question-marker",
+      "semanticGesture": "explain",
+      "semanticSourceIntent": "questioning"
+    }
+  },
+  "confidenceLevel": "high-alert",
+  "recommendedNextFix": "Inspect frontend/src/app/avatar-agent/VRMSkeletonManager.tsx — Idle layer dominates during speech — gesture authority likely collapsed",
+  "quality": {
+    "speechEmbodiment": 80,
+    "gestureVisibility": 59,
+    "lipSyncAccuracy": 96,
+    "personalityConsistency": 42,
+    "behavioralCoherence": 38,
+    "motionFluidity": 100,
+    "cameraPresence": 100,
+    "spatialEmbodiment": 92,
+    "facialEmbodiment": 100,
+    "overallEmbodiment": 76
+  },
+  "evolutionNotes": [
+    "personalityProfile=calm_teacher:supportive_companion; expr=0.63; calm=0.79",
+    "diagnosticsAnalyzer.hint=gestureEmbodimentCollapse (88% confidence)"
+  ]
+}

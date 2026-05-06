@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "note": "Written automatically in development when NEXT_PUBLIC_DIAGNOSTICS_SYNC_FILE=1 and the browser POSTs to /api/diagnostics/report.",
+  "timestamp": null,
+  "runtimeHealthScore": null,
+  "failures": [],
+  "rootCauses": [],
+  "lastCriticalEvent": null,
+  "subsystemState": {},
+  "affectedFiles": [],
+  "affectedFunctions": [],
+  "confidenceScore": null
+}
