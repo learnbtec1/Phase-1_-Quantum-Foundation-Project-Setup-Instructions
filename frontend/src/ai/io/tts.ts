@@ -417,8 +417,12 @@ let _lastFallbackLogAt = 0;
 function markTtsFailed(reason?: string): void {
   if (typeof window === 'undefined') return;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (window as any).__ttsFailed = true;
+  const w = window as any;
+  w.__ttsFailed = true;
   const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  // Stamp/refresh the failure time so the motion-side fallback window resets
+  // on every new failure (3 s decay starts now).
+  w.__ttsFailedAt = nowMs;
   if (nowMs - _lastFallbackLogAt > 1000) {
     _lastFallbackLogAt = nowMs;
     console.warn('[TTS_FALLBACK_TRIGGERED]', reason ?? '');
@@ -429,7 +433,9 @@ function markTtsFailed(reason?: string): void {
 function markTtsResumed(): void {
   if (typeof window === 'undefined') return;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  if ((window as any).__ttsFailed) (window as any).__ttsFailed = false;
+  const w = window as any;
+  if (w.__ttsFailed) w.__ttsFailed = false;
+  w.__ttsFailedAt = 0;
 }
 
 /**

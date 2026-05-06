@@ -2516,20 +2516,37 @@ export function VRMSkeletonManager({
       return fromLifecycle || fromRef || _localSpeakActive;
     }
 
-    // Phase 1/3 — TTS fail-safe: when the BFF/audio path fails, force speaking
-    // and synthesise an energy envelope so the avatar keeps gesturing.
+    // ── TTS fail-safe (time-limited + decaying + context-aware) ──────────────
+    // The fallback is **not** a permanent override.  It opens a 3 s window
+    // starting at __ttsFailedAt and decays linearly to 0; speaking is gated by
+    // the synthetic energy crossing 0.08 so the avatar returns to idle when
+    // the envelope drops below that floor.  All state lives on window — no
+    // per-frame allocations.
+    const _fbNowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const FALLBACK_DURATION_MS = 3000;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const _wAny = (typeof window !== 'undefined' ? (window as any) : null);
+    const _ttsFailedAt =
+      _wAny && typeof _wAny.__ttsFailedAt === 'number' ? _wAny.__ttsFailedAt : 0;
+    const _fbAgeMs = _ttsFailedAt > 0 ? _fbNowMs - _ttsFailedAt : Number.POSITIVE_INFINITY;
     const fallbackActive =
-      typeof window !== 'undefined' && (window as any).__ttsFailed === true;
+      _wAny?.__ttsFailed === true && _ttsFailedAt > 0 && _fbAgeMs < FALLBACK_DURATION_MS;
+    const _fbDecay = fallbackActive
+      ? Math.max(0, 1 - Math.min(_fbAgeMs / FALLBACK_DURATION_MS, 1))
+      : 0;
+    const _fbT = _fbNowMs * 0.001;
+    const _fallbackEnergyValue = fallbackActive ? getFallbackEnergy(_fbT) * _fbDecay : 0;
 
-    const speaking = getUnifiedSpeakingState() || fallbackActive;
+    const speaking =
+      getUnifiedSpeakingState() ||
+      (fallbackActive && _fallbackEnergyValue > 0.08);
 
-    if (typeof window !== 'undefined') {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).__SPEAK_DEBUG = {
-        lifecycle: (window as any).__speechLifecycle ?? null,
+    if (_wAny) {
+      _wAny.__SPEAK_DEBUG = {
+        lifecycle: _wAny.__speechLifecycle ?? null,
         isTalkingRef: isTalkingRef.current,
         fallbackActive,
+        fallbackEnergy: _fallbackEnergyValue,
         unified: speaking,
       };
     }
@@ -2626,39 +2643,39 @@ export function VRMSkeletonManager({
     const _unifiedNow = getSmoothedUnifiedEnergy();
     patchSpeechEmotionEnergy(_unifiedNow);
 
-    // Phase 4 — energy pipeline with TTS-fail fallback.
+    // ── Energy pipeline (real viseme → smoothed TTS → decaying fallback) ─────
+    // Resolution order:
     //   1. Real viseme/speech energy when present (>0.01).
-    //   2. Otherwise the smoothed unified TTS energy (window.__lastTTSEnergy).
-    //   3. Otherwise, when fallbackActive, the synthetic getFallbackEnergy(t).
-    // Computed once per frame; getFallbackEnergy is module-scope (no allocations).
-    const _fbT = (typeof performance !== 'undefined' ? performance.now() : Date.now()) * 0.001;
-    const _fallbackEnergyValue = fallbackActive ? getFallbackEnergy(_fbT) : 0;
+    //   2. Smoothed unified TTS energy (window.__lastTTSEnergy) when fallback
+    //      window is **not** active — prevents stale energy from masking the
+    //      synthetic envelope while the 3 s window is open.
+    //   3. The decaying synthetic fallback when fallbackActive.
+    //   4. Otherwise 0.
     function getUnifiedEnergy(): number {
       const e = peekSpeechEnergy();
       if (e > 0.01) return e;
-      if (typeof window === 'undefined') return fallbackActive ? _fallbackEnergyValue : 0;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const fallbackRaw = (window as any).__lastTTSEnergy;
+      const fallbackRaw = _wAny?.__lastTTSEnergy;
       const ttsFallback =
         typeof fallbackRaw === 'number' && Number.isFinite(fallbackRaw) ? fallbackRaw : 0;
-      if (ttsFallback > 0.01) return ttsFallback;
-      return fallbackActive ? _fallbackEnergyValue : 0;
+      if (ttsFallback > 0.01 && !fallbackActive) return ttsFallback;
+      if (fallbackActive) return _fallbackEnergyValue;
+      return 0;
     }
     const motionEnergyUnified = getUnifiedEnergy();
 
-    if (typeof window !== 'undefined') {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).__ENERGY_DEBUG = {
+    if (_wAny) {
+      _wAny.__ENERGY_DEBUG = {
         motionEnergy: motionEnergyUnified,
-        ttsEnergy: (window as any).__lastTTSEnergy ?? null,
+        ttsEnergy: _wAny.__lastTTSEnergy ?? null,
         fallbackActive,
         fallbackEnergy: _fallbackEnergyValue,
+        decay: _fbDecay,
       };
-      // Phase 7 — fail-safe debug surface.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).__TTS_FALLBACK_DEBUG = {
-        ttsFailed: (window as any).__ttsFailed === true,
-        fallbackEnergy: _fallbackEnergyValue,
+      _wAny.__TTS_FALLBACK_DEBUG = {
+        active:  fallbackActive,
+        ageMs:   Number.isFinite(_fbAgeMs) ? _fbAgeMs : null,
+        decay:   _fbDecay,
+        energy:  _fallbackEnergyValue,
         speaking,
       };
     }
