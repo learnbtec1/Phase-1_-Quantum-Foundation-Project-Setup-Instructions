@@ -104,6 +104,7 @@ import {
   tickStableMotionEnergy,
   getStableMotionEnergy,
 } from '@/lib/avatar/unifiedEnergyModel';
+import { diagnosticsFrameEnd, diagnosticsMotionAfterBlend } from '@/lib/diagnostics/diagnosticsApi';
 import { patchSpeechEmotionEnergy } from '@/ai/voice/speechEmotionBridge';
 import { applyProceduralVrmaLifeOverlay } from './motion/proceduralVrmaLifeOverlay';
 import { applyCinematicMicroLayer } from './motion/cinematicMicroLayer';
@@ -4815,6 +4816,14 @@ export function VRMSkeletonManager({
     });
     detectPoseLoss(finalPose);
 
+    diagnosticsMotionAfterBlend({
+      gestureLayerW,
+      idleLayerW,
+      hasGestureEvent: !!_behaviorFrame.event && rawG !== 'idle',
+      idleOverwriteHeuristic:
+        !!_behaviorFrame.event && idleLayerW > 0.88 && gestureLayerW < 0.18,
+    });
+
     // ── window.__MOTION_AUTHORITY_FORENSICS (نهاية سلطة الخلط الأولى) ─────────
     if (typeof window !== 'undefined' && _execLoop.frameCount % 16 === 0) {
       const _bLua = m.get('lua');
@@ -7314,6 +7323,41 @@ export function VRMSkeletonManager({
         humanoidUpdated: !!g.__execTraceHumanoid2,
         rootCause,
       };
+    }
+
+    {
+      let luaArmDev: number | null = null;
+      const _bindLua = m.get('lua');
+      const _finalLua = finalPose.get('lua');
+      if (_bindLua && _finalLua) {
+        luaArmDev =
+          2 *
+          Math.acos(THREE.MathUtils.clamp(Math.abs(_finalLua.dot(_bindLua)), 0, 1));
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _humanoidAny = vrm?.humanoid as any;
+      diagnosticsFrameEnd({
+        exec: _execLoop,
+        motionSource,
+        gestureState: rawG,
+        gestureLayerW,
+        idleLayerW,
+        vrmaLayerW,
+        generativeLayerW,
+        speaking,
+        motionEnergyUnified,
+        stableMotionEnergy,
+        humanoidPresent: !!(vrm && vrm.humanoid),
+        autoUpdateHumanBones:
+          typeof _humanoidAny?.autoUpdateHumanBones === 'boolean'
+            ? _humanoidAny.autoUpdateHumanBones
+            : null,
+        idleDominatesGesture:
+          !!_behaviorFrame.event && idleLayerW > 0.88 && gestureLayerW < 0.18,
+        armDeviationLuaRad: luaArmDev,
+        finalPoseBoneCount: finalPose.size,
+        timelineEnvelope: _behaviorFrame.envelope,
+      });
     }
 
     emitRootCauseIfAny();

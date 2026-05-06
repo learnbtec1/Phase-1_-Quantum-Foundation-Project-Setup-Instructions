@@ -31,6 +31,7 @@
  */
 
 import * as THREE from 'three';
+import { diagnosticsAuthorityConflict } from '@/lib/diagnostics/diagnosticsMotion';
 import { AVATAR_DEBUG } from './__avatarErrorTracker';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -242,6 +243,7 @@ export function registerBoneAuthority(
 
   // ── Strictly higher priority — override permitted, log as conflict.
   _state.conflictsThisFrame++;
+  diagnosticsAuthorityConflict(bone);
   if (_conflictLog.length >= _CONFLICT_LOG_MAX) _conflictLog.shift();
   _conflictLog.push({
     bone,

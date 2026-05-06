@@ -23,6 +23,10 @@ import { isMotionDiagEnabled } from '@/lib/avatar/motionDiagEnv';
 import { isProceduralOnlyMotion } from '@/lib/avatar/vrmaPlaybackPolicy';
 import { logDebug } from '@/lib/logging/runtimeLog';
 import { peekSpeechEnergy, getCouplingMode } from '@/app/avatar-agent/motion/__speechFusion';
+import {
+  diagnosticsSchedulerBlocked,
+  diagnosticsSchedulerDispatched,
+} from '@/lib/diagnostics/diagnosticsScheduler';
 
 /** Throttle [MOTION_ALLOW] to once per 1500ms to avoid console flood. */
 let lastMotionAllowLogAt = 0;
@@ -136,6 +140,7 @@ async function schedulerTick(): Promise<void> {
       elapsed: now - lastSchedulerPlayAt,
       minMs: minBetween,
     });
+    diagnosticsSchedulerBlocked('MIN_BETWEEN');
     return;
   }
 
@@ -155,6 +160,7 @@ async function schedulerTick(): Promise<void> {
       elapsed: now - b.lastActionTime,
       minMs: minSinceAction,
     });
+    diagnosticsSchedulerBlocked('RECENT_ACTION');
     return;
   }
 
@@ -174,6 +180,7 @@ async function schedulerTick(): Promise<void> {
       mcActive: mc.active,
       baselineActive,
     });
+    diagnosticsSchedulerBlocked('VRMA_BLOCK');
     return;
   }
 
@@ -204,6 +211,7 @@ async function schedulerTick(): Promise<void> {
     dispatchUtteranceSemanticMotion(semanticIntent, (name, opts) =>
       unifiedGestureEngine.play(name, opts ?? {}),
     );
+    diagnosticsSchedulerDispatched();
     return;
   }
 
@@ -215,6 +223,7 @@ async function schedulerTick(): Promise<void> {
       humanTiming: false,
       behaviorBrain: false,
     });
+    diagnosticsSchedulerDispatched();
     return;
   }
 
@@ -226,6 +235,7 @@ async function schedulerTick(): Promise<void> {
       humanTiming: false,
       behaviorBrain: false,
     });
+    diagnosticsSchedulerDispatched();
     return;
   }
 
@@ -234,6 +244,7 @@ async function schedulerTick(): Promise<void> {
     if (useBrainStore.getState().thinking) {
       motionTraceStopAtGuard('sched-5', 'THINKING mode but brain.thinking already true — skip LOW replay', {});
       logMotionDiagBlocked('thinking_skip_low_replay', { mode: 'THINKING' });
+      diagnosticsSchedulerBlocked('THINKING_SKIP');
       return;
     }
     lastSchedulerPlayAt = now;
@@ -243,6 +254,7 @@ async function schedulerTick(): Promise<void> {
       humanTiming: false,
       behaviorBrain: false,
     });
+    diagnosticsSchedulerDispatched();
     return;
   }
 
@@ -284,6 +296,7 @@ async function schedulerTick(): Promise<void> {
       humanTiming: false,
       behaviorBrain: false,
     });
+    diagnosticsSchedulerDispatched();
     return;
   }
 
@@ -293,6 +306,7 @@ async function schedulerTick(): Promise<void> {
       motionTraceStopAtGuard('sched-6', 'IDLE mode random hold (50% skip idle_shift)', {});
     }
     logMotionDiagBlocked('idle_random_hold_skip', { mode: 'IDLE' });
+    diagnosticsSchedulerBlocked('IDLE_RANDOM');
     return;
   }
 
@@ -303,6 +317,7 @@ async function schedulerTick(): Promise<void> {
     humanTiming: false,
     behaviorBrain: true,
   });
+  diagnosticsSchedulerDispatched();
 }
 
 /** DevTools: cooldown gate the ambient scheduler uses (matches last tick’s `minBetween`). */

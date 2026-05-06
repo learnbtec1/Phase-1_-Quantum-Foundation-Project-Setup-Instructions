@@ -3,6 +3,8 @@ import type { VRM } from '@pixiv/three-vrm';
 import { motionDebug } from '@/lib/avatar/motionDebug';
 import { isDebugMotion } from '@/lib/logging/runtimeLog';
 import { logFinalPoseApplyProbe } from '@/app/avatar-agent/motion/motionPipelineDebug';
+import { diagnosticsPoseBlendEnter, diagnosticsPoseApplyFinalEnter } from '@/lib/diagnostics/diagnosticsPoseStage';
+import { diagnosticsVrmInvalidQuat } from '@/lib/diagnostics/diagnosticsVRM';
 
 /** Canonical keys for composed avatar bones (normalized humanoid). */
 export type BonePoseKey =
@@ -174,6 +176,7 @@ export function blendPoseLayers(params: {
   /** Optional per-bone weights (e.g. suppress idle/VRMA on `rua` while generative holds). */
   boneWeightOverrides?: Map<string, PerBonePoseBlendWeights>;
 }): BonePoseMap {
+  diagnosticsPoseBlendEnter();
   const { bind, idle, generative, gesture, collision, vrma, weights, boneWeightOverrides } = params;
   const keys = new Set<string>();
   [idle, generative, gesture, collision, vrma].forEach((m) => {
@@ -332,6 +335,7 @@ export function applyFinalPoseToVrm(params: {
   kinematicSnapKeys?: ReadonlySet<string>;
   delta: number;
 }): void {
+  diagnosticsPoseApplyFinalEnter();
   const { finalPose, boneRefs, delta, humanoid, kinematicSnapKeys } = params;
   logFinalPoseApplyProbe(finalPose, delta);
   const motionPoseDebug = isDebugMotion();
@@ -350,6 +354,7 @@ export function applyFinalPoseToVrm(params: {
   const maxRotationPerFrameRad = params.maxRotationPerFrameRad ?? 0.1;
 
   for (const [key, qT] of finalPose) {
+    diagnosticsVrmInvalidQuat(qT);
     const mappedKey = ARM_BONE_MAP[key] ?? key;
     let obj: THREE.Object3D | null = boneRefs[key] ?? null;
     if (!obj && humanoid) {

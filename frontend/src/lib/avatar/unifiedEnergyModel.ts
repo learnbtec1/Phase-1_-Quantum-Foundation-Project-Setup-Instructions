@@ -11,6 +11,8 @@
 'use client';
 
 import { updateSpeechDriveFromUnifiedEnergy } from '@/lib/avatar/speechDriveState';
+import { DM } from '@/lib/diagnostics/diagnosticsMetrics';
+import { diagInc } from '@/lib/diagnostics/diagnosticsStore';
 
 const SMOOTH = 0.15;
 
@@ -45,6 +47,13 @@ let lastEnergyLogMs = 0;
 function clamp01(x: number): number {
   if (!Number.isFinite(x)) return 0;
   return Math.min(1, Math.max(0, x));
+}
+
+function guardStableMotionEnergyFinite(): void {
+  if (!Number.isFinite(stableMotionEnergy)) {
+    diagInc(DM.ENERGY_STABLE_NAN_GUARD);
+    stableMotionEnergy = 0;
+  }
 }
 
 export function resetUnifiedEnergyForSession(): void {
@@ -101,6 +110,7 @@ export function tickStableMotionEnergy(raw01: number, speaking: boolean, deltaSe
     if (typeof window !== 'undefined') {
       (window as Window & { __MOTION_ENERGY_DEBUG?: unknown }).__MOTION_ENERGY_DEBUG = _lastStableDebug;
     }
+    guardStableMotionEnergyFinite();
     return;
   }
 
@@ -145,6 +155,7 @@ export function tickStableMotionEnergy(raw01: number, speaking: boolean, deltaSe
   if (typeof window !== 'undefined') {
     (window as Window & { __MOTION_ENERGY_DEBUG?: unknown }).__MOTION_ENERGY_DEBUG = _lastStableDebug;
   }
+  guardStableMotionEnergyFinite();
 }
 
 /**

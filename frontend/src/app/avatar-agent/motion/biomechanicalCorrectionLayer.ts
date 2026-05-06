@@ -13,6 +13,7 @@ import * as THREE from 'three';
 import type { BonePoseMap } from './PoseComposer';
 import { isPoseKeyProcedurallySuppressed } from './proceduralSuppressionContext';
 import { isDebugMotion } from '@/lib/logging/runtimeLog';
+import { diagnosticsBiomechEnter } from '@/lib/diagnostics/diagnosticsBiomech';
 
 const _e = new THREE.Euler(0, 0, 0, 'YXZ');
 const _qDelta = new THREE.Quaternion();
@@ -1429,6 +1430,7 @@ export function applyBiomechanicalLayer(
   humanoid: { getNormalizedBoneNode: (n: any) => THREE.Object3D | null },
   ctx?: BiomechContext | { speaking: boolean; energy: number },
 ): void {
+  diagnosticsBiomechEnter();
   if (typeof globalThis !== 'undefined') {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (globalThis as any).__execTraceBiomech = true;

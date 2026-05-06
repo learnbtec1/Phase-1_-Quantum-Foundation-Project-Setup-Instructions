@@ -10,6 +10,9 @@ import {
   canonicalizeLlmIntentLabel,
   type CanonicalIntentLabel,
 } from './arabicIntentNormalize';
+import { DM } from '@/lib/diagnostics/diagnosticsMetrics';
+import { diagInc } from '@/lib/diagnostics/diagnosticsStore';
+import { diagTimelineTouchIntent } from '@/lib/diagnostics/diagnosticsTimelineProbe';
 
 export type DetectedIntent =
   | 'explaining'
@@ -256,16 +259,25 @@ export function detectIntentDetailed(text: string, llmIntent?: string | null): I
   const normalizedText = normalizeForIntentClassification(raw);
 
   if (raw.length === 0 && normalizedText.length === 0) {
-    return { intent: 'neutral', confidence: 0, reason: 'empty-input', normalizedText: '' };
+    diagInc(DM.INTENT_EMPTY_INPUT);
+    const r = { intent: 'neutral' as const, confidence: 0, reason: 'empty-input', normalizedText: '' };
+    diagTimelineTouchIntent(r.intent, llmIntent, r.reason);
+    return r;
   }
 
   const ar = matchArabicOrdered(normalizedText);
-  if (ar) return mergeRuleIntentWithLlmCanon(ar, llmIntent);
+  if (ar) {
+    const out = mergeRuleIntentWithLlmCanon(ar, llmIntent);
+    diagTimelineTouchIntent(out.intent, llmIntent, out.reason);
+    return out;
+  }
 
   const en = matchEnglish(normalizedText) ?? matchEnglish(raw);
   if (en) {
     const merged = { ...en, normalizedText };
-    return mergeRuleIntentWithLlmCanon(merged, llmIntent);
+    const out = mergeRuleIntentWithLlmCanon(merged, llmIntent);
+    diagTimelineTouchIntent(out.intent, llmIntent, out.reason);
+    return out;
   }
 
   const fallback: IntentResult = {
@@ -274,7 +286,10 @@ export function detectIntentDetailed(text: string, llmIntent?: string | null): I
     reason: 'no-rule-match',
     normalizedText,
   };
-  return mergeRuleIntentWithLlmCanon(fallback, llmIntent);
+  if (normalizedText.length > 6) diagInc(DM.INTENT_NO_RULE_MATCH);
+  const out = mergeRuleIntentWithLlmCanon(fallback, llmIntent);
+  diagTimelineTouchIntent(out.intent, llmIntent, out.reason);
+  return out;
 }
 
 export { canonicalizeLlmIntentLabel, normalizeForIntentClassification };

@@ -185,7 +185,11 @@ services:
     working_dir: /app
 
     volumes:
+      # Full tree for hot reload in dev.
       - ${PROJECT_ROOT:-.}/frontend:/app
+      # Forensic outputs from POST /api/diagnostics/analyzer → process.cwd()/logs (see frontend/src/app/api/diagnostics/analyzer/route.ts).
+      # Explicit bind so reports survive container recreation and always mirror ./frontend/logs on the host.
+      - ${PROJECT_ROOT:-.}/frontend/logs:/app/logs
       - /app/node_modules
       - frontend_next_cache:/app/.next
 

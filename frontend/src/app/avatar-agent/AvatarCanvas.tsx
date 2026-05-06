@@ -26,6 +26,15 @@ import {
 
 
 import { VRMLoaderPlugin, VRM } from '@pixiv/three-vrm';
+import { DiagnosticsOverlay } from '@/lib/diagnostics/diagnosticsOverlay';
+import {
+  startDiagnosticsAnalyzer,
+  stopDiagnosticsAnalyzer,
+} from '@/lib/diagnostics/diagnosticsAnalyzer';
+import {
+  startRuntimeTimelineRecorder,
+  stopRuntimeTimelineRecorder,
+} from '@/lib/diagnostics/runtimeTimelineRecorder';
 import { useBrainStore } from '@/store/useBrainStore';
 import { initBrainPersistence, flushBrainPersistence } from '@/lib/brainPersistence';
 import { recordPersonalitySessionVisit } from '@/ai/avatar/personalityMemory';
@@ -498,6 +507,15 @@ export default function AvatarCanvas({
       if (spontaneousBehaviorEnabled) stopSpontaneousBehavior();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    startDiagnosticsAnalyzer();
+    startRuntimeTimelineRecorder();
+    return () => {
+      stopRuntimeTimelineRecorder();
+      stopDiagnosticsAnalyzer();
+    };
   }, []);
 
   useEffect(() => {
@@ -1118,6 +1136,8 @@ export default function AvatarCanvas({
           onRightClick={onAvatarFloorNavigate}
         />
       </Canvas>
+
+      {process.env.NEXT_PUBLIC_DIAGNOSTICS_OVERLAY === 'true' ? <DiagnosticsOverlay /> : null}
 
     </div>
   );

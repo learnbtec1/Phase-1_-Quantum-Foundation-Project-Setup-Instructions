@@ -15,6 +15,8 @@
  */
 
 import type { DetectedIntent } from './intentClassifier';
+import { diagnosticsSemanticCooldownHit } from '@/lib/diagnostics/diagnosticsSemantic';
+import { diagTimelineTouchSemantic } from '@/lib/diagnostics/diagnosticsTimelineProbe';
 import { canonicalizeLlmIntentLabel } from './arabicIntentNormalize';
 
 export type SemanticGestureDecision = {
@@ -83,17 +85,20 @@ export function resetSemanticGestureBridgeState(): void {
  * Resolve a single semantic gesture decision for this frame.
  * Survives missing/short text, gaps, and low confidence — returns `idle` often.
  */
-export function resolveSemanticGesture(input: ResolveSemanticGestureInput): SemanticGestureDecision {
+function resolveSemanticGestureImpl(input: ResolveSemanticGestureInput): SemanticGestureDecision {
   const e = clamp01(input.stableMotionEnergy);
-  const idle = (src: string, cooldownHit?: boolean): SemanticGestureDecision => ({
-    gesture: 'idle',
-    confidence: 0,
-    duration: 0,
-    intensity: 0,
-    interruptible: true,
-    sourceIntent: src,
-    debugCooldownHit: cooldownHit === true,
-  });
+  const idle = (src: string, cooldownHit?: boolean): SemanticGestureDecision => {
+    if (cooldownHit === true) diagnosticsSemanticCooldownHit();
+    return {
+      gesture: 'idle',
+      confidence: 0,
+      duration: 0,
+      intensity: 0,
+      interruptible: true,
+      sourceIntent: src,
+      debugCooldownHit: cooldownHit === true,
+    };
+  };
 
   // ── Listening posture (user not speaking) ───────────────────────────────
   if (input.listening && !input.speaking) {
@@ -235,4 +240,11 @@ export function resolveSemanticGesture(input: ResolveSemanticGestureInput): Sema
   }
 
   return idle(`neutral:${intent}`);
+}
+
+/** Exported wrapper — timeline probe for behavioral forensics (no allocation). */
+export function resolveSemanticGesture(input: ResolveSemanticGestureInput): SemanticGestureDecision {
+  const d = resolveSemanticGestureImpl(input);
+  diagTimelineTouchSemantic(d.gesture, d.sourceIntent);
+  return d;
 }
