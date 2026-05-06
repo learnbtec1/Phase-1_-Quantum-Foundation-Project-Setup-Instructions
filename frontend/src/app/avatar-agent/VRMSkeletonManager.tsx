@@ -67,6 +67,7 @@ import { tickGestureTiming, getGestureTimingSnapshot } from './motion/gestureTim
 import { detectIntent, detectIntentDetailed } from './motion/intentClassifier';
 import {
   pushBehavior as pushBehaviorEvent,
+  pushBehaviorFromSemanticDecision,
   tickBehaviorTimeline,
   getCurrentBehavior,
   getBehaviorQueueDepth,
@@ -79,6 +80,10 @@ import {
   type BehaviorFrame,
   type TimelineGestureId,
 } from './motion/behaviorTimeline';
+import {
+  resolveSemanticGesture,
+  resetSemanticGestureBridgeState,
+} from './motion/semanticGestureBridge';
 console.log('[FILE_IMPORTED] biomechanicalCorrectionLayer, fingerMicroLayer, gazeIntentLayer, gestureTiming, intentClassifier, behaviorTimeline');
 import { installVrmHumanoidBypassProbe } from '@/app/avatar-agent/motion/proceduralV2';
 import {
@@ -1472,6 +1477,7 @@ export function VRMSkeletonManager({
       // think/etc. utterance can re-fire its dedicated gesture.
       lastSemanticUtteranceHashRef.current = '';
       lastSemanticIntentFiredRef.current = '';
+      resetSemanticGestureBridgeState();
       // Drop any queued behaviors so the next utterance starts from a clean
       // timeline (prevents stale wave/explain firing into the next sentence).
       clearBehaviorQueue();

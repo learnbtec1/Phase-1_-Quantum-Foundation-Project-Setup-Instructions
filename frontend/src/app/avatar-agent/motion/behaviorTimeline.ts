@@ -38,6 +38,8 @@
 
 import * as THREE from 'three';
 
+import type { SemanticGestureDecision } from './semanticGestureBridge';
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export type TimelineGestureId =
@@ -281,6 +283,51 @@ export function pushBehavior(
     _queue.push(event);
   }
   return event;
+}
+
+/** Maps Stage-4 semantic labels → timeline ids (single ingress for semantic bridge). */
+function mapSemanticGestureToTimeline(g: SemanticGestureDecision['gesture']): TimelineGestureId | null {
+  switch (g) {
+    case 'idle':
+      return null;
+    case 'wave':
+    case 'welcome':
+      return 'wave';
+    case 'explain':
+    case 'listen':
+      return 'explain';
+    case 'point':
+    case 'emphasis':
+      return 'point';
+    case 'think':
+      return 'think';
+    default:
+      return null;
+  }
+}
+
+/**
+ * Enqueue a behavior from {@link SemanticGestureDecision} (Stage 4 semantic bridge).
+ * Calm-teacher tuning: listen/welcome slightly damped; never writes bones directly.
+ */
+export function pushBehaviorFromSemanticDecision(
+  decision: SemanticGestureDecision,
+  now: number,
+): BehaviorEvent | null {
+  const tid = mapSemanticGestureToTimeline(decision.gesture);
+  if (!tid) return null;
+  let intensity = decision.intensity;
+  if (decision.gesture === 'listen') intensity *= 0.58;
+  if (decision.gesture === 'welcome') intensity *= 0.88;
+  if (decision.gesture === 'emphasis') intensity *= 0.9;
+  intensity = Math.max(0.36, Math.min(1.12, intensity));
+  const priority = decision.interruptible ? 90 : 100;
+  return pushBehavior(tid, now, {
+    baseDurationMs: Math.max(450, decision.duration),
+    intensity,
+    priority,
+    source: `semanticBridge:${decision.sourceIntent}`,
+  });
 }
 
 /** Clear queue and current event (used on speak:end / reset). */
