@@ -1288,6 +1288,9 @@ export type BiomechContext = {
 const _IDLE_UPPER_ARM_X    = -0.05;  // tiny forward (relaxed shoulders)
 const _IDLE_UPPER_ARM_Z    =  1.40;  // hanging-down — right arm; left mirrored
 const _IDLE_LOWER_ARM_X    =  0.10;  // ~6° elbow flex (matches ARM_IDLE)
+// Shoulder roll-down: a tiny negative Z on shoulders closes the V-pose gap
+// and gives a "weight-bearing" look instead of the military-at-attention bind.
+const _IDLE_SHOULDER_Z     =  0.08;  // rightShoulder drops slightly; left mirrors
 
 /**
  * Soft-clamp a single live VRM normalized bone to anatomical limits.
@@ -1319,21 +1322,27 @@ function _blClampBone(
 }
 
 /**
- * Force arm hanging pose when avatar is truly silent.
+ * Relaxed human idle pose when avatar is truly silent.
+ *
+ * Writes the full arm + shoulder chain into a natural hanging posture.
+ * This is the "return to relaxed idle" state — Phase 6 of the motion
+ * authority contract.  Never returns to bind / T-pose.
  *
  * ABSOLUTE WRITE — no lerp, no read of current bone state.
  *
- * Why absolute (not lerp):
- *   `applyFinalPoseToVrm` runs every frame and rewrites the bone quaternion
- *   from the PoseComposer output, which contains the bind T-pose for arm bones
- *   when no gesture is active. A lerp from the *current* (T-pose) bone state
- *   restarts every frame, never converging to the natural hanging pose.
- *   Absolute write guarantees a fixed final state regardless of upstream input.
+ * Why absolute (not lerp): `applyFinalPoseToVrm` rewrites arm bone quats
+ * every frame from PoseComposer output (which carries bind T-pose when no
+ * gesture layer writes those bones).  A lerp from current state restarts at
+ * T-pose each frame → never converges.  Absolute write guarantees stable
+ * final state.
  *
- * Side mirroring: left arm Z is negated so both arms hang along the body.
+ * Relaxed human idle contract:
+ *   • Upper arms hang slightly forward (X ≈ -0.05) and down (Z ≈ ±1.40).
+ *   • Lower arms have tiny natural elbow flex (X ≈ 0.10).
+ *   • Shoulders roll down gently (Z ≈ ±0.08) — removes T-pose squareness.
  *
- * The clamp limits widened above (±1.55 on Z) ensure these idle values pass
- * through the subsequent _blClampBone unchanged.
+ * The clamp limits widened above (±1.55 on Z) ensure these values pass the
+ * subsequent _blClampBone pass unchanged.
  */
 const _IDLE_E = new THREE.Euler(0, 0, 0, 'XYZ');
 const _IDLE_Q = new THREE.Quaternion();
@@ -1349,6 +1358,9 @@ function _applyIdleArmPose(
     bone.quaternion.copy(_IDLE_Q);
   };
 
+  // Shoulders: slight downward roll removes the bind-pose squareness.
+  writeIdle('rightShoulder', 0,  0, -_IDLE_SHOULDER_Z);
+  writeIdle('leftShoulder',  0,  0,  _IDLE_SHOULDER_Z);
   // Upper arms: hanging down by the side (Z mirrored).
   writeIdle('rightUpperArm', _IDLE_UPPER_ARM_X, 0,  _IDLE_UPPER_ARM_Z);
   writeIdle('leftUpperArm',  _IDLE_UPPER_ARM_X, 0, -_IDLE_UPPER_ARM_Z);
@@ -1382,6 +1394,10 @@ export function applyBiomechanicalLayer(
   humanoid: { getNormalizedBoneNode: (n: any) => THREE.Object3D | null },
   ctx?: BiomechContext | { speaking: boolean; energy: number },
 ): void {
+  if (typeof globalThis !== 'undefined') {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).__execTraceBiomech = true;
+  }
   // Normalise legacy callers: `{ speaking, energy }` has no `gesture` field.
   const _gesture = (ctx as BiomechContext | undefined)?.gesture;
   const _speaking = (ctx as { speaking?: boolean } | undefined)?.speaking ?? false;

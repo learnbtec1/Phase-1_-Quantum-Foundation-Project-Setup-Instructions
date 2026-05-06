@@ -998,6 +998,16 @@ const _execLoop = {
   lastDiagnosisMs:   0,
 };
 
+/** Hard-proof execution trace (debug only; reset each useFrame). */
+function _resetExecTraceGlobals(): void {
+  if (typeof globalThis === 'undefined') return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const g = globalThis as any;
+  g.__execTraceBiomech = false;
+  g.__execTraceHumanoid2 = false;
+  g.__execTracePoseApplied = false;
+}
+
 type GestureId =
   | 'idle'
   | 'explain'
@@ -2407,6 +2417,8 @@ export function VRMSkeletonManager({
 
   useFrame((_, delta) => {
     const safeDelta = Math.min(Math.max(delta, 0), TAB_SAFE_MAX_DELTA);
+    _resetExecTraceGlobals();
+    const _traceTestBone = vrm?.humanoid?.getRawBoneNode?.('rightUpperArm' as never);
 
     // ── EXECUTION-LOOP AUDIT — frame entry ────────────────────────────────────
     // Reset per-frame stage flags so a missing stage is visible in the report.
@@ -2463,6 +2475,20 @@ export function VRMSkeletonManager({
       }
       if (!VRM_HARD_ISOLATION) {
         vrm.update(safeDelta);
+      }
+      if (typeof window !== 'undefined') {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).__EXECUTION_TRACE = {
+          useFrameRunning: true,
+          vrmLoaded: !!vrm && !!vrm.humanoid,
+          bonesAvailable: !!_traceTestBone,
+          earlyReturnTriggered: true,
+          poseApplied: false,
+          biomechRunning: false,
+          humanoidUpdated: false,
+          rootCause:
+            'useFrame returned before procedural stack — ruaRef.current is null (bones not cached or humanoid missing normalized refs)',
+        };
       }
       return;
     }
@@ -2809,14 +2835,16 @@ export function VRMSkeletonManager({
           if (_utterHash !== lastSemanticUtteranceHashRef.current) {
             const _detected = detectIntent(_utterText);
             // Map: rule-based intent → discrete gesture (start of utterance).
+            // Priority is implicit in map order — first match wins per detectIntent.
             const SEMANTIC_GESTURE_MAP: Partial<Record<typeof _detected, GestureId>> = {
-              greeting:    'wave',
-              agreeing:    'agree',
-              confirming:  'agree',
-              thinking:    'think',
-              explaining:  'explain',
-              emphasizing: 'point',
-              questioning: 'explain',
+              greeting:    'wave',      // p100 — social open
+              agreeing:    'agree',     // p100 — short nod + open palms
+              confirming:  'agree',     // p100 — same shape as agree
+              emphasizing: 'point',     // p 90 — finger / forward arm
+              thinking:    'think',     // p 90 — hand-to-chin pose
+              explaining:  'explain',   // p 80 — open arms
+              questioning: 'explain',   // p 70 — open arms (inquiry)
+              disagreeing: 'point',     // p 80 — sharp forward gesture (denial)
             };
             const _mapped = SEMANTIC_GESTURE_MAP[_detected];
             if (_mapped && lastSemanticIntentFiredRef.current !== _detected) {
@@ -2860,8 +2888,9 @@ export function VRMSkeletonManager({
           source:         _semanticSource,
         });
         talkGestureActiveRef.current = true;
-        // Cool-down so we don't immediately stack another auto-gesture.
-        talkGestureNextAtMsRef.current = _evt.startTime + _evt.duration + 600 + Math.random() * 500;
+        // Cool-down: minimum 150 ms after gesture ends before a new one can fire.
+        // Reduced from 600 ms to allow natural rapid gesture sequences while speaking.
+        talkGestureNextAtMsRef.current = _evt.startTime + _evt.duration + 150 + Math.random() * 200;
         if (typeof window !== 'undefined') {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           (window as any).__behaviorEngine = {
@@ -2895,7 +2924,7 @@ export function VRMSkeletonManager({
           source:         `cyclic:${ab.intent ?? 'talk'}`,
         });
         talkGestureActiveRef.current = true;
-        talkGestureNextAtMsRef.current = _evt.startTime + _evt.duration + 600 + Math.random() * 500;
+        talkGestureNextAtMsRef.current = _evt.startTime + _evt.duration + 150 + Math.random() * 200;
         if (process.env.NODE_ENV === 'development') {
           console.log('[AUTO_GESTURE_FROM_INTENT]', {
             gesture:    _autoGesture,
@@ -6004,6 +6033,10 @@ export function VRMSkeletonManager({
       boneRefs: {},          // ← always resolves live from vrm.humanoid
       delta: safeDelta,
     }), undefined);
+    if (typeof globalThis !== 'undefined') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).__execTracePoseApplied = true;
+    }
 
     // EXEC-AUDIT: applyFinalPose stage marker
     _execLoop.s_finalPoseEnd = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -6198,6 +6231,10 @@ export function VRMSkeletonManager({
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (vrm.humanoid as any).update?.();
         _execLoop.s_humanoid2Executed = true;
+        if (typeof globalThis !== 'undefined') {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (globalThis as any).__execTraceHumanoid2 = true;
+        }
       } catch { /* ignore — humanoid.update() not public in all versions */ }
 
       // EXEC-AUDIT: second humanoid.update marker + override-detection snapshot
@@ -6210,9 +6247,8 @@ export function VRMSkeletonManager({
         _execLoop.ov_afterBio = _luaPost ? _luaPost.rotation.z : NaN;
       } catch { /* ignore */ }
 
-      // ── window.__motionLayers — live debug surface (throttled to every 16 frames) ──
-      // Exposes the active layer weights and gesture state for runtime inspection.
-      // Read from DevTools: window.__motionLayers
+      // ── window.__motionLayers + window.__MOTION_AUTHORITY_MAP (throttled 16 frames) ──
+      // Read from DevTools: window.__motionLayers / window.__MOTION_AUTHORITY_MAP
       if (typeof window !== 'undefined' && (_execLoop.frameCount % 16 === 0)) {
         const _g   = gestureStateRef.current;
         const _en  = motionEnergyUnified;
@@ -6228,6 +6264,33 @@ export function VRMSkeletonManager({
             { name: 'gesture',  priority: 100, weight: +_gWeight.toFixed(2),    active: _g !== 'idle' },
             { name: 'intent',   priority: 50,  weight: +_intWeight.toFixed(2),  active: speaking },
             { name: 'idle',     priority: 10,  weight: +_idleWeight.toFixed(2), active: !speaking && _en < 0.01 },
+          ],
+        };
+        // ── Phase 7: Central Motion Authority Map ──────────────────────────────
+        // Single source of truth for WHO owns each bone group right now.
+        // Priority values match the layer contract:
+        //   Gesture(100) > LookAt(80) > Emotion/Intent(60) > Idle(20) > Fallback(0)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).__MOTION_AUTHORITY_MAP = {
+          authorityTable: [
+            { layer: 'Gesture (timeline)',        priority: 100, bones: ['rua','lua','rla','lla','rh','lh','spine','chest'],        active: _g !== 'idle' },
+            { layer: 'LookAt / Gaze',             priority: 80,  bones: ['head','neck'],                                           active: true },
+            { layer: 'Intent / Speech Emotion',   priority: 60,  bones: ['head','neck','spine','chest','rua','lua'],                active: speaking },
+            { layer: 'Procedural Idle / Breath',  priority: 20,  bones: ['spine','chest','neck','head','rua','lua','leftShoulder','rightShoulder'], active: !_g || _g === 'idle' },
+            { layer: 'Biomechanical Clamp',       priority: 10,  bones: ['rua','lua','rla','lla','leftShoulder','rightShoulder'],   active: true, note: 'clamp-only, never overrides intent' },
+            { layer: 'Relaxed Idle Fallback',     priority: 0,   bones: ['rua','lua','rla','lla','rightShoulder','leftShoulder'],   active: !speaking && _en < 0.01, note: 'absolute write when energy=0 and not speaking' },
+          ],
+          currentOwner: {
+            upperArms:   _g !== 'idle' ? 'Gesture(100)' : speaking ? 'Intent(60)' : 'RelaxedIdle(0)',
+            head:        'LookAt(80)',
+            spine:       _g !== 'idle' ? 'Gesture(100)' : 'ProceduralIdle(20)',
+          },
+          hardRules: [
+            'No layer writes bones after biomechanical clamp pass',
+            'No += rotations on normalized bones',
+            'bind/T-pose fallback only if LVP budget + decay both expired',
+            'humanoid.update() called exactly twice: after applyFinalPoseToVrm, after biomechanicalLayer',
+            'Scheduler cooldown: gesture.duration + 150-350ms (not hard-blocked)',
           ],
         };
 
@@ -6857,6 +6920,30 @@ export function VRMSkeletonManager({
     // emitRootCauseIfAny is rate-limited internally (≥90 frames between logs)
     // and only logs when the diagnostic summary contains an actual problem.
     // Always called so window.__avatarRootCause() returns up-to-date data.
+    if (typeof window !== 'undefined') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const g = globalThis as any;
+      const _bone2 = vrm?.humanoid?.getRawBoneNode?.('rightUpperArm' as never);
+      let rootCause =
+        'NONE — observed full-frame path (no early return); see poseApplied / biomech / humanoid flags';
+      if (!vrm || !vrm.humanoid) rootCause = 'VRM_OR_HUMANOID_FALSE_AT_FRAME_END';
+      else if (!_bone2) rootCause = 'RAW_BONE_rightUpperArm_UNRESOLVED_AT_FRAME_END';
+      else if (!g.__execTracePoseApplied) rootCause = 'applyFinalPoseToVrm_SITE_NOT_REACHED_OR_FLAG_NOT_SET';
+      else if (!g.__execTraceBiomech) rootCause = 'applyBiomechanicalLayer_NOT_ENTERED_THIS_FRAME';
+      else if (!g.__execTraceHumanoid2) rootCause = 'SECOND_humanoid.update_NOT_RECORDED_THIS_FRAME';
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__EXECUTION_TRACE = {
+        useFrameRunning: true,
+        vrmLoaded: !!vrm && !!vrm.humanoid,
+        bonesAvailable: !!_bone2,
+        earlyReturnTriggered: false,
+        poseApplied: !!g.__execTracePoseApplied,
+        biomechRunning: !!g.__execTraceBiomech,
+        humanoidUpdated: !!g.__execTraceHumanoid2,
+        rootCause,
+      };
+    }
+
     emitRootCauseIfAny();
     endFrameTraceGroup();
   }, 0);
