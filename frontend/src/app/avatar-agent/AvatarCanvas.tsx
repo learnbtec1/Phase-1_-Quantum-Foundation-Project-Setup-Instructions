@@ -35,6 +35,10 @@ import {
   startRuntimeTimelineRecorder,
   stopRuntimeTimelineRecorder,
 } from '@/lib/diagnostics/runtimeTimelineRecorder';
+import {
+  startEmbodiedRuntimeNervousSystem,
+  stopEmbodiedRuntimeNervousSystem,
+} from '@/lib/forensics/EmbodiedRuntimeNervousSystem';
 import { useBrainStore } from '@/store/useBrainStore';
 import { initBrainPersistence, flushBrainPersistence } from '@/lib/brainPersistence';
 import { recordPersonalitySessionVisit } from '@/ai/avatar/personalityMemory';
@@ -512,7 +516,9 @@ export default function AvatarCanvas({
   useEffect(() => {
     startDiagnosticsAnalyzer();
     startRuntimeTimelineRecorder();
+    startEmbodiedRuntimeNervousSystem();
     return () => {
+      stopEmbodiedRuntimeNervousSystem();
       stopRuntimeTimelineRecorder();
       stopDiagnosticsAnalyzer();
     };

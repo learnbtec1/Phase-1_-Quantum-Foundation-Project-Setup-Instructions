@@ -24,6 +24,7 @@ import {
   type MouthShape,
 } from '@/app/avatar-agent/motion/facialExpressionBlend';
 import { pushVisemeFrame, resetSpeechFusion } from '@/app/avatar-agent/motion/__speechFusion';
+import { tickFacialEmbodimentProbe } from '@/lib/forensics/FacialEmbodimentForensics';
 import { isObservabilityEnabled } from '@/lib/observability/config';
 import { reportLipSyncDriftMs } from '@/lib/observability/audioLipSyncMonitor';
 import { getSpeechEmotionSnapshot } from '@/ai/voice/speechEmotionBridge';
@@ -861,6 +862,19 @@ export default function LipSyncManager({
     }
 
     /** Viseme / jaw targets are independent of torso or arm pose — no skeleton layer clamps mouth weights. */
+    const mouthOpenApprox = Math.min(
+      1,
+      out.aa + out.oh + out.ou * 0.45 + out.ih * 0.28 + out.ee * 0.22,
+    );
+    tickFacialEmbodimentProbe({
+      mouthOpenApprox,
+      lipRms,
+      speaking: talking,
+      visemeQueueLen: queue.length,
+      playheadSec: tSec,
+      lastCueTSec: lastActiveCueTRef.current,
+    });
+
     setMouthKeys(em, out.aa, out.ih, out.oh, out.ou, out.ee, 1);
     const jawProxy = Math.max(out.aa, out.oh * 0.92, out.ih * 0.45, out.ee * 0.38);
     applyRmsToMouthOpen(em, lipRms, jawProxy, 0.26);
