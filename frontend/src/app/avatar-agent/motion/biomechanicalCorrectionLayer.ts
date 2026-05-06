@@ -231,7 +231,6 @@ export function applyBiomechanicalCorrections(
   breathAmp01: number,
   speaking: boolean,
 ): void {
-  console.log('[FILE_EXECUTED] biomechanicalCorrectionLayer');
   applyShoulderShrug(pose, tSec, breathAmp01, speaking);
   applyElbowFlexion(pose);
 }
@@ -250,6 +249,7 @@ const _neural = {
   attentionUntilMs:   0,
   nextAttentionCheck: 0,
   lastDebugMs:        0,
+  frameCount:         0,
 };
 
 function neuralNoise(t: number): number {
@@ -340,8 +340,9 @@ export function applyNeuralLayer(
   clampUpperArmAntiVPose(pose, 'lua');
   clampUpperArmAntiVPose(pose, 'rua');
 
-  // Throttled debug (~1/s)
-  if (nowMs - _neural.lastDebugMs > 1000) {
+  _neural.frameCount += 1;
+  // Throttled debug — max ~1/s AND max ~1 per 60 frames at high FPS (no console flood).
+  if (_neural.frameCount % 60 === 0 && nowMs - _neural.lastDebugMs > 1000) {
     _neural.lastDebugMs = nowMs;
     console.log('[NEURAL_LAYER]', {
       noise:  Number(n.toFixed(4)),
@@ -374,6 +375,7 @@ const _sub = {
   saccadeTarget:      0,
   fingerMicroPhase:   0,
   lastDebugMs:        0,
+  frameCount:         0,
 };
 
 const SUB_CLAMP = 0.03;
@@ -476,8 +478,9 @@ export function applySubconsciousLayer(
 
   _sub.prevTimingWeight = w;
 
-  // Throttled debug (~1/s)
-  if (nowMs - _sub.lastDebugMs > 1000) {
+  _sub.frameCount += 1;
+  // Throttled debug — max ~1/s AND max ~1 per 60 frames (guards against console spam).
+  if (_sub.frameCount % 60 === 0 && nowMs - _sub.lastDebugMs > 1000) {
     _sub.lastDebugMs = nowMs;
     console.log('[SUBCONSCIOUS]', {
       breath:    Number(breath.toFixed(4)),
@@ -1205,26 +1208,67 @@ export function applyIntentMotionState(
 const _BL_E  = new THREE.Euler(0, 0, 0, 'XYZ');
 const _BL_Q  = new THREE.Quaternion();
 
-// STEP 5 — upperArm xMax tightened from 1.30 → 0.40 to prevent the arm from
-// rotating BEHIND the body (left-arm-bends-backward symptom). The forward range
-// (xMin = -1.30 → -75°) stays untouched so legitimate forward-raise gestures work.
+// ─── Soft-clamp (non-destructive) ────────────────────────────────────────────
+// Values that exceed the anatomical range are NOT hard-cut. They are gently
+// pulled back toward the boundary using a 20 % spring coefficient so gesture
+// poses that only slightly overshoot don't look clamped at all, while extreme
+// hyper-extension is still constrained.  Preserves gesture intent while
+// guarding against bone inversion.
+function softClamp(v: number, min: number, max: number): number {
+  if (v < min) return min + (v - min) * 0.20;
+  if (v > max) return max + (v - max) * 0.20;
+  return v;
+}
+
+// ─── Gesture-aware limit tables ───────────────────────────────────────────────
+// The BASE limits govern idle / generic-speech poses.
+// Per-gesture overrides WIDEN specific axes so that a pose authored for that
+// gesture (e.g., wave forearm fold) is never truncated.
 //
-// Z range widened from ±0.70 → ±1.55 so the natural arms-hanging-by-side pose
-// (z ≈ ±1.40) is REACHABLE.  Without this, the clamp pulls the arm back toward
-// horizontal, perpetuating the T-pose look.  Range still bounded so the arm
-// cannot rotate past anatomical limits.
-const BL_LIMITS = {
-  upperArm: {
-    xMin: -1.30, xMax:  0.40,
-    yMin: -0.50, yMax:  0.50,
-    zMin: -1.55, zMax:  1.55,
-  },
-  lowerArm: {
-    xMin: -0.05, xMax:  1.60,
-    yMin: -0.30, yMax:  0.30,
-    zMin: -0.30, zMax:  0.30,
-  },
-} as const;
+// Wave anatomy (VRM normalized YXZ convention):
+//   rightUpperArm.x ≈ -1.35   (forward raise)   → base xMin = -1.30 clips by 4 %
+//   rightLowerArm.z ≈ -2.20   (forearm fold)     → base zMin = -0.30 clips by 86 %  ← the bug
+//   leftUpperArm.x  ≈ +1.07   (cross-body reach) → base xMax = +0.40 clips by 63 %
+//
+// Clap anatomy: similar symmetric fold — same lower-arm Z relief required.
+//
+// All widened limits are still within human anatomical range.
+type BoneLimits = { xMin: number; xMax: number; yMin: number; yMax: number; zMin: number; zMax: number };
+
+const _BASE_UPPER_ARM: BoneLimits = { xMin: -1.30, xMax:  0.40, yMin: -0.50, yMax:  0.50, zMin: -1.55, zMax:  1.55 };
+const _BASE_LOWER_ARM: BoneLimits = { xMin: -0.05, xMax:  1.60, yMin: -0.30, yMax:  0.30, zMin: -0.30, zMax:  0.30 };
+
+// Gestures that require forearm fold (rlaZ / llaZ deep negative).
+const _FOLD_GESTURES   = new Set(['wave', 'clap', 'think']);
+// Gestures that require cross-body upper-arm reach (luaX positive).
+const _CROSS_GESTURES  = new Set(['wave', 'clap']);
+
+function _upperArmLimits(gesture: string | undefined): BoneLimits {
+  if (gesture && _CROSS_GESTURES.has(gesture)) {
+    // Allow luaX = +1.20 (cross-body for wave / clap); xMin = -1.35 for rua forward raise.
+    return { xMin: -1.35, xMax: 1.20, yMin: -0.50, yMax: 0.50, zMin: -1.55, zMax: 1.55 };
+  }
+  return _BASE_UPPER_ARM;
+}
+
+function _lowerArmLimits(gesture: string | undefined): BoneLimits {
+  if (gesture && _FOLD_GESTURES.has(gesture)) {
+    // Allow rlaZ / llaZ down to -2.30 for forearm fold (wave / clap / think).
+    // elbow flex (rlaX) kept the same; wrist-plane (Y) unchanged.
+    return { xMin: -0.05, xMax: 1.60, yMin: -0.30, yMax: 0.30, zMin: -2.30, zMax: 2.30 };
+  }
+  return _BASE_LOWER_ARM;
+}
+
+// ─── Biomechanical context (passed from VRMSkeletonManager) ──────────────────
+export type BiomechContext = {
+  /** Active gesture id (e.g. 'wave', 'explain', 'idle'). Drives limit selection. */
+  gesture?: string;
+  /** Current energy level (0..1). Used for idle-pose guard. */
+  energy?: number;
+  /** Whether the avatar is speaking. Used for idle-pose guard. */
+  speaking?: boolean;
+};
 
 // STEP 4 — Idle pose constants (applied when energy < 0.01 && !speaking).
 //
@@ -1246,9 +1290,13 @@ const _IDLE_UPPER_ARM_Z    =  1.40;  // hanging-down — right arm; left mirrore
 const _IDLE_LOWER_ARM_X    =  0.10;  // ~6° elbow flex (matches ARM_IDLE)
 
 /**
- * Clamp a single live VRM normalized bone to anatomical limits.
+ * Soft-clamp a single live VRM normalized bone to anatomical limits.
  *
- * Uses plain Euler decompose → clamp → setFromEuler (absolute assignment).
+ * Uses plain Euler decompose → softClamp → setFromEuler (absolute assignment).
+ * softClamp is non-destructive: values slightly outside the envelope are gently
+ * pulled back (20 % spring) rather than hard-cut, so gesture poses that slightly
+ * overshoot the base limits are preserved in intent.
+ *
  * Does NOT use swing decomposition — swing-only stripping would remove
  * the X component (forward-raise axis in VRM), erasing gestures every frame
  * and causing the V-pose freeze. Swing-only belongs only in delta-write paths
@@ -1258,14 +1306,14 @@ function _blClampBone(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   humanoid: { getNormalizedBoneNode: (n: any) => THREE.Object3D | null },
   boneName: string,
-  limits: { xMin: number; xMax: number; yMin: number; yMax: number; zMin: number; zMax: number },
+  limits: BoneLimits,
 ): void {
   const bone = humanoid.getNormalizedBoneNode(boneName);
   if (!bone) return;
   _BL_E.setFromQuaternion(bone.quaternion, 'XYZ');
-  _BL_E.x = Math.max(limits.xMin, Math.min(limits.xMax, _BL_E.x));
-  _BL_E.y = Math.max(limits.yMin, Math.min(limits.yMax, _BL_E.y));
-  _BL_E.z = Math.max(limits.zMin, Math.min(limits.zMax, _BL_E.z));
+  _BL_E.x = softClamp(_BL_E.x, limits.xMin, limits.xMax);
+  _BL_E.y = softClamp(_BL_E.y, limits.yMin, limits.yMax);
+  _BL_E.z = softClamp(_BL_E.z, limits.zMin, limits.zMax);
   _BL_Q.setFromEuler(_BL_E);
   bone.quaternion.copy(_BL_Q);
 }
@@ -1310,37 +1358,52 @@ function _applyIdleArmPose(
 }
 
 /**
- * Anatomical hard-clamp applied directly to VRM normalized bones.
+ * Gesture-aware, soft-clamped biomechanical safety net.
  *
- * Pipeline position: AFTER `applyFinalPoseToVrm` + `humanoid.update()`.
- * Last safety net — never strips twist (see _blClampBone comment).
+ * Pipeline position: AFTER `applyFinalPoseToVrm` + first `humanoid.update()`.
+ * Applies soft (spring-back) Euler limits to arm/shoulder normalized bones.
  * Head, neck, spine are intentionally NOT touched (owned by PoseComposer).
  *
- * @param humanoid  VRM humanoid interface
- * @param idleCtx   When provided AND avatar is truly silent (energy<0.01,
- *                  !speaking), an idle arm pose is BLENDED IN before the clamp
- *                  so the avatar never gets stuck in T-pose.
+ * Layer contract (CLAMP-ONLY — no override of gesture intent):
+ *   • When `ctx.gesture` is 'wave' | 'clap' | 'think', the lower-arm Z and
+ *     upper-arm X limits are widened to the gesture's anatomical envelope so
+ *     the authored pose shape survives the clamp pass unmodified.
+ *   • Soft-clamp preserves 80 % of overshoot so micro-jitter never snaps.
+ *   • Idle pose guard: when energy < 0.01 && !speaking, absolute arm-hang is
+ *     written BEFORE clamp — guarantees no T-pose on silence.
+ *
+ * @param humanoid  VRM humanoid (normalized bone interface)
+ * @param ctx       Biomechanical context — gesture id, speaking, energy.
+ *                  Backwards-compatible: old callers passing
+ *                  `{ speaking, energy }` (no `gesture`) continue to work.
  */
 export function applyBiomechanicalLayer(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   humanoid: { getNormalizedBoneNode: (n: any) => THREE.Object3D | null },
-  idleCtx?: { speaking: boolean; energy: number },
+  ctx?: BiomechContext | { speaking: boolean; energy: number },
 ): void {
-  // STEP 4 — Idle arm pose: prevents T-pose freeze when no motion is active.
-  // Runs BEFORE clamp so the clamped output respects anatomical bounds.
-  if (idleCtx && !idleCtx.speaking && idleCtx.energy < 0.01) {
+  // Normalise legacy callers: `{ speaking, energy }` has no `gesture` field.
+  const _gesture = (ctx as BiomechContext | undefined)?.gesture;
+  const _speaking = (ctx as { speaking?: boolean } | undefined)?.speaking ?? false;
+  const _energy   = (ctx as { energy?: number }   | undefined)?.energy   ?? 1;
+
+  // Idle arm pose: prevents T-pose freeze when avatar is truly silent.
+  // Runs BEFORE clamp so the arm-hang values pass through the limits unchanged.
+  if (!_speaking && _energy < 0.01) {
     _applyIdleArmPose(humanoid);
   }
 
-  const ul = BL_LIMITS.upperArm;
-  const ll = BL_LIMITS.lowerArm;
+  // Select per-axis limits based on active gesture.
+  const ul = _upperArmLimits(_gesture);
+  const ll = _lowerArmLimits(_gesture);
 
   _blClampBone(humanoid, 'leftUpperArm',  ul);
   _blClampBone(humanoid, 'rightUpperArm', ul);
   _blClampBone(humanoid, 'leftLowerArm',  ll);
   _blClampBone(humanoid, 'rightLowerArm', ll);
 
-  const sl = { xMin: -0.30, xMax: 0.30, yMin: -0.30, yMax: 0.30, zMin: -0.35, zMax: 0.35 };
+  // Shoulder limits are gesture-independent (small range, never part of gesture shape).
+  const sl: BoneLimits = { xMin: -0.30, xMax: 0.30, yMin: -0.30, yMax: 0.30, zMin: -0.35, zMax: 0.35 };
   _blClampBone(humanoid, 'leftShoulder',  sl);
   _blClampBone(humanoid, 'rightShoulder', sl);
 
@@ -1352,10 +1415,15 @@ export function applyBiomechanicalLayer(
     const rL = humanoid.getNormalizedBoneNode('rightLowerArm');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (window as any).__armDebug = {
+      gesture: _gesture ?? 'none',
       lUpper: lU ? { x: +lU.rotation.x.toFixed(3), y: +lU.rotation.y.toFixed(3), z: +lU.rotation.z.toFixed(3) } : null,
       rUpper: rU ? { x: +rU.rotation.x.toFixed(3), y: +rU.rotation.y.toFixed(3), z: +rU.rotation.z.toFixed(3) } : null,
       lLower: lL ? { x: +lL.rotation.x.toFixed(3), y: +lL.rotation.y.toFixed(3), z: +lL.rotation.z.toFixed(3) } : null,
       rLower: rL ? { x: +rL.rotation.x.toFixed(3), y: +rL.rotation.y.toFixed(3), z: +rL.rotation.z.toFixed(3) } : null,
+      limitsActive: {
+        upperX: `[${ul.xMin.toFixed(2)}, ${ul.xMax.toFixed(2)}]`,
+        lowerZ: `[${ll.zMin.toFixed(2)}, ${ll.zMax.toFixed(2)}]`,
+      },
     };
   }
 }

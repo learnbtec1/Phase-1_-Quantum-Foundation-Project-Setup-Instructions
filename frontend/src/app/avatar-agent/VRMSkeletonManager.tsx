@@ -58,13 +58,28 @@ import {
   applySubconsciousLayer,
   BONE_AXIS_MAP,
   setBoneAxisMap,
+  type BiomechContext,
 } from './motion/biomechanicalCorrectionLayer';
 import { applyFingerMicroLayer } from './motion/fingerMicroLayer';
 import { applyHumanMicroBehavior } from './motion/humanMicroBehavior';
 import { applyGazeIntentLayer } from './motion/gazeIntentLayer';
 import { tickGestureTiming, getGestureTimingSnapshot } from './motion/gestureTiming';
 import { detectIntent, detectIntentDetailed } from './motion/intentClassifier';
-console.log('[FILE_IMPORTED] biomechanicalCorrectionLayer, fingerMicroLayer, gazeIntentLayer, gestureTiming, intentClassifier');
+import {
+  pushBehavior as pushBehaviorEvent,
+  tickBehaviorTimeline,
+  getCurrentBehavior,
+  getBehaviorQueueDepth,
+  getInertiaSnapshot,
+  getLastBehaviorAudit,
+  getAnticipationOverlay,
+  setEmotion as setBehaviorEmotion,
+  getEmotion as getBehaviorEmotion,
+  clearBehaviorQueue,
+  type BehaviorFrame,
+  type TimelineGestureId,
+} from './motion/behaviorTimeline';
+console.log('[FILE_IMPORTED] biomechanicalCorrectionLayer, fingerMicroLayer, gazeIntentLayer, gestureTiming, intentClassifier, behaviorTimeline');
 import { installVrmHumanoidBypassProbe } from '@/app/avatar-agent/motion/proceduralV2';
 import {
   tickHumanization,
@@ -1432,6 +1447,9 @@ export function VRMSkeletonManager({
       // think/etc. utterance can re-fire its dedicated gesture.
       lastSemanticUtteranceHashRef.current = '';
       lastSemanticIntentFiredRef.current = '';
+      // Drop any queued behaviors so the next utterance starts from a clean
+      // timeline (prevents stale wave/explain firing into the next sentence).
+      clearBehaviorQueue();
     };
     window.addEventListener('avatar:speak:start', onStart as EventListener);
     window.addEventListener('avatar:speak:end',   onEnd);
@@ -1517,6 +1535,25 @@ export function VRMSkeletonManager({
     w.__cogniSendToAvatarSemanticArm = sendToAvatarSemanticArm;
     w.__cogniSendArmForward = sendArmForward;
     w.__cogniSendUniversalBoneCommand = sendUniversalBoneCommand;
+
+    // ── BehaviorTimeline DevTools API ───────────────────────────────────────
+    // Manual gesture trigger via the timeline (with full anticipation / action /
+    // recovery phases). Useful for testing without running speech.
+    //   window.__pushBehavior('wave')
+    //   window.__pushBehavior('wave', { intensity:1, baseDurationMs:2400 })
+    //   window.__setEmotion({ valence:0.8, arousal:0.9 })   // joyful, energetic
+    w.__pushBehavior = (
+      type: TimelineGestureId,
+      opts?: { baseDurationMs?: number; intensity?: number; priority?: number; source?: string },
+    ) => {
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      return pushBehaviorEvent(type, now, { source: 'devtools', ...(opts ?? {}) });
+    };
+    w.__setEmotion = (next: { valence?: number; arousal?: number }) => {
+      setBehaviorEmotion(next);
+      return getBehaviorEmotion();
+    };
+    w.__getEmotion = () => getBehaviorEmotion();
 
     return () => {
       if (w.__cogniPlayGesture) delete w.__cogniPlayGesture;
@@ -2689,11 +2726,32 @@ export function VRMSkeletonManager({
       }
 
       if (_semanticGesture) {
-        // ── EVENT-BASED gesture spawn (semantic, once per utterance) ──
+        // ── EVENT-BASED gesture spawn — delegated to BehaviorTimeline ──
+        // The timeline owns: phase split (anticipation / action / recovery),
+        // emotion modulation (arousal/valence → amplitude/tempo), the queue,
+        // and inertia tracking. We sync the resulting event into the legacy
+        // refs below in the per-frame tick block so the existing renderer
+        // continues to read its familiar inputs.
+        const _baseAmp =
+          _semanticGesture === 'wave'  ? 0.95 :
+          _semanticGesture === 'agree' ? 0.62 :
+          _semanticGesture === 'think' ? 0.70 :
+          _semanticGesture === 'point' ? 0.85 :
+          0.80;
+        const _baseDur =
+          _semanticGesture === 'wave'  ? 2400 :
+          _semanticGesture === 'think' ? 2800 :
+          _semanticGesture === 'agree' ? 1300 :
+          2400;
+        const _evt = pushBehaviorEvent(_semanticGesture as TimelineGestureId, nowMs, {
+          baseDurationMs: _baseDur,
+          intensity:      _baseAmp,
+          priority:       100,
+          source:         _semanticSource,
+        });
         talkGestureActiveRef.current = true;
-        gestureStateRef.current = _semanticGesture;
-        gestureStartRef.current = nowMs;
-        // Live debug surface — readable from DevTools to verify engine is active.
+        // Cool-down so we don't immediately stack another auto-gesture.
+        talkGestureNextAtMsRef.current = _evt.startTime + _evt.duration + 600 + Math.random() * 500;
         if (typeof window !== 'undefined') {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           (window as any).__behaviorEngine = {
@@ -2701,48 +2759,39 @@ export function VRMSkeletonManager({
             lastFiredSource:  _semanticSource,
             lastFiredAtMs:    nowMs,
             firedThisUtterance: lastSemanticIntentFiredRef.current,
+            timelineEventDurationMs: _evt.duration,
+            timelinePhases: _evt.phases,
+            timelineIntensity: _evt.intensity,
           };
         }
-        // Wave / agree / think tend to read better at slightly lower amplitude
-        // than explain (which expects open-hand projection). Tune per gesture.
-        const _amp =
-          _semanticGesture === 'wave'  ? 0.95 :
-          _semanticGesture === 'agree' ? 0.62 :
-          _semanticGesture === 'think' ? 0.70 :
-          _semanticGesture === 'point' ? 0.85 :
-          0.80;
-        gestureAmplitudeMulRef.current = Math.max(gestureAmplitudeMulRef.current, _amp);
-        // Wave is naturally longer than a quick agree/point; think is sustained.
-        gestureDurationRef.current =
-          _semanticGesture === 'wave'  ? 2200 + Math.random() * 600 :
-          _semanticGesture === 'think' ? 2800 + Math.random() * 700 :
-          _semanticGesture === 'agree' ? 1100 + Math.random() * 400 :
-          2400 + Math.random() * 1200;
-        // Cool-down so we don't immediately stack another auto-gesture.
-        talkGestureNextAtMsRef.current = nowMs + gestureDurationRef.current + 600 + Math.random() * 500;
         if (process.env.NODE_ENV === 'development') {
           console.log('[BEHAVIOR_GESTURE_FIRED]', {
             gesture:    _semanticGesture,
             source:     _semanticSource,
-            durationMs: Math.round(gestureDurationRef.current),
-            amplitude:  +gestureAmplitudeMulRef.current.toFixed(2),
+            durationMs: _evt.duration,
+            phases:     _evt.phases,
+            intensity:  +_evt.intensity.toFixed(2),
+            queueDepth: getBehaviorQueueDepth(),
             nextAt:     Math.round(talkGestureNextAtMsRef.current),
           });
         }
       } else if (_autoCanFire && (ab.gesture === 'talk' || ab.intent === 'explaining' || ab.intent === 'emphasizing')) {
         // ── CYCLIC fallback — keeps long generic utterances alive ──
-        talkGestureActiveRef.current = true;
         const _autoGesture: GestureId = ab.intent === 'emphasizing' ? 'point' : 'explain';
-        gestureStateRef.current = _autoGesture;
-        gestureStartRef.current = nowMs;
-        gestureAmplitudeMulRef.current = Math.max(gestureAmplitudeMulRef.current, 0.78 + Math.random() * 0.22);
-        gestureDurationRef.current = 2400 + Math.random() * 1200; // 2.4–3.6s natural
-        talkGestureNextAtMsRef.current = nowMs + gestureDurationRef.current + 600 + Math.random() * 500;
+        const _evt = pushBehaviorEvent(_autoGesture as TimelineGestureId, nowMs, {
+          baseDurationMs: 2700,
+          intensity:      0.78 + Math.random() * 0.22,
+          priority:       80, // lower than semantic (100), preemptable
+          source:         `cyclic:${ab.intent ?? 'talk'}`,
+        });
+        talkGestureActiveRef.current = true;
+        talkGestureNextAtMsRef.current = _evt.startTime + _evt.duration + 600 + Math.random() * 500;
         if (process.env.NODE_ENV === 'development') {
           console.log('[AUTO_GESTURE_FROM_INTENT]', {
             gesture:    _autoGesture,
             intent:     ab.intent,
-            durationMs: Math.round(gestureDurationRef.current),
+            durationMs: _evt.duration,
+            phases:     _evt.phases,
             nextAt:     Math.round(talkGestureNextAtMsRef.current),
           });
         }
@@ -2821,6 +2870,37 @@ export function VRMSkeletonManager({
       }
     } else {
       nodPitchRef.current = 0;
+    }
+
+    // ─── Behavior Timeline Engine — per-frame tick (single source of truth) ──
+    // Drives the active behavior lifecycle (anticipation → action → recovery),
+    // advances the queue when an event completes, and SYNCS its output into
+    // the legacy gesture refs so the existing rendering pipeline (slerpArmEuler
+    // + applyFinalPoseToVrm) continues to work unchanged.
+    //
+    // Order requirement: must run BEFORE the gesture state machine below so
+    // `gestureStateRef.current` reflects the timeline's resolved state for
+    // this frame.
+    const _behaviorFrame: BehaviorFrame = tickBehaviorTimeline(nowMs);
+    if (_behaviorFrame.event) {
+      const _ev = _behaviorFrame.event;
+      // Sync the timeline event into the legacy refs every frame. The
+      // renderer reads these to compute progress / fade-in / fade-out.
+      gestureStateRef.current   = _ev.type as GestureId;
+      gestureStartRef.current   = _ev.startTime;
+      gestureDurationRef.current = _ev.duration;
+      // Drive amplitude from the envelope curve so anticipation /action /
+      // recovery shape the gesture rather than a flat per-event constant.
+      // Floor at 0.18 keeps the renderer's `gAmp` formula in a non-trivial
+      // range (the existing fadeIn/fadeOut still attenuate at the edges).
+      gestureAmplitudeMulRef.current = Math.max(
+        0.18,
+        _ev.intensity * Math.max(0, _behaviorFrame.envelope),
+      );
+    } else if (gestureStateRef.current !== 'idle' && !vrmaActiveRef?.current) {
+      // Timeline reports idle but the renderer is still in a gesture state
+      // (legacy bridge). Let the existing duration-based transition at
+      // ~L 2854 finish naturally; do not force-clear here.
     }
 
     // ─── Gesture state machine + motion source (decision layer) ─────────────
@@ -3859,6 +3939,14 @@ export function VRMSkeletonManager({
         noiseArm(t * BIO_ORG_NOISE_SPD, 9.1, 0) * BIO_ORG_NOISE
       ) * WAVING_MICRO_AMP * gArm * Math.min(gestureAmp, 1.2);
 
+      // ── BehaviorTimeline anticipation overlay (wind-up before wave) ──
+      // During the anticipation phase the right upper arm is pulled slightly
+      // BACKWARD (positive ruaX) and the left arm pulled toward the body
+      // before the action phase swings them into the wave pose. This is the
+      // "opposite motion first" signature of natural human gesture.
+      const _antRua_wave = getAnticipationOverlay(_behaviorFrame, 'rua');
+      const _antLua_wave = getAnticipationOverlay(_behaviorFrame, 'lua');
+
       // INTENT CURVE: holdOsc amplifies the wave micro-motion during hold phase.
       const wRuaX = cal ? cal.ruaX : WAVING_RUA_X;
       const wRuaZ = cal ? cal.ruaZ : WAVING_RUA_Z;
@@ -3889,7 +3977,7 @@ export function VRMSkeletonManager({
 
       slerpArmEuler(
         ruaRef.current,
-        (wRuaX + micro * 1.2) * _wHold,
+        (wRuaX + micro * 1.2) * _wHold + _antRua_wave,
         cal ? cal.ruaY : WAVING_RUA_Y,
         wRuaZ * _wHold,
         waveK(1.1),
@@ -3911,8 +3999,8 @@ export function VRMSkeletonManager({
         true,
       );
 
-      // Left arm (resting at side)
-      slerpArmEuler(luaRef.current, WAVING_LUA_X, WAVING_LUA_Y, WAVING_LUA_Z, 0.4);
+      // Left arm (resting at side) — anticipation pulls slightly inward.
+      slerpArmEuler(luaRef.current, WAVING_LUA_X + _antLua_wave, WAVING_LUA_Y, WAVING_LUA_Z, 0.4);
       slerpArmEuler(llaRef.current, WAVING_LLA_X, 0, WAVING_LLA_Z, 0.4);
       slerpArmEuler(
         lhRef.current,
@@ -5969,10 +6057,16 @@ export function VRMSkeletonManager({
     // idleCtx: when energy<0.01 && !speaking, a natural arm-hang pose is
     // blended in before the clamp — prevents the T-pose freeze symptom.
     if (vrm.humanoid) {
-      const _bioIdleCtx = { speaking, energy: peekSpeechEnergy() };
+      // BiomechContext: pass active gesture so the layer widens per-axis limits
+      // for wave / clap / think and never truncates their authored pose shape.
+      const _bioCtx: BiomechContext = {
+        gesture:  gestureStateRef.current === 'idle' ? undefined : gestureStateRef.current,
+        speaking,
+        energy:   peekSpeechEnergy(),
+      };
       safeCall(
         'biomechanicalLayer',
-        () => applyBiomechanicalLayer(vrm.humanoid!, _bioIdleCtx),
+        () => applyBiomechanicalLayer(vrm.humanoid!, _bioCtx),
         undefined,
       );
       // EXEC-AUDIT: biomechanical stage marker
@@ -6007,6 +6101,71 @@ export function VRMSkeletonManager({
           | undefined;
         _execLoop.ov_afterBio = _luaPost ? _luaPost.rotation.z : NaN;
       } catch { /* ignore */ }
+
+      // ── window.__motionLayers — live debug surface (throttled to every 16 frames) ──
+      // Exposes the active layer weights and gesture state for runtime inspection.
+      // Read from DevTools: window.__motionLayers
+      if (typeof window !== 'undefined' && (_execLoop.frameCount % 16 === 0)) {
+        const _g   = gestureStateRef.current;
+        const _en  = peekSpeechEnergy();
+        const _gWeight   = _g !== 'idle' ? 1.0 : 0.0;
+        const _intWeight = speaking ? Math.max(0.3, _en) : 0.0;
+        const _idleWeight = (!speaking && _en < 0.01) ? 1.0 : Math.max(0, 1.0 - _gWeight - _intWeight);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).__motionLayers = {
+          activeGesture: _g,
+          speaking,
+          energy: +_en.toFixed(3),
+          layers: [
+            { name: 'gesture',  priority: 100, weight: +_gWeight.toFixed(2),    active: _g !== 'idle' },
+            { name: 'intent',   priority: 50,  weight: +_intWeight.toFixed(2),  active: speaking },
+            { name: 'idle',     priority: 10,  weight: +_idleWeight.toFixed(2), active: !speaking && _en < 0.01 },
+          ],
+        };
+
+        // ── window.__behaviorTimeline — Timeline Engine forensic surface ──
+        // Single read gives you: active event, current phase, t inside phase,
+        // global progress, envelope, polarity, inertia velocities, emotion,
+        // queue depth, and the last completed-event audit.
+        const _tlActive = getCurrentBehavior();
+        const _tlEmotion = getBehaviorEmotion();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).__behaviorTimeline = {
+          active: _tlActive ? {
+            type:       _tlActive.type,
+            startTime:  _tlActive.startTime,
+            duration:   _tlActive.duration,
+            phases:     _tlActive.phases,
+            intensity:  +_tlActive.intensity.toFixed(2),
+            priority:   _tlActive.priority,
+            source:     _tlActive.source,
+          } : null,
+          phase:         _behaviorFrame.phase,
+          t:             +_behaviorFrame.t.toFixed(3),
+          globalT:       +_behaviorFrame.globalT.toFixed(3),
+          envelope:      +_behaviorFrame.envelope.toFixed(3),
+          polarity:      +_behaviorFrame.polarity.toFixed(3),
+          inertiaActive: _behaviorFrame.inertiaActive,
+          inertia:       getInertiaSnapshot(),
+          emotion:       { valence: +_tlEmotion.valence.toFixed(2), arousal: +_tlEmotion.arousal.toFixed(2) },
+          queueDepth:    getBehaviorQueueDepth(),
+          lastAudit:     getLastBehaviorAudit(),
+        };
+      }
+
+      // ── [BEHAVIOR_FINAL_AUDIT] — emit once per completed event ──
+      // The timeline writes _lastAudit on event completion; we surface it to
+      // the console exactly once (debounced by lastEvent reference).
+      if (typeof window !== 'undefined') {
+        const _audit = getLastBehaviorAudit();
+        if (_audit && (window as Window & { __lastAuditRef?: object }).__lastAuditRef !== _audit) {
+          (window as Window & { __lastAuditRef?: object }).__lastAuditRef = _audit;
+          if (process.env.NODE_ENV === 'development') {
+            // eslint-disable-next-line no-console
+            console.log('[BEHAVIOR_FINAL_AUDIT]', _audit);
+          }
+        }
+      }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

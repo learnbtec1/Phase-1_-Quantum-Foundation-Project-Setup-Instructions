@@ -93,10 +93,75 @@ export type PerBonePoseBlendWeights = Partial<PoseBlendWeights>;
 const _Q = new THREE.Quaternion();
 const _Q2 = new THREE.Quaternion();
 
+// ─── Last-Valid-Pose (LVP) memory — module scope, zero per-frame allocations ─
+//
+// Design contract:
+//   • _lastFinalPose stores the last successfully-composed quaternion per bone.
+//   • _staleCounter tracks consecutive frames in which NO layer wrote a bone.
+//   • When a bone has no writer, its LVP is carried forward (max _STALE_BUDGET
+//     frames ≈ 200 ms at 60 FPS). After the budget expires, bind (T-pose) is
+//     used — preserving the original fallback for genuinely un-driven bones.
+//   • Quaternion objects in _lastFinalPose are REUSED (in-place copy) to avoid
+//     GC. They are created lazily on first write.
+//   • NaN propagation is blocked: if any component of the blended quaternion is
+//     NaN or the quaternion's length is near zero, the bone falls back to bind
+//     and the LVP entry is NOT updated for that frame.
+//
+// Why this eliminates T-pose snapping:
+//   The old pipeline started every bone from `bind` (T-pose) each frame. Any
+//   frame in which the writer (gesture / idle / generative) was silent — during
+//   a gesture handover gap, cool-down, VRMA flicker, or first VRM-load frame —
+//   emitted `bind` into `finalPose`. `applyFinalPoseToVrm` then slerped the live
+//   bone toward T-pose at up to 0.1 rad/frame, producing visible snapping.
+//   With LVP the bone stays where it was; motion is continuous.
+
+const _lastFinalPose = new Map<string, THREE.Quaternion>();
+const _staleCounter  = new Map<string, number>();
+
+/** Maximum consecutive no-write frames before entering decay (~200 ms at 60 FPS). */
+const _STALE_BUDGET = 12;
+
+/**
+ * Frames over which LVP gradually slerps to bind after the budget expires.
+ * Range: [0, _DECAY_FRAMES] maps linearly to a slerp t of [0, 1].
+ * At 60 FPS this is ~400 ms — enough to be smooth yet prevent frozen poses.
+ */
+const _DECAY_FRAMES = 24;
+
+/** Scratch Quaternion reused during decay slerp — never allocated per-frame. */
+const _Q_DECAY = new THREE.Quaternion();
+
+/** True when all quaternion components are finite and non-zero-length. */
+function _isValidQuat(q: THREE.Quaternion): boolean {
+  if (!Number.isFinite(q.x) || !Number.isFinite(q.y) ||
+      !Number.isFinite(q.z) || !Number.isFinite(q.w)) return false;
+  const len2 = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+  return len2 > 1e-8;
+}
+
+/** Track how many bones are currently in the decay window (for diagnostics). */
+let _decayActiveBones = 0;
+
+/** Expose a lightweight diagnostic surface for runtime inspection. */
+function _updatePoseContinuityDebug(): void {
+  if (typeof window === 'undefined') return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (window as any).__poseContinuity = {
+    lastPoseSize:     _lastFinalPose.size,
+    staleCounterSize: _staleCounter.size,
+    decayActive:      _decayActiveBones > 0,
+    decayActiveBones: _decayActiveBones,
+  };
+}
+
 /**
  * Blend stack order (each step slerps by weight): IDLE → GENERATIVE → GESTURE → COLLISION → VRMA.
  * Generative authority: `boneWeightOverrides` can zero idle/gesture/collision/vrma on a joint so the
  * commanded pose wins (see `kinematicStandards.ts` + VRMSkeletonManager generative lock).
+ *
+ * Last-Valid-Pose guarantee: bones not written by any layer this frame carry
+ * their previous output forward for up to _STALE_BUDGET frames instead of
+ * snapping to bind (T-pose). See module-scope comment above.
  */
 export function blendPoseLayers(params: {
   bind: Map<string, THREE.Quaternion>;
@@ -119,16 +184,67 @@ export function blendPoseLayers(params: {
   const out: BonePoseMap = new Map();
   const { idle: wI0, generative: wG0, gesture: wGe0, collision: wC0, vrma: wV0 } = weights;
 
+  // Reset per-call decay counter so the debug surface reflects this frame only.
+  _decayActiveBones = 0;
+
   for (const key of keys) {
     const b = bind.get(key);
     if (!b) continue;
+
     const ov = boneWeightOverrides?.get(key);
-    let wI = ov?.idle !== undefined ? ov.idle : wI0;
-    let wG = ov?.generative !== undefined ? ov.generative : wG0;
-    let wGe = ov?.gesture !== undefined ? ov.gesture : wGe0;
-    let wC = ov?.collision !== undefined ? ov.collision : wC0;
-    let wV = ov?.vrma !== undefined ? ov.vrma : wV0;
-    _Q.copy(b);
+    const wI  = ov?.idle       !== undefined ? ov.idle       : wI0;
+    const wG  = ov?.generative !== undefined ? ov.generative : wG0;
+    const wGe = ov?.gesture    !== undefined ? ov.gesture    : wGe0;
+    const wC  = ov?.collision  !== undefined ? ov.collision  : wC0;
+    const wV  = ov?.vrma       !== undefined ? ov.vrma       : wV0;
+
+    // Determine whether any layer will write to this bone.
+    const hasWriter =
+      (idle.has(key)       && wI  > 1e-6) ||
+      (generative.has(key) && wG  > 1e-6) ||
+      (gesture.has(key)    && wGe > 1e-6) ||
+      (collision.has(key)  && wC  > 1e-6) ||
+      (vrma.has(key)       && wV  > 1e-6);
+
+    if (!hasWriter) {
+      // No writer this frame.  Apply three-tier LVP / decay / bind logic.
+      const stale = (_staleCounter.get(key) ?? 0) + 1;
+      _staleCounter.set(key, stale);
+
+      const prev = _lastFinalPose.get(key);
+
+      if (prev && _isValidQuat(prev) && stale <= _STALE_BUDGET) {
+        // ── TIER 1: carry last valid pose unchanged ──────────────────────────
+        // Bone stays exactly where it was — no visible change this frame.
+        out.set(key, prev);
+
+      } else if (prev && _isValidQuat(prev) && stale <= _STALE_BUDGET + _DECAY_FRAMES) {
+        // ── TIER 2: graceful decay — slerp LVP toward bind ──────────────────
+        // t rises from 0 (at budget boundary) to 1 (at end of decay window).
+        // Uses _Q_DECAY scratch to avoid allocations; normalizes before output.
+        const rawT = (stale - _STALE_BUDGET) / _DECAY_FRAMES;
+        const t = rawT < 0 ? 0 : rawT > 1 ? 1 : rawT;   // clamp [0,1]
+        _Q_DECAY.copy(prev).slerp(b, t).normalize();
+        out.set(key, _Q_DECAY);
+        _decayActiveBones++;
+
+      } else {
+        // ── TIER 3: budget + decay window both expired, or no LVP yet ────────
+        // Fall back to bind — original behaviour, reached only after ~600 ms
+        // of silence (12 + 24 frames at 60 FPS).
+        out.set(key, b);
+      }
+      continue;
+    }
+
+    // At least one writer is active — reset stale counter.
+    _staleCounter.set(key, 0);
+
+    // Choose base: LVP when available (continuity), bind on first frame.
+    const lvp = _lastFinalPose.get(key);
+    const base = (lvp && _isValidQuat(lvp)) ? lvp : b;
+    _Q.copy(base);
+
     const qI = idle.get(key);
     if (qI && wI > 1e-6) _Q.slerp(qI, Math.min(1, wI));
     const qG = generative.get(key);
@@ -139,8 +255,25 @@ export function blendPoseLayers(params: {
     if (qC && wC > 1e-6) _Q.slerp(qC, Math.min(1, wC));
     const qV = vrma.get(key);
     if (qV && wV > 1e-6) _Q.slerp(qV, Math.min(1, wV));
-    out.set(key, _Q.clone());
+
+    // Guard against NaN propagation before persisting.
+    if (!_isValidQuat(_Q)) {
+      // Corrupted blend result — fall back to bind, do NOT update LVP.
+      out.set(key, b);
+      continue;
+    }
+
+    // Persist into LVP (reuse existing Quaternion object to avoid allocation).
+    let stored = _lastFinalPose.get(key);
+    if (!stored) {
+      stored = new THREE.Quaternion();
+      _lastFinalPose.set(key, stored);
+    }
+    stored.copy(_Q).normalize();
+    out.set(key, stored);
   }
+
+  _updatePoseContinuityDebug();
   return out;
 }
 
