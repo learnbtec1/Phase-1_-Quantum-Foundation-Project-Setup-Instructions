@@ -12,6 +12,9 @@
  *
  * FORENSIC_CP: bridge cooldowns تحكم التكرار؛ لكن جدولة الذراع أثناء الكلام الطويل تعتمد أيضًا على
  * `talkGestureNextAtMsRef` في VRMSkeletonManager (لا تعتمد على hash النص وحده).
+ *
+ * Authority: conversational dominance on spine/arms is enforced downstream in
+ * VRMSkeletonManager via MotionAuthorityLock (timeline envelope + gesture state).
  */
 
 import type { DetectedIntent } from './intentClassifier';

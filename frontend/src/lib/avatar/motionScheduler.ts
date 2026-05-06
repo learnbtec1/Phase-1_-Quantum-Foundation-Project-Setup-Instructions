@@ -1,11 +1,15 @@
+'use client';
+
 /**
  * Continuous motion scheduler — re-queues light gestures when the body pipeline goes quiet,
  * without changing VRMA / intent / presence. Browser-only.
  *
  * Loads `unifiedGestureEngine` via dynamic `import()` to avoid a circular dependency with
  * `UnifiedGestureEngine` (which calls `startMotionScheduler` from `initGestureNormalizer`).
+ *
+ * Motion authority: idle vs gesture arbitration on overlapping bones is handled in
+ * VRMSkeletonManager + MotionAuthorityLock — scheduler timing stays unchanged here.
  */
-'use client';
 
 import { getAvatarOrchestratorState } from '@/lib/avatar/avatarOrchestratorState';
 import {

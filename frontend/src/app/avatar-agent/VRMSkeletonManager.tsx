@@ -34,6 +34,14 @@ import {
   type BonePoseMap,
   type PerBonePoseBlendWeights,
 } from './motion/PoseComposer';
+import {
+  CONVERSATIONAL_AUTHORITY_BONES,
+  evaluateMotionAuthorityLock,
+  clampGestureEnvelope01,
+  resolvePerBoneBlendWeights,
+  classifyBoneAuthorityOwner,
+  buildMotionAuthorityRecoveryReport,
+} from './motion/MotionAuthorityLock';
 import { expandGenerativeSuppressedKeys } from './motion/generativeProceduralMask';
 import { applyUpperArmGestureCalib } from './motion/gestureWorldCalibration';
 import { clampGenerativeEulerYXZ } from './motion/jointEulerLimits';
@@ -318,6 +326,8 @@ const SK_Q2 = new THREE.Quaternion();
 const _ARM_FORENSICS_E_LUA = new THREE.Euler(0, 0, 0, 'YXZ');
 const _ARM_FORENSICS_E_RUA = new THREE.Euler(0, 0, 0, 'YXZ');
 const _ARM_FORENSICS_FWD = new THREE.Vector3();
+/** Scratch: conversational bone authority telemetry (Euler YXZ degrees). */
+const _MOTION_AUTH_TELEM_E = new THREE.Euler(0, 0, 0, 'YXZ');
 const GEN_E = new THREE.Euler();
 const GEN_Q = new THREE.Quaternion();
 const SK_AXIS_X = new THREE.Vector3(1, 0, 0);
@@ -1378,6 +1388,8 @@ export function VRMSkeletonManager({
   const lastGestureFrameLogMsRef = useRef(0);
   /** Throttle [MOTION_AUTHORITY_HARD] when idle blend wins despite timeline gesture. */
   const lastMotionAuthorityHardWarnMsRef = useRef(0);
+  /** Idle overwrite watchdog → brief gesture-authority recovery window */
+  const authorityRecoveryUntilMsRef = useRef(0);
   const lastIdleZLogMsRef = useRef(0);
   /** Throttled `NEXT_PUBLIC_DEBUG_TRACE` frame counter (useFrame). */
   const motionTraceFrameRef = useRef(0);
@@ -3058,7 +3070,7 @@ export function VRMSkeletonManager({
     // FIX 2 + FIX 3: envelope-only amplitude — no Math.max stacking; when the
     // timeline has no active event the envelope is 0 → no lingering gesture gain.
     // Clamp ≥0 so anticipation-phase negative envelopes never invert downstream gAmp.
-    gestureAmplitudeMulRef.current = Math.max(0, _behaviorFrame.envelope);
+    gestureAmplitudeMulRef.current = clampGestureEnvelope01(_behaviorFrame.envelope);
     if (_behaviorFrame.event) {
       const _ev = _behaviorFrame.event;
       // Sync the timeline event into the legacy refs every frame. The
@@ -3095,7 +3107,6 @@ export function VRMSkeletonManager({
       !vrmaActive &&
       motionSource === 'IDLE' &&
       _behaviorFrame.event !== null &&
-      _behaviorFrame.envelope > 0.06 &&
       _behaviorFrame.event.type !== 'idle'
     ) {
       motionSource = 'GESTURE';
@@ -4723,26 +4734,28 @@ export function VRMSkeletonManager({
       }
     }
 
-    // Motion recovery: during procedural semantic gestures, upper body favors gesture
-    // blend so idle bind pose cannot visually swallow open-hand / reach poses.
-    if (
-      !generativeExternalActive &&
-      isProceduralGestureFrame &&
-      rawG !== 'idle' &&
-      motionSource === 'GESTURE' &&
-      !VRMA_ISOLATION_TEST
-    ) {
-      const gStrong = THREE.MathUtils.clamp(gestureLayerW * 1.08, 0.48, 1);
-      const iSoft = THREE.MathUtils.clamp(1 - gStrong * 0.5, 0.38, 0.92);
-      for (const bone of [
-        'lua',
-        'rua',
-        'lla',
-        'rla',
-        'leftShoulder',
-        'rightShoulder',
-        'chest',
-      ]) {
+    const authorityRecoveryActive = nowMs < authorityRecoveryUntilMsRef.current;
+    const authorityLockResult = evaluateMotionAuthorityLock({
+      motionSource,
+      speaking,
+      rawGestureId: rawG,
+      behaviorEnvelope: _behaviorFrame.envelope,
+      hasBehaviorGestureEvent:
+        !!_behaviorFrame.event && _behaviorFrame.event.type !== 'idle',
+      gestureLayerW,
+      generativeExternalActive,
+      vrIsolationTest: VRMA_ISOLATION_TEST,
+      authorityRecoveryActive,
+    });
+
+    const conversationalReachBiasApplied =
+      authorityLockResult.lockActive && speaking && rawG !== 'idle';
+
+    // Conversational motion authority lock — torso + shoulders + arms: idle supports only.
+    if (!generativeExternalActive && authorityLockResult.lockActive && !VRMA_ISOLATION_TEST) {
+      const gStrong = authorityLockResult.gestureStrengthFloor;
+      const iSoft = authorityLockResult.idleSupportCap;
+      for (const bone of CONVERSATIONAL_AUTHORITY_BONES) {
         const prev = kinematicBoneWeightOverrides.get(bone) ?? {};
         kinematicBoneWeightOverrides.set(bone, {
           ...prev,
@@ -4768,10 +4781,12 @@ export function VRMSkeletonManager({
         }
         gesturePose.set(bone, sm.clone());
       };
-      _smoothArmBone('lua', 0.084);
-      _smoothArmBone('rua', 0.084);
-      _smoothArmBone('leftShoulder', 0.118);
-      _smoothArmBone('rightShoulder', 0.118);
+      const tauArm = speaking ? 0.095 : 0.084;
+      const tauShoulder = speaking ? 0.132 : 0.118;
+      _smoothArmBone('lua', tauArm);
+      _smoothArmBone('rua', tauArm);
+      _smoothArmBone('leftShoulder', tauShoulder);
+      _smoothArmBone('rightShoulder', tauShoulder);
     } else if (!isProceduralGestureFrame) {
       smoothedGestureArmRef.current.clear();
     }
@@ -4824,6 +4839,18 @@ export function VRMSkeletonManager({
         !!_behaviorFrame.event && idleLayerW > 0.88 && gestureLayerW < 0.18,
     });
 
+    const idleOverwriteFrame =
+      !!_behaviorFrame.event &&
+      rawG !== 'idle' &&
+      idleLayerW > 0.88 &&
+      gestureLayerW < 0.18;
+    if (idleOverwriteFrame) {
+      authorityRecoveryUntilMsRef.current = Math.max(
+        authorityRecoveryUntilMsRef.current,
+        nowMs + 420,
+      );
+    }
+
     // ── window.__MOTION_AUTHORITY_FORENSICS (نهاية سلطة الخلط الأولى) ─────────
     if (typeof window !== 'undefined' && _execLoop.frameCount % 16 === 0) {
       const _bLua = m.get('lua');
@@ -4838,8 +4865,86 @@ export function VRMSkeletonManager({
       const gesturePoseApplied = gesturePoseWritten && gestureLayerW > 0.08;
       const idleOverwriteDetected =
         !!_behaviorFrame.event &&
+        rawG !== 'idle' &&
         idleLayerW > 0.88 &&
         gestureLayerW < 0.18;
+      const globalsBlend = {
+        idle: idleLayerW,
+        gesture: gestureLayerW,
+        generative: generativeLayerW,
+        collision: collisionLayerW,
+        vrma: vrmaLayerW,
+      };
+      const conversationalBoneTelemetry = CONVERSATIONAL_AUTHORITY_BONES.map((bone) => {
+        const wEffBone = resolvePerBoneBlendWeights(bone, globalsBlend, kinematicBoneWeightOverrides);
+        const owner = classifyBoneAuthorityOwner(wEffBone);
+        const bq = m.get(bone);
+        const fq = finalPose.get(bone) ?? bq;
+        let angleVsBindDeg = 0;
+        if (bq && fq) {
+          angleVsBindDeg =
+            2 *
+            Math.acos(THREE.MathUtils.clamp(Math.abs(bq.dot(fq)), 0, 1)) *
+            THREE.MathUtils.RAD2DEG;
+        }
+        const qSrc = fq ?? bq;
+        GEN_Q.identity();
+        if (qSrc) GEN_Q.copy(qSrc);
+        _MOTION_AUTH_TELEM_E.setFromQuaternion(GEN_Q, 'YXZ');
+        let cameraFacingScore: number | null = null;
+        if (bone === 'rua' || bone === 'lua') {
+          try {
+            const obj = bone === 'rua' ? ruaRef.current : luaRef.current;
+            if (obj) {
+              obj.updateWorldMatrix(true, false);
+              obj.getWorldDirection(_ARM_FORENSICS_FWD);
+              obj.getWorldPosition(_EC_HIP);
+              _EC_TO_CAM.copy(camera.position).sub(_EC_HIP).normalize();
+              cameraFacingScore = +THREE.MathUtils.clamp(
+                _ARM_FORENSICS_FWD.dot(_EC_TO_CAM),
+                -1,
+                1,
+              ).toFixed(4);
+            }
+          } catch {
+            cameraFacingScore = null;
+          }
+        }
+        return {
+          bone,
+          idleEffective: +wEffBone.idle.toFixed(4),
+          gestureEffective: +wEffBone.gesture.toFixed(4),
+          generativeEffective: +wEffBone.generative.toFixed(4),
+          vrmaEffective: +wEffBone.vrma.toFixed(4),
+          authorityOwner: owner,
+          authorityConflict: owner === 'conflict',
+          angleVsBindDeg: +angleVsBindDeg.toFixed(3),
+          quaternionWxyz: {
+            w: +(qSrc?.w ?? 1).toFixed(4),
+            x: +(qSrc?.x ?? 0).toFixed(4),
+            y: +(qSrc?.y ?? 0).toFixed(4),
+            z: +(qSrc?.z ?? 0).toFixed(4),
+          },
+          eulerYxzDeg: {
+            x: +THREE.MathUtils.radToDeg(_MOTION_AUTH_TELEM_E.x).toFixed(2),
+            y: +THREE.MathUtils.radToDeg(_MOTION_AUTH_TELEM_E.y).toFixed(2),
+            z: +THREE.MathUtils.radToDeg(_MOTION_AUTH_TELEM_E.z).toFixed(2),
+          },
+          cameraFacingScore,
+          conversationalVisibilityProxy: +Math.min(1, angleVsBindDeg / 48).toFixed(4),
+        };
+      });
+      const motionAuthorityRecoveryReport = buildMotionAuthorityRecoveryReport({
+        lockResult: authorityLockResult,
+        speaking,
+        rawGestureId: rawG,
+        gestureLayerW,
+        idleLayerW,
+        idleOverwriteDetected,
+        authorityRecoveryActive,
+        conversationalReachBiasApplied,
+        rows: conversationalBoneTelemetry,
+      });
       const vrmaOverwriteDetected = vrmaLayerW > 0.25 && motionSource === 'VRMA';
       const wEff = {
         idle: idleLayerW,
@@ -4883,7 +4988,14 @@ export function VRMSkeletonManager({
                 : 'blend:generative',
         timelineEventType: _behaviorFrame.event?.type ?? null,
         gestureStateRef: gestureStateRef.current,
+        authorityLockActive: authorityLockResult.lockActive,
+        gestureStrengthFloor: +authorityLockResult.gestureStrengthFloor.toFixed(4),
+        idleSupportCap: +authorityLockResult.idleSupportCap.toFixed(4),
+        authorityRecoveryActive,
+        conversationalBoneTelemetry,
       };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).MOTION_AUTHORITY_RECOVERY_REPORT = motionAuthorityRecoveryReport;
       if (
         idleOverwriteDetected &&
         nowMs - lastMotionAuthorityHardWarnMsRef.current > 2800
@@ -6461,6 +6573,8 @@ export function VRMSkeletonManager({
         gesture:  gestureStateRef.current === 'idle' ? undefined : gestureStateRef.current,
         speaking,
         energy:   stableMotionEnergy,
+        conversationalReachBias:
+          authorityLockResult.lockActive && speaking && gestureStateRef.current !== 'idle',
       };
       safeCall(
         'biomechanicalLayer',

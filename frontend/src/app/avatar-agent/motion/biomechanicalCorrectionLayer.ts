@@ -1304,6 +1304,11 @@ export type BiomechContext = {
   energy?: number;
   /** Whether the avatar is speaking. Used for idle-pose guard. */
   speaking?: boolean;
+  /**
+   * When true (speaking + conversational authority lock), widen forward reach on upper arms
+   * slightly so camera-facing gestures are not soft-clamped toward backward/read‑as‑pinned poses.
+   */
+  conversationalReachBias?: boolean;
 };
 
 // STEP 4 — Idle pose constants (applied when energy < 0.01 && !speaking).
@@ -1439,6 +1444,7 @@ export function applyBiomechanicalLayer(
   const _gesture = (ctx as BiomechContext | undefined)?.gesture;
   const _speaking = (ctx as { speaking?: boolean } | undefined)?.speaking ?? false;
   const _energy   = (ctx as { energy?: number }   | undefined)?.energy   ?? 1;
+  const _reachBias = (ctx as BiomechContext | undefined)?.conversationalReachBias === true;
 
   // Idle arm pose: prevents T-pose freeze when avatar is truly silent.
   // Runs BEFORE clamp so the arm-hang values pass through the limits unchanged.
@@ -1447,8 +1453,17 @@ export function applyBiomechanicalLayer(
   }
 
   // Select per-axis limits based on active gesture.
-  const ul = _upperArmLimits(_gesture);
+  let ul = _upperArmLimits(_gesture);
   const ll = _lowerArmLimits(_gesture);
+  if (_reachBias && _speaking) {
+    ul = {
+      ...ul,
+      xMin: Math.min(ul.xMin, -1.42),
+      xMax: Math.max(ul.xMax, 1.05),
+      yMin: Math.min(ul.yMin, -0.62),
+      yMax: Math.max(ul.yMax, 0.62),
+    };
+  }
 
   _blClampBone(humanoid, 'leftUpperArm',  ul);
   _blClampBone(humanoid, 'rightUpperArm', ul);

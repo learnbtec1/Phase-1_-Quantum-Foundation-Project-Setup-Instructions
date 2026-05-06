@@ -413,7 +413,8 @@ export function computeBehaviorFrame(
     phase,
     t,
     globalT,
-    envelope,
+    /** Never negative — anticipation dip stays semantic via polarity only */
+    envelope: Math.max(0, envelope),
     polarity,
     inertiaActive,
     emotion: { valence: _emotion.valence, arousal: _emotion.arousal },
