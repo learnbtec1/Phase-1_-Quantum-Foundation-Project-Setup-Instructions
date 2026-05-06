@@ -73,6 +73,12 @@ export function tickUnifiedEnergy(input: {
     delta: input.delta,
   });
 
+  if (typeof window !== 'undefined') {
+    // Mirrors smoothed pipeline energy so motion layers can fall back when
+    // viseme-driven peekSpeechEnergy() is still 0 (lip-sync lag / blocked events).
+    (window as Window & { __lastTTSEnergy?: number }).__lastTTSEnergy = smoothedUnified;
+  }
+
   // Log only once per second to avoid console flooding (not gated behind DEBUG_MOTION
   // so it's always available for quick sanity checks).
   const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
