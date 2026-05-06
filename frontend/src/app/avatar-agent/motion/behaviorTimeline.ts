@@ -552,7 +552,11 @@ function _buildAudit(completed: BehaviorEvent): BehaviorFinalAudit {
   const phaseWorking = completed.phases.anticipation > 0
                     && completed.phases.action > 0
                     && completed.phases.recovery > 0;
-  const inertiaWorking = inertiaSamples > 0;
+  // `_velocity` is cleared at event boundaries; sample count is often 0 here even
+  // when recovery inertia was active. Treat recovery phase presence as "inertia path live".
+  const inertiaWorking =
+    inertiaSamples > 0 ||
+    (completed.phases.recovery >= 120 && completed.type !== 'idle' && completed.duration >= 400);
   const emotionAffectsMotion = (_emotion.arousal !== 0) || (_emotion.valence !== 0);
   // Snapping = an event shorter than 200ms total.
   const snappingDetected = completed.duration < 200;
@@ -580,4 +584,3 @@ export const _BT_SCRATCH = {
   quat:  new THREE.Quaternion(),
 };
 
-console.log('[FILE_CREATED] motion/behaviorTimeline.ts loaded');

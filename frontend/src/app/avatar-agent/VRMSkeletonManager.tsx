@@ -2806,30 +2806,12 @@ export function VRMSkeletonManager({
       }
 
       // ─────────────────────────────────────────────────────────────────────
-      // BEHAVIOR ENGINE — semantic intent → gesture event
+      // BEHAVIOR ENGINE — Stage 4 semantic gesture bridge
       //
-      // Pipeline:  speech text → detectIntent (rule-based, AR + EN)
-      //                       → SEMANTIC_GESTURE_MAP   (intent → GestureId)
-      //                       → gestureStateRef         (event-driven slot)
-      //                       → applyFinalPoseToVrm     (raw bone write)
-      //                       → applyBiomechanicalLayer (clamp, never overrides)
-      //
-      // Why two triggers (semantic vs. cyclic):
-      //   • Semantic trigger fires AT MOST ONCE per utterance, debounced by
-      //     `lastSemanticUtteranceHashRef`. This is what makes "Hello" wave,
-      //     "نعم" agree, "أفكر" think — discrete, meaningful, time-aligned.
-      //   • Cyclic fallback (`explain` / `point`) keeps long generic utterances
-      //     visually alive when no specific semantic gesture maps. It cycles
-      //     every ~2.4-3.6s with a 600-1100ms pause, mirroring conversational
-      //     hand movement during continuous speech.
-      //
-      // Execution order: this trigger runs INSIDE useFrame, BEFORE the bone
-      // composition stage and BEFORE applyBiomechanicalLayer. The biomechanical
-      // layer is a clamp-only safety net — it never overwrites a fired gesture.
-      //
-      // Safety: respects vrmaActiveRef (no fight with VRMA clip),
-      //         respects thinkGestureActiveRef (will not override think),
-      //         uses absolute writes through the existing gesture slot.
+      // Utterance / listen context → resolveSemanticGesture →
+      // pushBehaviorFromSemanticDecision → BehaviorTimeline queue →
+      // tickBehaviorTimeline → legacy gesture refs (no direct bone writes).
+      // Cyclic generic gesture spam removed — cooldowns live in the bridge.
       const _autoCanFire =
         !vrmaActiveRef?.current &&
         speaking &&
@@ -2837,120 +2819,119 @@ export function VRMSkeletonManager({
         !thinkGestureActiveRef.current &&
         nowMs >= talkGestureNextAtMsRef.current;
 
-      // Semantic intent for this utterance (rule-based, debounced once per
-      // utterance). LLM-side `ab.intent` is consulted as a secondary signal.
-      let _semanticGesture: GestureId | null = null;
-      let _semanticSource: string = '';
-      if (_autoCanFire) {
-        const _utterText = getEmbodimentUtteranceTextForSemantics() ?? '';
-        if (_utterText.length > 0) {
-          // Compact stable hash: length + first 32 chars covers utterance edits.
-          const _utterHash = `${_utterText.length}:${_utterText.slice(0, 32)}`;
-          if (_utterHash !== lastSemanticUtteranceHashRef.current) {
-            const _detected = detectIntent(_utterText);
-            // Map: rule-based intent → discrete gesture (start of utterance).
-            // Priority is implicit in map order — first match wins per detectIntent.
-            const SEMANTIC_GESTURE_MAP: Partial<Record<typeof _detected, GestureId>> = {
-              greeting:    'wave',      // p100 — social open
-              agreeing:    'agree',     // p100 — short nod + open palms
-              confirming:  'agree',     // p100 — same shape as agree
-              emphasizing: 'point',     // p 90 — finger / forward arm
-              thinking:    'think',     // p 90 — hand-to-chin pose
-              explaining:  'explain',   // p 80 — open arms
-              questioning: 'explain',   // p 70 — open arms (inquiry)
-              disagreeing: 'point',     // p 80 — sharp forward gesture (denial)
-            };
-            const _mapped = SEMANTIC_GESTURE_MAP[_detected];
-            if (_mapped && lastSemanticIntentFiredRef.current !== _detected) {
-              _semanticGesture = _mapped;
-              _semanticSource  = `rule:${_detected}`;
-              lastSemanticUtteranceHashRef.current = _utterHash;
-              lastSemanticIntentFiredRef.current   = _detected;
-            }
-          }
+      const _autoCanFireListen =
+        !vrmaActiveRef?.current &&
+        !speaking &&
+        listening &&
+        gestureStateRef.current === 'idle' &&
+        !thinkGestureActiveRef.current &&
+        nowMs >= talkGestureNextAtMsRef.current;
+
+      if (_autoCanFireListen) {
+        const dListen = resolveSemanticGesture({
+          detectedIntent: 'neutral',
+          ruleConfidence: 0,
+          llmIntent: null,
+          utteranceText: '',
+          utteranceHash: '',
+          speaking: false,
+          listening: true,
+          nowMs,
+          stableMotionEnergy,
+        });
+        const evListen =
+          dListen.gesture === 'listen' && dListen.confidence >= 0.45
+            ? pushBehaviorFromSemanticDecision(dListen, nowMs)
+            : null;
+        if (typeof window !== 'undefined') {
+          const curL = getCurrentBehavior();
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (window as any).__SEMANTIC_GESTURE_DEBUG = {
+            semanticIntent: 'listening',
+            selectedGesture: dListen.gesture,
+            confidence: +dListen.confidence.toFixed(3),
+            blockedByCooldown: dListen.debugCooldownHit === true,
+            speaking,
+            stableEnergy: +stableMotionEnergy.toFixed(3),
+            activeGestureTimeline: evListen?.type ?? curL?.type ?? 'idle',
+            fallbackToIdle: dListen.gesture === 'idle',
+          };
         }
-        // Secondary: LLM-side intent for greeting (covers utterances where the
-        // rule-based detector finds neutral but the LLM tagged greeting).
-        if (!_semanticGesture && ab.intent === 'greeting') {
-          _semanticGesture = 'wave';
-          _semanticSource  = 'llm:greeting';
+        if (evListen) {
+          talkGestureActiveRef.current = true;
+          talkGestureNextAtMsRef.current = evListen.startTime + evListen.duration + 480 + Math.random() * 140;
         }
       }
 
-      if (_semanticGesture) {
-        // ── EVENT-BASED gesture spawn — delegated to BehaviorTimeline ──
-        // The timeline owns: phase split (anticipation / action / recovery),
-        // emotion modulation (arousal/valence → amplitude/tempo), the queue,
-        // and inertia tracking. We sync the resulting event into the legacy
-        // refs below in the per-frame tick block so the existing renderer
-        // continues to read its familiar inputs.
-        const _baseAmp =
-          _semanticGesture === 'wave'  ? 0.95 :
-          _semanticGesture === 'agree' ? 0.62 :
-          _semanticGesture === 'think' ? 0.70 :
-          _semanticGesture === 'point' ? 0.85 :
-          0.80;
-        const _baseDur =
-          _semanticGesture === 'wave'  ? 2400 :
-          _semanticGesture === 'think' ? 2800 :
-          _semanticGesture === 'agree' ? 1300 :
-          2400;
-        const _evt = pushBehaviorEvent(_semanticGesture as TimelineGestureId, nowMs, {
-          baseDurationMs: _baseDur,
-          intensity:      _baseAmp,
-          priority:       100,
-          source:         _semanticSource,
-        });
-        talkGestureActiveRef.current = true;
-        // Cool-down: minimum 150 ms after gesture ends before a new one can fire.
-        // Reduced from 600 ms to allow natural rapid gesture sequences while speaking.
-        talkGestureNextAtMsRef.current = _evt.startTime + _evt.duration + 150 + Math.random() * 200;
-        if (typeof window !== 'undefined') {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (window as any).__behaviorEngine = {
-            lastFiredGesture: _semanticGesture,
-            lastFiredSource:  _semanticSource,
-            lastFiredAtMs:    nowMs,
-            firedThisUtterance: lastSemanticIntentFiredRef.current,
-            timelineEventDurationMs: _evt.duration,
-            timelinePhases: _evt.phases,
-            timelineIntensity: _evt.intensity,
-          };
-        }
-        if (process.env.NODE_ENV === 'development') {
-          console.log('[BEHAVIOR_GESTURE_FIRED]', {
-            gesture:    _semanticGesture,
-            source:     _semanticSource,
-            durationMs: _evt.duration,
-            phases:     _evt.phases,
-            intensity:  +_evt.intensity.toFixed(2),
-            queueDepth: getBehaviorQueueDepth(),
-            nextAt:     Math.round(talkGestureNextAtMsRef.current),
-          });
-        }
-      } else if (_autoCanFire && (ab.gesture === 'talk' || ab.intent === 'explaining' || ab.intent === 'emphasizing')) {
-        // ── CYCLIC fallback — keeps long generic utterances alive ──
-        const _autoGesture: GestureId = ab.intent === 'emphasizing' ? 'point' : 'explain';
-        const _evt = pushBehaviorEvent(_autoGesture as TimelineGestureId, nowMs, {
-          baseDurationMs: 2700,
-          intensity:      0.78 + Math.random() * 0.22,
-          priority:       80, // lower than semantic (100), preemptable
-          source:         `cyclic:${ab.intent ?? 'talk'}`,
-        });
-        talkGestureActiveRef.current = true;
-        talkGestureNextAtMsRef.current = _evt.startTime + _evt.duration + 150 + Math.random() * 200;
-        if (process.env.NODE_ENV === 'development') {
-          console.log('[AUTO_GESTURE_FROM_INTENT]', {
-            gesture:    _autoGesture,
-            intent:     ab.intent,
-            durationMs: _evt.duration,
-            phases:     _evt.phases,
-            nextAt:     Math.round(talkGestureNextAtMsRef.current),
-          });
+      if (_autoCanFire) {
+        const _utterText = getEmbodimentUtteranceTextForSemantics() ?? '';
+        if (_utterText.length > 0) {
+          const _utterHash = `${_utterText.length}:${_utterText.slice(0, 32)}`;
+          if (_utterHash !== lastSemanticUtteranceHashRef.current) {
+            lastSemanticUtteranceHashRef.current = _utterHash;
+            const _det = detectIntentDetailed(_utterText);
+            const decision = resolveSemanticGesture({
+              detectedIntent: _det.intent,
+              ruleConfidence: _det.confidence,
+              llmIntent: ab.intent,
+              utteranceText: _utterText,
+              utteranceHash: _utterHash,
+              speaking,
+              listening: false,
+              nowMs,
+              stableMotionEnergy,
+            });
+            const ev =
+              decision.gesture !== 'idle' && decision.confidence >= 0.38
+                ? pushBehaviorFromSemanticDecision(decision, nowMs)
+                : null;
+            if (typeof window !== 'undefined') {
+              const cur = getCurrentBehavior();
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (window as any).__SEMANTIC_GESTURE_DEBUG = {
+                semanticIntent: _det.intent,
+                selectedGesture: decision.gesture,
+                confidence: +decision.confidence.toFixed(3),
+                blockedByCooldown: decision.debugCooldownHit === true,
+                speaking,
+                stableEnergy: +stableMotionEnergy.toFixed(3),
+                activeGestureTimeline: ev?.type ?? cur?.type ?? 'idle',
+                fallbackToIdle: decision.gesture === 'idle',
+                ruleReason: _det.reason,
+              };
+            }
+            if (ev) {
+              talkGestureActiveRef.current = true;
+              lastSemanticIntentFiredRef.current = _det.intent;
+              talkGestureNextAtMsRef.current = ev.startTime + ev.duration + 420 + Math.random() * 180;
+              if (typeof window !== 'undefined') {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                (window as any).__behaviorEngine = {
+                  lastFiredGesture: ev.type,
+                  lastFiredSource: `semanticBridge:${decision.sourceIntent}`,
+                  lastFiredAtMs: nowMs,
+                  firedThisUtterance: _det.intent,
+                  timelineEventDurationMs: ev.duration,
+                  timelinePhases: ev.phases,
+                  timelineIntensity: ev.intensity,
+                };
+              }
+              if (process.env.NODE_ENV === 'development') {
+                // eslint-disable-next-line no-console
+                console.log('[BEHAVIOR_GESTURE_FIRED]', {
+                  gesture: ev.type,
+                  source: decision.sourceIntent,
+                  durationMs: ev.duration,
+                  phases: ev.phases,
+                  intensity: +ev.intensity.toFixed(2),
+                  queueDepth: getBehaviorQueueDepth(),
+                  nextAt: Math.round(talkGestureNextAtMsRef.current),
+                });
+              }
+            }
+          }
         }
       } else if (talkGestureActiveRef.current && (gestureStateRef.current === 'idle' || !speaking)) {
-        // Gesture ended naturally OR speech stopped → clear the active flag so
-        // the next cycle (after cool-down) can fire when we resume speaking.
         talkGestureActiveRef.current = false;
       }
     }
@@ -4561,7 +4542,11 @@ export function VRMSkeletonManager({
       vrmaLayerW = vrmaBonePose.size > 0 ? 1 : 0;
     } else {
       gestureLayerW = isProceduralGestureFrame
-        ? THREE.MathUtils.clamp(intentArm * 0.85 + gBlend * 0.15, 0, 1)
+        ? THREE.MathUtils.clamp(
+            intentArm * 0.92 + gBlend * 0.14 + gestureAmplitudeMulRef.current * 0.18,
+            rawG !== 'idle' ? 0.44 : 0,
+            1,
+          )
         : 0;
       generativeLayerW =
         genMix > 0.02 ? THREE.MathUtils.clamp(genMix, 0, 1) : 0;
@@ -4664,6 +4649,35 @@ export function VRMSkeletonManager({
         kinematicBoneWeightOverrides.set(bone, {
           ...existingOverride,
           vrma: newVrma,
+        });
+      }
+    }
+
+    // Motion recovery: during procedural semantic gestures, upper body favors gesture
+    // blend so idle bind pose cannot visually swallow open-hand / reach poses.
+    if (
+      !generativeExternalActive &&
+      isProceduralGestureFrame &&
+      rawG !== 'idle' &&
+      motionSource === 'GESTURE' &&
+      !VRMA_ISOLATION_TEST
+    ) {
+      const gStrong = THREE.MathUtils.clamp(gestureLayerW * 1.08, 0.48, 1);
+      const iSoft = THREE.MathUtils.clamp(1 - gStrong * 0.5, 0.38, 0.92);
+      for (const bone of [
+        'lua',
+        'rua',
+        'lla',
+        'rla',
+        'leftShoulder',
+        'rightShoulder',
+        'chest',
+      ]) {
+        const prev = kinematicBoneWeightOverrides.get(bone) ?? {};
+        kinematicBoneWeightOverrides.set(bone, {
+          ...prev,
+          idle: Math.min(prev.idle ?? 1, iSoft),
+          gesture: Math.max(prev.gesture ?? 0, gStrong),
         });
       }
     }

@@ -1,6 +1,11 @@
 /**
  * Lightweight procedural gesture clips — additive on top of intent motor (no VRMA replacement).
  * Rotations are small Euler deltas (radians), YXZ order, matching intentMotorLayer bone keys.
+ *
+ * Stage 4: conversational meaning is routed through `semanticGestureBridge.ts` →
+ * `behaviorTimeline.pushBehaviorFromSemanticDecision` → timeline `wave` / `explain` /
+ * `point` / `think`. Clips here (`listening`, `emphasis`) align with calm teacher
+ * body language when referenced by downstream gesture players.
  */
 'use client';
 

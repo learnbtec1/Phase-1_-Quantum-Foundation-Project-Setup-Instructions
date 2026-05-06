@@ -43,8 +43,9 @@ const TICK_MS = 150;
 const MIN_SINCE_LAST_ACTION_MS = 1200;
 /** While speaking, allow faster ambient / micro-motion re-queue (avoids “frozen body” under VRMA + TTS). */
 const MIN_SINCE_LAST_ACTION_SPEAKING_MS = 300;
-const MIN_BETWEEN_SCHEDULER_PLAYS_MS = 4000;
-const MIN_BETWEEN_SCHEDULER_PLAYS_SPEAKING_MS = 2200;
+const MIN_BETWEEN_SCHEDULER_PLAYS_MS = 3400;
+/** Conversational re-queue — was 2200ms (felt like “frozen arms” between beats). */
+const MIN_BETWEEN_SCHEDULER_PLAYS_SPEAKING_MS = 1500;
 
 let started = false;
 let intervalId: number | null = null;
@@ -101,7 +102,7 @@ async function schedulerTick(): Promise<void> {
   const semanticIntent = speaking ? getUtteranceSemanticIntent() : null;
   const minBetween = speaking
     ? semanticIntent
-      ? 1200 + Math.floor(Math.random() * 400)
+      ? 850 + Math.floor(Math.random() * 350)
       : MIN_BETWEEN_SCHEDULER_PLAYS_SPEAKING_MS
     : MIN_BETWEEN_SCHEDULER_PLAYS_MS;
   const minSinceAction = speaking ? MIN_SINCE_LAST_ACTION_SPEAKING_MS : MIN_SINCE_LAST_ACTION_MS;
