@@ -87,7 +87,7 @@ export type ResolvedCogniPersonality = {
   | responsePersonality.ts       | mood, reply class, delays      | preamble events | async setTimeout paths | intent depth offsets | classifyReply | brain store coupling |
   | personalityEvolution.ts      | 5D vector drift                | indirect        | if polled each frame | getGestureEnergyMul | no | BASE vs adapted |
   | cogniPersonaStance.ts        | stance + perf scales           | indirect        | stance read cheap | semanticGestureMul   | emotion→stance  | awareness engine |
-  | __personalityMotion.ts       | teacher/friend/coach/neutral   | YES in-place motion object | if called each frame | YES openGesture += | tilt bias       | duplicate profile names |
+  | __personalityMotion.ts       | Stage 2: consumer of resolver only | YES in-place motion object | if called each frame | maps gestureIntensity etc. | none (no local persona) | was duplicate profile table (removed) |
 */
 
 // ─── Snapshot cache (no per-frame recompute) ─────────────────────────────────

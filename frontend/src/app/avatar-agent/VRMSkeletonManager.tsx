@@ -94,7 +94,12 @@ import {
 } from '@/store/usePerceptionStore';
 import { readAnalyserRms01 } from '@/lib/audio/audioEnergyExtractor';
 import { getGlobalFrame } from '@/app/avatar-agent/behavior/GlobalMindStore';
-import { tickUnifiedEnergy, getSmoothedUnifiedEnergy } from '@/lib/avatar/unifiedEnergyModel';
+import {
+  tickUnifiedEnergy,
+  getSmoothedUnifiedEnergy,
+  tickStableMotionEnergy,
+  getStableMotionEnergy,
+} from '@/lib/avatar/unifiedEnergyModel';
 import { patchSpeechEmotionEnergy } from '@/ai/voice/speechEmotionBridge';
 import { applyProceduralVrmaLifeOverlay } from './motion/proceduralVrmaLifeOverlay';
 import { applyCinematicMicroLayer } from './motion/cinematicMicroLayer';
@@ -2688,10 +2693,13 @@ export function VRMSkeletonManager({
       return 0;
     }
     const motionEnergyUnified = getUnifiedEnergy();
+    tickStableMotionEnergy(motionEnergyUnified, speaking, safeDelta);
+    const stableMotionEnergy = getStableMotionEnergy();
 
     if (_wAny) {
       _wAny.__ENERGY_DEBUG = {
         motionEnergy: motionEnergyUnified,
+        stableMotionEnergy,
         ttsEnergy: _wAny.__lastTTSEnergy ?? null,
         fallbackActive,
         fallbackEnergy: _fallbackEnergyValue,
@@ -4759,8 +4767,8 @@ export function VRMSkeletonManager({
     // `0.3 + energy * 0.4`. Reads previous-frame smoothed energy from the speech-fusion bus
     // (1-frame lag is imperceptible). Pure floor — never lowers.
     if (speaking) {
-      const _speechEnergyForTiming = motionEnergyUnified;
-      const _speechFloor = 0.3 + _speechEnergyForTiming * 0.4;
+      const _speechEnergyForTiming = stableMotionEnergy;
+      const _speechFloor = 0.28 + _speechEnergyForTiming * 0.34;
       if (_speechFloor > _timingWeight) _timingWeight = _speechFloor;
     }
 
@@ -4773,12 +4781,13 @@ export function VRMSkeletonManager({
         _dg.__motionInputLastMs = _dgNow;
         const _inputLog = {
           speaking,
-          energy:        +motionEnergyUnified.toFixed(3),
+          energy:        +stableMotionEnergy.toFixed(3),
+          energyRaw:   +motionEnergyUnified.toFixed(3),
           timingWeight:  +_timingWeight.toFixed(3),
           intent:        _activeIntent || '(none)',
           diagnosis:
             !speaking ? 'NOT_SPEAKING — motion baseline will be zero' :
-            motionEnergyUnified < 0.01 ? 'ENERGY_ZERO — viseme feed inactive' :
+            stableMotionEnergy < 0.01 ? 'ENERGY_ZERO — viseme feed inactive' :
             _timingWeight < 0.05 ? 'TIMING_SUPPRESSED — intent not driving' :
             'INPUTS_OK',
         };
@@ -4819,20 +4828,18 @@ export function VRMSkeletonManager({
       // ── Intent-driven gesture enrichment (additive, energy-coupled) ──
       // Adds intent-specific motion ON TOP of the speech baseline above so
       // each intent has a recognisable signature, even at low energy.
-      const _intentEnergy = motionEnergyUnified;
+      const _intentEnergy = stableMotionEnergy;
+      const _eCap = Math.min(0.88, Math.max(0, _intentEnergy));
       if (_activeIntent === 'explaining') {
-        // Head nod tracks speech energy; gesture amplitude bumped by 0.3.
-        _motionState.headNod    += _intentEnergy * 0.04;
-        _motionState.openGesture += 0.3;
+        // Head nod tracks **stable** speech energy; gesture bump clamped (no arm spikes).
+        _motionState.headNod += _eCap * 0.035;
+        _motionState.openGesture += 0.22 * (0.35 + 0.65 * _eCap);
       } else if (_activeIntent === 'emphasizing') {
-        // Periodic nod bursts at ~5 Hz, scaled by current speech energy.
         const _burst = Math.abs(Math.sin(_tSpeech * 5.5));
-        _motionState.headNod    += _burst * 0.18 * Math.max(0.3, _intentEnergy);
-        _motionState.openGesture += 0.3 * Math.max(0.3, _intentEnergy);
+        _motionState.headNod += _burst * 0.13 * (0.28 + 0.72 * _eCap);
+        _motionState.openGesture += 0.22 * (0.28 + 0.72 * _eCap);
       } else if (_activeIntent === 'questioning') {
-        // Head tilt is already 0.08; add tiny nod tied to energy + micro-pause
-        // (lower-than-explaining nod magnitude reads as questioning cadence).
-        _motionState.headNod    += _intentEnergy * 0.02;
+        _motionState.headNod += _eCap * 0.018;
       }
     }
 
@@ -4977,7 +4984,7 @@ export function VRMSkeletonManager({
     // neutral). Toggle at runtime via `window.__personalityProfile`.
     applyPersonalityMotion(_motionState, {
       speaking,
-      energy: motionEnergyUnified,
+      energy: stableMotionEnergy,
       timeSec: t,
       intent: _activeIntent,
     });
@@ -4991,7 +4998,7 @@ export function VRMSkeletonManager({
     // All deltas additive; frame-rate-independent via safeDelta.
     applyMotionDynamics(_motionState, {
       speaking,
-      energy:   motionEnergyUnified,
+      energy:   stableMotionEnergy,
       intent:   _activeIntent,
       timeSec:  t,
       deltaSec: safeDelta,
@@ -5005,8 +5012,31 @@ export function VRMSkeletonManager({
     applyDirectionalMotionModulation(_motionState, {
       avatarRoot: vrm?.scene?.parent ?? vrm?.scene ?? null,
       targetWorld: camera.position,
-      energy: motionEnergyUnified,
+      energy: stableMotionEnergy,
     });
+
+    // Stage 3 — extra output smoothing on head (nod/tilt) before visibility amp;
+    // openGesture slightly faster so arms stay conversational without vibration.
+    {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _g = globalThis as any;
+      _g.__procHeadNodSmoothed ??= 0;
+      _g.__procHeadTiltSmoothed ??= 0;
+      _g.__procOpenGestSmoothed ??= 0;
+      const aH = speaking ? 0.17 : 0.11;
+      const aG = speaking ? 0.24 : 0.14;
+      _g.__procHeadNodSmoothed = THREE.MathUtils.lerp(_g.__procHeadNodSmoothed, _motionState.headNod, aH);
+      _g.__procHeadTiltSmoothed = THREE.MathUtils.lerp(_g.__procHeadTiltSmoothed, _motionState.headTilt, aH * 0.92);
+      _g.__procOpenGestSmoothed = THREE.MathUtils.lerp(_g.__procOpenGestSmoothed, _motionState.openGesture, aG);
+      if (!speaking) {
+        _g.__procHeadNodSmoothed *= 0.9;
+        _g.__procHeadTiltSmoothed *= 0.9;
+        _g.__procOpenGestSmoothed *= 0.88;
+      }
+      _motionState.headNod = _g.__procHeadNodSmoothed;
+      _motionState.headTilt = _g.__procHeadTiltSmoothed;
+      _motionState.openGesture = _g.__procOpenGestSmoothed;
+    }
 
     // Visibility amplification (tight clamps prevent cinematic distortion).
     // Reduced from 3.0 → 1.3 after +Z-Forward alignment to stop arm over-extension
@@ -5031,8 +5061,8 @@ export function VRMSkeletonManager({
       if (!_g.__lastMotionTraceLogAt) _g.__lastMotionTraceLogAt = -Infinity;
       if (_now - _g.__lastMotionTraceLogAt > _MOTION_TRACE_MS) {
         _g.__lastMotionTraceLogAt = _now;
-        const _energy = motionEnergyUnified;
-        const _envelope = speaking ? Math.max(_energy, 0.5) : _energy;
+        const _energy = stableMotionEnergy;
+        const _envelope = speaking ? Math.max(_energy, 0.2) : _energy;
         const _suppressed =
           speaking &&
           Math.abs(_ampedMotionState.headNod) < 0.001 &&
@@ -6064,7 +6094,7 @@ export function VRMSkeletonManager({
         const _llaRot  = _bFmt(_llaLive);
 
         const _armNonZero = !!(_luaRot && (Math.abs(_luaRot.x) + Math.abs(_luaRot.y) + Math.abs(_luaRot.z)) > 0.05);
-        const _motionActive = speaking && motionEnergyUnified > 0.01;
+        const _motionActive = speaking && stableMotionEnergy > 0.01;
         const _inputOk = _motionActive && _timingWeight > 0.05;
         const _poseReached = _armNonZero;
 
@@ -6084,7 +6114,7 @@ export function VRMSkeletonManager({
         const _diagnosis = {
           motionActive:     _motionActive,
           speakingFlag:     speaking,
-          energyLevel:      +motionEnergyUnified.toFixed(3),
+          energyLevel:      +stableMotionEnergy.toFixed(3),
           timingWeight:     +_timingWeight.toFixed(3),
           poseResetWorking: finalPose.size > 0,
           armBoneInFinalPose: !!(finalPose.get('lua') || finalPose.get('leftUpperArm')),
@@ -6132,7 +6162,7 @@ export function VRMSkeletonManager({
         time:      typeof performance !== 'undefined' ? performance.now() * 0.001 : 0,
         speaking,
         intent:    _activeIntent,
-        intensity: embFrame?.intent?.intensity ?? motionEnergyUnified,
+        intensity: embFrame?.intent?.intensity ?? stableMotionEnergy,
       };
       const _lbState = computeProceduralLowerBody(_lowerBodyCtx);
       safeCall('applyLowerBodyPose', () => applyLowerBodyState(vrm, _lbState), undefined);
@@ -6203,7 +6233,7 @@ export function VRMSkeletonManager({
       const _bioCtx: BiomechContext = {
         gesture:  gestureStateRef.current === 'idle' ? undefined : gestureStateRef.current,
         speaking,
-        energy:   motionEnergyUnified,
+        energy:   stableMotionEnergy,
       };
       safeCall(
         'biomechanicalLayer',
@@ -6251,9 +6281,9 @@ export function VRMSkeletonManager({
       // Read from DevTools: window.__motionLayers / window.__MOTION_AUTHORITY_MAP
       if (typeof window !== 'undefined' && (_execLoop.frameCount % 16 === 0)) {
         const _g   = gestureStateRef.current;
-        const _en  = motionEnergyUnified;
+        const _en  = stableMotionEnergy;
         const _gWeight   = _g !== 'idle' ? 1.0 : 0.0;
-        const _intWeight = speaking ? Math.max(0.3, _en) : 0.0;
+        const _intWeight = speaking ? Math.min(0.82, Math.max(0.22, _en)) : 0.0;
         const _idleWeight = (!speaking && _en < 0.01) ? 1.0 : Math.max(0, 1.0 - _gWeight - _intWeight);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (window as any).__motionLayers = {

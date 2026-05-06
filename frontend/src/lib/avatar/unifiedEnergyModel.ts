@@ -2,12 +2,28 @@
  * Single smoothed energy signal for body motion + performance scales.
  * Ingests intentEnergy (brain), behavior intent intensity (Level-7 frame), and audio RMS
  * only here — motion layers must not read raw RMS directly.
+ *
+ * Stage 3 — **stableMotionEnergy**: one human-like, low-jitter scalar for procedural
+ * motion (attack/release, dead-zone, burst limiting, hysteresis). Call
+ * `tickStableMotionEnergy` once per frame after the raw viseme/TTS blend is known,
+ * then read `getStableMotionEnergy()` from motion layers (not raw viseme/RMS).
  */
 'use client';
 
 import { updateSpeechDriveFromUnifiedEnergy } from '@/lib/avatar/speechDriveState';
 
 const SMOOTH = 0.15;
+
+/** Hysteresis band on the *energy scalar* (not the speaking flag). */
+const HYST_ENTER = 0.12;
+const HYST_EXIT = 0.06;
+const DEAD_ZONE = 0.024;
+const BURST_MAX_STEP = 0.09;
+
+let stableMotionEnergy = 0;
+let _burstLimited = 0;
+let _hystActive = false;
+let _lastStableDebug: Record<string, unknown> = {};
 
 /**
  * Dynamic idle floor.
@@ -34,10 +50,101 @@ function clamp01(x: number): number {
 export function resetUnifiedEnergyForSession(): void {
   smoothedUnified = IDLE_FLOOR_SILENT;
   lastEnergyLogMs = 0;
+  stableMotionEnergy = 0;
+  _burstLimited = 0;
+  _hystActive = false;
 }
 
 export function getSmoothedUnifiedEnergy(): number {
   return smoothedUnified;
+}
+
+/**
+ * Authoritative procedural motion energy (0–1). Updated only via
+ * {@link tickStableMotionEnergy} — not raw viseme/RMS.
+ */
+export function getStableMotionEnergy(): number {
+  return stableMotionEnergy;
+}
+
+/**
+ * Human-like stabilization of the already-blended raw motion energy (viseme peek +
+ * TTS fallback, etc.). Call once per frame after raw `motionEnergyUnified` is computed.
+ */
+export function tickStableMotionEnergy(raw01: number, speaking: boolean, deltaSec: number): void {
+  const dt = Math.min(Math.max(deltaSec, 0), 0.1);
+  const raw = clamp01(raw01);
+
+  if (!speaking) {
+    _hystActive = false;
+    const alphaSilence = 1 - Math.exp(-dt * 4.2);
+    stableMotionEnergy += (0 - stableMotionEnergy) * alphaSilence;
+    if (stableMotionEnergy < 0.0035) stableMotionEnergy = 0;
+    _burstLimited *= Math.pow(0.9, dt * 60);
+    if (_burstLimited < 0.01) _burstLimited = 0;
+
+    _lastStableDebug = {
+      rawSpeechEnergy: +raw.toFixed(4),
+      smoothedEnergy: +_burstLimited.toFixed(4),
+      stableMotionEnergy: +stableMotionEnergy.toFixed(4),
+      active: false,
+      hysteresis: { enteredAt: HYST_ENTER, exitedAt: HYST_EXIT },
+      damping: {
+        burstReduction: 0,
+        smoothing: +alphaSilence.toFixed(3),
+      },
+      gestureGate: {
+        proceduralAllowed: false,
+        amplificationClamped: true,
+      },
+    };
+    if (typeof window !== 'undefined') {
+      (window as Window & { __MOTION_ENERGY_DEBUG?: unknown }).__MOTION_ENERGY_DEBUG = _lastStableDebug;
+    }
+    return;
+  }
+
+  const maxStep = BURST_MAX_STEP * Math.max(1, dt * 60);
+  const jump = raw - _burstLimited;
+  const burstLimited =
+    Math.abs(jump) > maxStep ? _burstLimited + Math.sign(jump) * maxStep : raw;
+  _burstLimited = clamp01(burstLimited);
+
+  if (_burstLimited >= HYST_ENTER) _hystActive = true;
+  else if (_burstLimited < HYST_EXIT) _hystActive = false;
+
+  let target = _burstLimited;
+  if (Math.abs(target - stableMotionEnergy) < DEAD_ZONE) {
+    target = stableMotionEnergy;
+  }
+
+  const rising = target > stableMotionEnergy;
+  const alphaAttack = 1 - Math.exp(-dt * 16);
+  const alphaRelease = 1 - Math.exp(-dt * 4.8);
+  const alpha = rising ? alphaAttack : alphaRelease;
+  stableMotionEnergy += (target - stableMotionEnergy) * alpha;
+  stableMotionEnergy = clamp01(Math.min(stableMotionEnergy, 0.96));
+
+  const burstReduction = Math.abs(raw - _burstLimited);
+
+  _lastStableDebug = {
+    rawSpeechEnergy: +raw.toFixed(4),
+    smoothedEnergy: +_burstLimited.toFixed(4),
+    stableMotionEnergy: +stableMotionEnergy.toFixed(4),
+    active: _hystActive,
+    hysteresis: { enteredAt: HYST_ENTER, exitedAt: HYST_EXIT },
+    damping: {
+      burstReduction: +burstReduction.toFixed(4),
+      smoothing: +(rising ? alphaAttack : alphaRelease).toFixed(3),
+    },
+    gestureGate: {
+      proceduralAllowed: stableMotionEnergy > 0.038 || speaking,
+      amplificationClamped: true,
+    },
+  };
+  if (typeof window !== 'undefined') {
+    (window as Window & { __MOTION_ENERGY_DEBUG?: unknown }).__MOTION_ENERGY_DEBUG = _lastStableDebug;
+  }
 }
 
 /**
