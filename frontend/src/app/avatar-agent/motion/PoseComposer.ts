@@ -256,10 +256,21 @@ export function blendPoseLayers(params: {
     const qV = vrma.get(key);
     if (qV && wV > 1e-6) _Q.slerp(qV, Math.min(1, wV));
 
-    // Guard against NaN propagation before persisting.
+    // Guard against NaN propagation before persisting — never snap to bind/T-pose
+    // when we already have a valid last pose for this bone (hard fail-safe).
     if (!_isValidQuat(_Q)) {
-      // Corrupted blend result — fall back to bind, do NOT update LVP.
-      out.set(key, b);
+      const last = _lastFinalPose.get(key);
+      if (last && _isValidQuat(last)) {
+        out.set(key, last);
+      } else {
+        out.set(key, b);
+        let stored = _lastFinalPose.get(key);
+        if (!stored) {
+          stored = new THREE.Quaternion();
+          _lastFinalPose.set(key, stored);
+        }
+        stored.copy(b).normalize();
+      }
       continue;
     }
 

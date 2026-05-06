@@ -405,11 +405,40 @@ let _lastTtsFailEmbodimentAt = 0;
 const TTS_FAIL_EMBODIMENT_COOLDOWN_MS = 850;
 
 /**
+ * Phase 1 — Fail-safe avatar motion when TTS is broken.
+ *
+ * Sets `window.__ttsFailed = true` so the motion pipeline (VRMSkeletonManager)
+ * can synthesise a fallback speaking state + pseudo-speech energy and keep
+ * gesturing.  Cleared by `markTtsResumed()` on the next successful play.
+ *
+ * Throttled `[TTS_FALLBACK_TRIGGERED]` log to avoid console spam on retry storms.
+ */
+let _lastFallbackLogAt = 0;
+function markTtsFailed(reason?: string): void {
+  if (typeof window === 'undefined') return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (window as any).__ttsFailed = true;
+  const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  if (nowMs - _lastFallbackLogAt > 1000) {
+    _lastFallbackLogAt = nowMs;
+    console.warn('[TTS_FALLBACK_TRIGGERED]', reason ?? '');
+  }
+}
+
+/** Phase 6 — clear fallback once real TTS playback is confirmed. */
+function markTtsResumed(): void {
+  if (typeof window === 'undefined') return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if ((window as any).__ttsFailed) (window as any).__ttsFailed = false;
+}
+
+/**
  * Digital Human: when TTS fails, show **Thinking** motion + **confused** face instead of freezing.
  * Throttled to avoid gesture spam on rapid retries.
  */
 export function emitTtsFailureEmbodiment(_reason?: string): void {
   if (typeof window === 'undefined') return;
+  markTtsFailed(_reason);
   const now = Date.now();
   if (now - _lastTtsFailEmbodimentAt < TTS_FAIL_EMBODIMENT_COOLDOWN_MS) return;
   _lastTtsFailEmbodimentAt = now;
@@ -879,6 +908,7 @@ export async function speakWithTTS(
           '[speakWithTTS] TTS hourly quota exceeded. Set TTS_CALL_LIMIT_PER_HOUR in backend .env (e.g. 200) or wait ~1 hour.',
           errBody.slice(0, 120),
         );
+        markTtsFailed(`quota_${res.status}`);
         return null;
       }
 
@@ -1048,6 +1078,7 @@ export async function speakWithTTS(
       }
       if (isTtsHourlyQuota(res.status, errTail)) {
         logWarn('TTS','[speakWithTTS] TTS hourly quota after retry.', errTail.slice(0, 120));
+        markTtsFailed(`quota_${res.status}_retry`);
         return null;
       }
       if (isPermanentTtsProviderFailure(errTail, res.status)) {
@@ -1155,6 +1186,7 @@ export async function speakWithTTS(
         '[speakWithTTS] Backend returned no audio — cannot play.',
         JSON.stringify(data)?.slice(0, 300),
       );
+      markTtsFailed('no_audio_payload');
       emitTtsFailureEmbodiment('no_audio_payload');
       return null;
     }
@@ -1477,6 +1509,7 @@ export async function speakWithTTS(
       }
       if (!playedOk) {
         cleanup();
+        markTtsFailed('audio_play_failed');
         emitTtsFailureEmbodiment('audio_play_failed');
         return null;
       }
@@ -1485,6 +1518,7 @@ export async function speakWithTTS(
       await waitAudioReady(audio);
       rebindVisemesIfDurationDrift();
       _clientTtsPlaying = true;
+      markTtsResumed();
       // eslint-disable-next-line no-console
       logDebug('TTS','[TTS] ✅ SUCCESS');
       // eslint-disable-next-line no-console -- pipeline audit (renamed from [TTS ENERGY] to avoid collision with unifiedEnergyModel log)
@@ -1539,6 +1573,7 @@ export async function speakWithTTS(
         await waitAudioReady(audio);
         rebindVisemesIfDurationDrift();
         _clientTtsPlaying = true;
+        markTtsResumed();
         // eslint-disable-next-line no-console
         logDebug('TTS','[TTS] ✅ SUCCESS');
         // eslint-disable-next-line no-console -- pipeline audit (renamed from [TTS ENERGY] to avoid collision)
@@ -1566,6 +1601,7 @@ export async function speakWithTTS(
   } catch (err) {
     // Catch errors from fetch, JSON, or blob creation
     logWarn('TTS','[speakWithTTS] TTS pipeline exception:', err);
+    markTtsFailed('pipeline_exception');
     emitTtsFailureEmbodiment('pipeline_exception');
     if (mySid === _ttsSessionId) {
       detachPlaybackElementListeners();

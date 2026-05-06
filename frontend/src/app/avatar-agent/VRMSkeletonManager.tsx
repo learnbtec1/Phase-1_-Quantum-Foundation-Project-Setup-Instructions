@@ -749,6 +749,16 @@ const FINGER_CURL_CLAP        = 0.48;
 const AGREE_FINGER_CURL_R      = 0.0;
 const AGREE_FINGER_CURL_L      = 0.0;
 
+// ─── TTS fallback signal (no allocations per frame) ─────────────────────
+// Smooth pseudo-speech envelope for when window.__ttsFailed === true.
+// Two summed sines mimic a syllable cadence + sub-syllabic micro-modulation.
+// Range stays in [~0.0, ~0.6]; floor clamp guarantees a floor that prevents
+// the motion pipeline from collapsing to dead-state.
+function getFallbackEnergy(time: number): number {
+  const e = 0.3 + 0.2 * Math.sin(time * 6) + 0.1 * Math.sin(time * 13);
+  return e < 0.05 ? 0.05 : e;
+}
+
 // ─── Talk nudge (idle micro-gestures while speaking) ────
 const TALK_NUDGE_FREQ      = 6.2;
 const TALK_NUDGE_AMP       = 0.045;
@@ -2477,7 +2487,53 @@ export function VRMSkeletonManager({
       localSpeakingRef.current = false;
       localSpeakingUntilMsRef.current = 0;
     }
-    const speaking = isTalkingRef.current || _localSpeakActive;
+
+    function getUnifiedSpeakingState(): boolean {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const lifecycle =
+        typeof window !== 'undefined'
+          ? ((window as any).__speechLifecycle as
+              | {
+                  isSpeaking?: boolean;
+                  blockedCount?: { prematureEnd: number; overlappingStart: number; debounced: number };
+                }
+              | null
+              | undefined)
+          : null;
+
+      const bc = lifecycle?.blockedCount;
+      if (bc && (bc.prematureEnd > 0 || bc.overlappingStart > 0)) {
+        if (typeof window !== 'undefined' && !(window as Window & { __speakBlockWarned?: boolean }).__speakBlockWarned) {
+          (window as Window & { __speakBlockWarned?: boolean }).__speakBlockWarned = true;
+          console.warn('[SPEAK_BLOCK_DETECTED]', bc);
+        }
+        // Temporary bypass: motion/effects layers saw speaking=false while TTS played — unblock gestures.
+        return true;
+      }
+
+      const fromLifecycle = lifecycle?.isSpeaking === true;
+      const fromRef = isTalkingRef.current === true;
+      return fromLifecycle || fromRef || _localSpeakActive;
+    }
+
+    // Phase 1/3 — TTS fail-safe: when the BFF/audio path fails, force speaking
+    // and synthesise an energy envelope so the avatar keeps gesturing.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fallbackActive =
+      typeof window !== 'undefined' && (window as any).__ttsFailed === true;
+
+    const speaking = getUnifiedSpeakingState() || fallbackActive;
+
+    if (typeof window !== 'undefined') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__SPEAK_DEBUG = {
+        lifecycle: (window as any).__speechLifecycle ?? null,
+        isTalkingRef: isTalkingRef.current,
+        fallbackActive,
+        unified: speaking,
+      };
+    }
+
     const listening = isListeningRef?.current ?? false;
     const thinking  = isThinkingRef?.current  ?? false;
     const motorMul = motorSpeedMulRef?.current ?? 1;
@@ -2569,6 +2625,43 @@ export function VRMSkeletonManager({
     });
     const _unifiedNow = getSmoothedUnifiedEnergy();
     patchSpeechEmotionEnergy(_unifiedNow);
+
+    // Phase 4 — energy pipeline with TTS-fail fallback.
+    //   1. Real viseme/speech energy when present (>0.01).
+    //   2. Otherwise the smoothed unified TTS energy (window.__lastTTSEnergy).
+    //   3. Otherwise, when fallbackActive, the synthetic getFallbackEnergy(t).
+    // Computed once per frame; getFallbackEnergy is module-scope (no allocations).
+    const _fbT = (typeof performance !== 'undefined' ? performance.now() : Date.now()) * 0.001;
+    const _fallbackEnergyValue = fallbackActive ? getFallbackEnergy(_fbT) : 0;
+    function getUnifiedEnergy(): number {
+      const e = peekSpeechEnergy();
+      if (e > 0.01) return e;
+      if (typeof window === 'undefined') return fallbackActive ? _fallbackEnergyValue : 0;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const fallbackRaw = (window as any).__lastTTSEnergy;
+      const ttsFallback =
+        typeof fallbackRaw === 'number' && Number.isFinite(fallbackRaw) ? fallbackRaw : 0;
+      if (ttsFallback > 0.01) return ttsFallback;
+      return fallbackActive ? _fallbackEnergyValue : 0;
+    }
+    const motionEnergyUnified = getUnifiedEnergy();
+
+    if (typeof window !== 'undefined') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__ENERGY_DEBUG = {
+        motionEnergy: motionEnergyUnified,
+        ttsEnergy: (window as any).__lastTTSEnergy ?? null,
+        fallbackActive,
+        fallbackEnergy: _fallbackEnergyValue,
+      };
+      // Phase 7 — fail-safe debug surface.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__TTS_FALLBACK_DEBUG = {
+        ttsFailed: (window as any).__ttsFailed === true,
+        fallbackEnergy: _fallbackEnergyValue,
+        speaking,
+      };
+    }
 
     // ── [ENERGY_FLOW] — always-on throttled probe (250ms) ─────────────────────
     // Captures the exact values that drive motion so we can verify the
@@ -4622,7 +4715,7 @@ export function VRMSkeletonManager({
     // `0.3 + energy * 0.4`. Reads previous-frame smoothed energy from the speech-fusion bus
     // (1-frame lag is imperceptible). Pure floor — never lowers.
     if (speaking) {
-      const _speechEnergyForTiming = peekSpeechEnergy();
+      const _speechEnergyForTiming = motionEnergyUnified;
       const _speechFloor = 0.3 + _speechEnergyForTiming * 0.4;
       if (_speechFloor > _timingWeight) _timingWeight = _speechFloor;
     }
@@ -4636,12 +4729,12 @@ export function VRMSkeletonManager({
         _dg.__motionInputLastMs = _dgNow;
         const _inputLog = {
           speaking,
-          energy:        +peekSpeechEnergy().toFixed(3),
+          energy:        +motionEnergyUnified.toFixed(3),
           timingWeight:  +_timingWeight.toFixed(3),
           intent:        _activeIntent || '(none)',
           diagnosis:
             !speaking ? 'NOT_SPEAKING — motion baseline will be zero' :
-            peekSpeechEnergy() < 0.01 ? 'ENERGY_ZERO — viseme feed inactive' :
+            motionEnergyUnified < 0.01 ? 'ENERGY_ZERO — viseme feed inactive' :
             _timingWeight < 0.05 ? 'TIMING_SUPPRESSED — intent not driving' :
             'INPUTS_OK',
         };
@@ -4682,7 +4775,7 @@ export function VRMSkeletonManager({
       // ── Intent-driven gesture enrichment (additive, energy-coupled) ──
       // Adds intent-specific motion ON TOP of the speech baseline above so
       // each intent has a recognisable signature, even at low energy.
-      const _intentEnergy = peekSpeechEnergy();
+      const _intentEnergy = motionEnergyUnified;
       if (_activeIntent === 'explaining') {
         // Head nod tracks speech energy; gesture amplitude bumped by 0.3.
         _motionState.headNod    += _intentEnergy * 0.04;
@@ -4840,7 +4933,7 @@ export function VRMSkeletonManager({
     // neutral). Toggle at runtime via `window.__personalityProfile`.
     applyPersonalityMotion(_motionState, {
       speaking,
-      energy: peekSpeechEnergy(),
+      energy: motionEnergyUnified,
       timeSec: t,
       intent: _activeIntent,
     });
@@ -4854,7 +4947,7 @@ export function VRMSkeletonManager({
     // All deltas additive; frame-rate-independent via safeDelta.
     applyMotionDynamics(_motionState, {
       speaking,
-      energy:   peekSpeechEnergy(),
+      energy:   motionEnergyUnified,
       intent:   _activeIntent,
       timeSec:  t,
       deltaSec: safeDelta,
@@ -4868,7 +4961,7 @@ export function VRMSkeletonManager({
     applyDirectionalMotionModulation(_motionState, {
       avatarRoot: vrm?.scene?.parent ?? vrm?.scene ?? null,
       targetWorld: camera.position,
-      energy: peekSpeechEnergy(),
+      energy: motionEnergyUnified,
     });
 
     // Visibility amplification (tight clamps prevent cinematic distortion).
@@ -4894,7 +4987,7 @@ export function VRMSkeletonManager({
       if (!_g.__lastMotionTraceLogAt) _g.__lastMotionTraceLogAt = -Infinity;
       if (_now - _g.__lastMotionTraceLogAt > _MOTION_TRACE_MS) {
         _g.__lastMotionTraceLogAt = _now;
-        const _energy = peekSpeechEnergy();
+        const _energy = motionEnergyUnified;
         const _envelope = speaking ? Math.max(_energy, 0.5) : _energy;
         const _suppressed =
           speaking &&
@@ -5923,7 +6016,7 @@ export function VRMSkeletonManager({
         const _llaRot  = _bFmt(_llaLive);
 
         const _armNonZero = !!(_luaRot && (Math.abs(_luaRot.x) + Math.abs(_luaRot.y) + Math.abs(_luaRot.z)) > 0.05);
-        const _motionActive = speaking && peekSpeechEnergy() > 0.01;
+        const _motionActive = speaking && motionEnergyUnified > 0.01;
         const _inputOk = _motionActive && _timingWeight > 0.05;
         const _poseReached = _armNonZero;
 
@@ -5943,7 +6036,7 @@ export function VRMSkeletonManager({
         const _diagnosis = {
           motionActive:     _motionActive,
           speakingFlag:     speaking,
-          energyLevel:      +peekSpeechEnergy().toFixed(3),
+          energyLevel:      +motionEnergyUnified.toFixed(3),
           timingWeight:     +_timingWeight.toFixed(3),
           poseResetWorking: finalPose.size > 0,
           armBoneInFinalPose: !!(finalPose.get('lua') || finalPose.get('leftUpperArm')),
@@ -5991,7 +6084,7 @@ export function VRMSkeletonManager({
         time:      typeof performance !== 'undefined' ? performance.now() * 0.001 : 0,
         speaking,
         intent:    _activeIntent,
-        intensity: embFrame?.intent?.intensity ?? peekSpeechEnergy(),
+        intensity: embFrame?.intent?.intensity ?? motionEnergyUnified,
       };
       const _lbState = computeProceduralLowerBody(_lowerBodyCtx);
       safeCall('applyLowerBodyPose', () => applyLowerBodyState(vrm, _lbState), undefined);
@@ -6062,7 +6155,7 @@ export function VRMSkeletonManager({
       const _bioCtx: BiomechContext = {
         gesture:  gestureStateRef.current === 'idle' ? undefined : gestureStateRef.current,
         speaking,
-        energy:   peekSpeechEnergy(),
+        energy:   motionEnergyUnified,
       };
       safeCall(
         'biomechanicalLayer',
@@ -6107,7 +6200,7 @@ export function VRMSkeletonManager({
       // Read from DevTools: window.__motionLayers
       if (typeof window !== 'undefined' && (_execLoop.frameCount % 16 === 0)) {
         const _g   = gestureStateRef.current;
-        const _en  = peekSpeechEnergy();
+        const _en  = motionEnergyUnified;
         const _gWeight   = _g !== 'idle' ? 1.0 : 0.0;
         const _intWeight = speaking ? Math.max(0.3, _en) : 0.0;
         const _idleWeight = (!speaking && _en < 0.01) ? 1.0 : Math.max(0, 1.0 - _gWeight - _intWeight);
@@ -6718,6 +6811,25 @@ export function VRMSkeletonManager({
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (window as any).__executionDiagnosis = _report;
       }
+    }
+
+    // ── Runtime assertions — motion dead / energy mismatch (throttled ~1 Hz) ──
+    if (_execLoop.frameCount % 60 === 0) {
+      if (!speaking && motionEnergyUnified === 0) {
+        console.warn('[MOTION_DEAD_STATE]', { speaking, energy: motionEnergyUnified });
+      }
+      if (speaking && motionEnergyUnified === 0) {
+        console.error('[CRITICAL] SPEAKING_WITH_ZERO_ENERGY');
+      }
+    }
+    if (typeof window !== 'undefined') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__FINAL_RUNTIME_CHECK = {
+        speaking,
+        energy: motionEnergyUnified,
+        logsReduced: true,
+        gesturesPossible: speaking && motionEnergyUnified > 0.05,
+      };
     }
 
     // ── BONE AUTHORITY: end-of-frame root-cause emit + close trace group ──────
