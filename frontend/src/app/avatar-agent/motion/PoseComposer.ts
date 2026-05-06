@@ -263,13 +263,15 @@ export function blendPoseLayers(params: {
       if (last && _isValidQuat(last)) {
         out.set(key, last);
       } else {
-        out.set(key, b);
+        // Never snap straight to bind when `base` (LVP or bind seed) is valid — preserves continuity.
+        const safe = _isValidQuat(base) ? base : b;
+        out.set(key, safe);
         let stored = _lastFinalPose.get(key);
         if (!stored) {
           stored = new THREE.Quaternion();
           _lastFinalPose.set(key, stored);
         }
-        stored.copy(b).normalize();
+        stored.copy(safe).normalize();
       }
       continue;
     }

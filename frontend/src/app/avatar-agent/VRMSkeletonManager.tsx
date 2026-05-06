@@ -2754,15 +2754,15 @@ export function VRMSkeletonManager({
         headposeBlendRef.current = Math.max(headposeBlendRef.current, 0.55);
         headposeUntilMsRef.current = Math.max(headposeUntilMsRef.current, nowMs + 1200);
       }
-      if (ab.gesture === 'talk' && speaking) {
-        gestureAmplitudeMulRef.current = Math.max(gestureAmplitudeMulRef.current, 0.88);
-      }
+      // Amplitude is driven solely by `tickBehaviorTimeline` → envelope (no stacking).
       if (ab.pose === 'thinking' && gestureStateRef.current === 'idle' && !thinkGestureActiveRef.current) {
         thinkGestureActiveRef.current = true;
-        gestureStateRef.current = 'think';
-        gestureStartRef.current = nowMs;
-        gestureAmplitudeMulRef.current = Math.max(gestureAmplitudeMulRef.current, 0.75);
-        gestureDurationRef.current = 3000;
+        pushBehaviorEvent('think', nowMs, {
+          baseDurationMs: 3000,
+          intensity:      0.75,
+          priority:       90,
+          source:           'auto:thinking-avatarBehavior',
+        });
       }
 
       // ─────────────────────────────────────────────────────────────────────
@@ -2947,10 +2947,12 @@ export function VRMSkeletonManager({
     const gestureIsIdle = gestureStateRef.current === 'idle';
     if (thinking && gestureIsIdle && !thinkGestureActiveRef.current && !vrmaActiveEarly) {
       thinkGestureActiveRef.current = true;
-      gestureStateRef.current = 'think';
-      gestureStartRef.current = nowMs;
-      gestureAmplitudeMulRef.current = 0.75;
-      gestureDurationRef.current = 3000;
+      pushBehaviorEvent('think', nowMs, {
+        baseDurationMs: 3000,
+        intensity:      0.75,
+        priority:       90,
+        source:           'auto:thinking-cognitive',
+      });
     } else if (!thinking && thinkGestureActiveRef.current) {
       thinkGestureActiveRef.current = false;
       if (gestureStateRef.current === 'think') {
@@ -2992,6 +2994,10 @@ export function VRMSkeletonManager({
     // `gestureStateRef.current` reflects the timeline's resolved state for
     // this frame.
     const _behaviorFrame: BehaviorFrame = tickBehaviorTimeline(nowMs);
+    // FIX 2 + FIX 3: envelope-only amplitude — no Math.max stacking; when the
+    // timeline has no active event the envelope is 0 → no lingering gesture gain.
+    // Clamp ≥0 so anticipation-phase negative envelopes never invert downstream gAmp.
+    gestureAmplitudeMulRef.current = Math.max(0, _behaviorFrame.envelope);
     if (_behaviorFrame.event) {
       const _ev = _behaviorFrame.event;
       // Sync the timeline event into the legacy refs every frame. The
@@ -2999,14 +3005,6 @@ export function VRMSkeletonManager({
       gestureStateRef.current   = _ev.type as GestureId;
       gestureStartRef.current   = _ev.startTime;
       gestureDurationRef.current = _ev.duration;
-      // Drive amplitude from the envelope curve so anticipation /action /
-      // recovery shape the gesture rather than a flat per-event constant.
-      // Floor at 0.18 keeps the renderer's `gAmp` formula in a non-trivial
-      // range (the existing fadeIn/fadeOut still attenuate at the edges).
-      gestureAmplitudeMulRef.current = Math.max(
-        0.18,
-        _ev.intensity * Math.max(0, _behaviorFrame.envelope),
-      );
     } else if (gestureStateRef.current !== 'idle' && !vrmaActiveRef?.current) {
       // Timeline reports idle but the renderer is still in a gesture state
       // (legacy bridge). Let the existing duration-based transition at
@@ -6846,6 +6844,12 @@ export function VRMSkeletonManager({
         energy: motionEnergyUnified,
         logsReduced: true,
         gesturesPossible: speaking && motionEnergyUnified > 0.05,
+      };
+      (window as any).__RUNTIME_CHECK = {
+        speaking,
+        energy: motionEnergyUnified,
+        gestureActive: Math.max(0, _behaviorFrame.envelope) > 0.05,
+        hasMotion: motionEnergyUnified > 0.05,
       };
     }
 
