@@ -336,6 +336,15 @@ export function clearBehaviorQueue(): void {
   _queue.length = 0;
 }
 
+/**
+ * Drop only queued behaviors; keep the active timeline event running through recovery.
+ * Used on `avatar:speak:end` so lip/audio finishing early does not zero envelope mid-gesture
+ * while procedural arms are still within their behavior duration.
+ */
+export function clearPendingBehaviorQueue(): void {
+  _queue.length = 0;
+}
+
 export function getCurrentBehavior(): BehaviorEvent | null {
   return _current;
 }

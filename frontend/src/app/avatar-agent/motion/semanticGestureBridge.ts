@@ -220,7 +220,7 @@ function resolveSemanticGestureImpl(input: ResolveSemanticGestureInput): Semanti
     return {
       gesture: 'explain',
       confidence: rc,
-      duration: 2680,
+      duration: input.speaking ? 2960 : 2680,
       intensity: 0.6 + e * 0.08,
       interruptible: true,
       sourceIntent: 'questioning',
@@ -228,14 +228,14 @@ function resolveSemanticGestureImpl(input: ResolveSemanticGestureInput): Semanti
   }
 
   if (intent === 'explaining' && rc >= 0.38) {
-    if (nowBlocked('explain', input.nowMs, CD.explain)) {
+    if (nowBlocked('explain', input.nowMs, explainCooldownMs(input.speaking))) {
       return idle('explain-cooldown', true);
     }
     touch('explain', input.nowMs);
     return {
       gesture: 'explain',
       confidence: rc,
-      duration: 2650,
+      duration: input.speaking ? 3200 : 2750,
       intensity: 0.62 + e * 0.1,
       interruptible: true,
       sourceIntent: 'explaining',
@@ -265,7 +265,7 @@ function resolveSemanticGestureImpl(input: ResolveSemanticGestureInput): Semanti
       return {
         gesture: 'explain',
         confidence: Math.max(0.44, rc || 0.44),
-        duration: 2_580,
+        duration: 2_760,
         intensity: 0.54 + e * 0.09,
         interruptible: true,
         sourceIntent: 'neutral-speaking-hold',

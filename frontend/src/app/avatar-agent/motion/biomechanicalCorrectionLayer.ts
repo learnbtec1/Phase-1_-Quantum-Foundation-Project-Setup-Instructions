@@ -1146,7 +1146,7 @@ export function applyIntentMotionState(
     // ─── SHOULDERS — axis-map driven (open = clavicle roll, twist = shrug) ─
     if (gShoulders > 0) {
       const shoulderOpenMul =
-        intentKey === 'explaining' || intentKey === 'emphasizing' ? 0.51 : 0.34;
+        intentKey === 'explaining' || intentKey === 'emphasizing' ? 0.58 : 0.34;
       mulBoneByMap(pose, 'leftShoulder',  'open',  shoulderOpenMul * og * gShoulders);
       mulBoneByMap(pose, 'rightShoulder', 'open',  shoulderOpenMul * og * gShoulders);
       mulBoneByMap(pose, 'leftShoulder',  'twist', 0.1 * og * gShoulders);
@@ -1201,7 +1201,7 @@ export function applyIntentMotionState(
 
   // Camera-facing emphasis — explaining draws attention on Y + slight yaw for readability.
   if (intent === 'explaining' || intent === 'emphasizing') {
-    mulBone(pose, 'head', 0.035 * w, 0.058 * w, 0.022 * w);
+    mulBone(pose, 'head', 0.038 * w, 0.067 * w, 0.026 * w);
     clampBoneAxis(pose, 'head', CLAMP_HEAD);
   }
 

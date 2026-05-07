@@ -29,11 +29,23 @@ export function simulateHumanPerception(params: {
     };
   }
   const sh = params.shell;
+  const gw = sh.motion.gestureLayerW;
+  const te = sh.embodiment.timelineEnvelope;
+  const motorShown =
+    gw * 0.42 +
+    te * 0.42 +
+    Math.min(1, sh.speech.motionEnergyUnified * 1.45) * 0.18;
+  // When diagnostics briefly lag envelope vs. stable speech energy (e.g. end-of-utterance transition),
+  // avoid forcing readability to zero while still speaking with non-dead motion cues.
+  const speechResidualHold =
+    sh.speech.speaking &&
+    !sh.speech.speakingZeroEnergy &&
+    gw + te < 0.055 &&
+    sh.speech.stableMotionEnergy > 0.07
+      ? Math.min(0.2, sh.speech.stableMotionEnergy * 0.36)
+      : 0;
   const readability =
-    sh.motion.gestureLayerW * 0.42 +
-    sh.embodiment.timelineEnvelope * 0.42 +
-    Math.min(1, sh.speech.motionEnergyUnified * 1.45) * 0.18 -
-    (sh.motion.idleDominatesGesture ? 0.18 : 0);
+    motorShown + speechResidualHold - (sh.motion.idleDominatesGesture ? 0.18 : 0);
 
   const warmth = params.emotion.warmth * 0.42 + readability * 0.38 + params.realismSeed * 0.12;
   const intel =

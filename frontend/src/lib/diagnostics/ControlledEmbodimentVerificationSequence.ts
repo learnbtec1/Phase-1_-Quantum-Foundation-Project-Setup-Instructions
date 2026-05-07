@@ -613,8 +613,14 @@ export function startControlledEmbodimentVerificationSequence(): { cancel: () =>
       phasesCompleted.push('phase3_thinking');
 
       const p4: Sample[] = [];
-      dispatchAvatar('avatar:gesture', { type: 'hands_up', duration: 10, side: 'both', intensity: 0.9 });
-      dispatchAvatar('avatar:gesture', { type: 'explain', duration: 14, side: 'both', intensity: 0.88 });
+      // Long open-explanation window: overlap explains so sampling still sees envelope/gesture
+      // weight after TTS may end (timeline must not be nuked on speak:end mid-recovery).
+      dispatchAvatar('avatar:gesture', { type: 'hands_up', duration: 7, side: 'both', intensity: 0.9 });
+      dispatchAvatar('avatar:gesture', { type: 'explain', duration: 22, side: 'both', intensity: 0.88 });
+      const phase4ExplainOverlapId = window.setTimeout(() => {
+        dispatchAvatar('avatar:gesture', { type: 'explain', duration: 14, side: 'both', intensity: 0.86 });
+      }, 10_000);
+      signal.addEventListener('abort', () => window.clearTimeout(phase4ExplainOverlapId), { once: true });
       void speakWithTTS('I can help explain programming, AI, and avatar systems.', { emotion: 'encouraging' });
       await collectSamples(20_000, signal, p4);
       trace.push(...executionTraceRows(p4));

@@ -88,7 +88,7 @@ import {
   getAnticipationOverlay,
   setEmotion as setBehaviorEmotion,
   getEmotion as getBehaviorEmotion,
-  clearBehaviorQueue,
+  clearPendingBehaviorQueue,
   type BehaviorFrame,
   type TimelineGestureId,
 } from './motion/behaviorTimeline';
@@ -1507,9 +1507,9 @@ export function VRMSkeletonManager({
       lastSemanticUtteranceHashRef.current = '';
       lastSemanticIntentFiredRef.current = '';
       resetSemanticGestureBridgeState();
-      // Drop any queued behaviors so the next utterance starts from a clean
-      // timeline (prevents stale wave/explain firing into the next sentence).
-      clearBehaviorQueue();
+      // Drop pending queued behaviors only — keep the current envelope alive until its
+      // natural recovery completes (prevents late-phase collapse when TTS ends before gesture).
+      clearPendingBehaviorQueue();
     };
     window.addEventListener('avatar:speak:start', onStart as EventListener);
     window.addEventListener('avatar:speak:end',   onEnd);
@@ -4820,9 +4820,9 @@ export function VRMSkeletonManager({
           const q = gesturePose.get(key);
           if (!q) return;
           _CONV_REACH_E.set(
-            explainish ? 0.024 : 0.014,
-            yawSign * (explainish ? 0.058 : 0.036) * reachMul,
-            explainish ? -0.055 : -0.038,
+            explainish ? 0.029 : 0.014,
+            yawSign * (explainish ? 0.069 : 0.036) * reachMul,
+            explainish ? -0.062 : -0.038,
             'YXZ',
           );
           _CONV_REACH_Q.setFromEuler(_CONV_REACH_E);
