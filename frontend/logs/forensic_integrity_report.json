@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-05-07T01:01:30.859Z",
+  "forensicIntegrityScore": 71,
+  "telemetryTrustworthiness": 70,
+  "analyzerAgreementProxy": 63,
+  "rootCauseConsistency": 86,
+  "confidenceStability": 67,
+  "executionChainReliability": 48,
+  "estimatedFalsePositiveRate": 0,
+  "dominantTrustedRootCause": "No trusted dominant root cause — telemetry nominal after arbitration"
+}
