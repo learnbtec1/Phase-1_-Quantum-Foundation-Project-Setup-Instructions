@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-05-07T01:25:50.485Z",
+  "fresh": false,
+  "staleAgeMs": 21976.30000001192,
+  "violations": [
+    {
+      "id": "STALE_DIAGNOSTICS_SHELL",
+      "detail": "updatedAt lag 21976ms > 5000ms",
+      "severity": "warn"
+    }
+  ],
+  "trustworthiness": 70,
+  "duplicateTimelineSnapshots": 0
+}

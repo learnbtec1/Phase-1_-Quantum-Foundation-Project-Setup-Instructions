@@ -1,0 +1,9 @@
+{
+  "timestamp": "2026-05-07T01:25:50.486Z",
+  "dominantTrustedRootCause": "Insufficient fresh telemetry — defer dominant root cause",
+  "confidence": 0.35,
+  "arbitrationTrace": [
+    "sanity_not_fresh:downweight_autonomous_and_chains"
+  ],
+  "autonomousAnalyzerAgreement": false
+}
