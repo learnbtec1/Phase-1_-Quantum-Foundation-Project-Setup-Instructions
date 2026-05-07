@@ -75,4 +75,13 @@ export type EmbodimentIntelligenceReportPayload = {
   recommendedNextFix: string;
   quality: EmbodimentQualityBreakdown;
   evolutionNotes: string[];
+  /** Post-stabilization forensic brain summary (trustworthy root-cause layer). */
+  forensicStabilization?: {
+    forensicIntegrityScore: number;
+    dominantTrustedRootCause: string;
+    telemetryTrustworthiness: number;
+    repairRecommended: boolean;
+    suppressedFalsePositives: number;
+    executionChainReliability: number;
+  };
 };

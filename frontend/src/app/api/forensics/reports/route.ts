@@ -32,6 +32,12 @@ export async function POST(req: Request): Promise<NextResponse> {
       graph: path.join(logsDir, 'root_cause_graph.json'),
       temporal: path.join(logsDir, 'temporal_behavior_chains.json'),
       failures: path.join(logsDir, 'active_embodiment_failures.json'),
+      forensicIntegrity: path.join(logsDir, 'forensic_integrity_report.json'),
+      rootCauseAuthority: path.join(logsDir, 'root_cause_authority_report.json'),
+      telemetrySanity: path.join(logsDir, 'telemetry_sanity_report.json'),
+      falsePositive: path.join(logsDir, 'false_positive_analysis.json'),
+      executionChainValidation: path.join(logsDir, 'execution_chain_validation.json'),
+      forensicConfidenceStability: path.join(logsDir, 'forensic_confidence_stability.json'),
     };
 
     await writeFile(
@@ -49,6 +55,38 @@ export async function POST(req: Request): Promise<NextResponse> {
     await writeFile(
       paths.failures,
       `${JSON.stringify(body.activeFailures ?? [], null, 2)}\n`,
+      'utf8',
+    );
+
+    const ext = body as Record<string, unknown>;
+    await writeFile(
+      paths.forensicIntegrity,
+      `${JSON.stringify(ext.forensic_integrity_report ?? {}, null, 2)}\n`,
+      'utf8',
+    );
+    await writeFile(
+      paths.rootCauseAuthority,
+      `${JSON.stringify(ext.root_cause_authority_report ?? {}, null, 2)}\n`,
+      'utf8',
+    );
+    await writeFile(
+      paths.telemetrySanity,
+      `${JSON.stringify(ext.telemetry_sanity_report ?? {}, null, 2)}\n`,
+      'utf8',
+    );
+    await writeFile(
+      paths.falsePositive,
+      `${JSON.stringify(ext.false_positive_analysis ?? {}, null, 2)}\n`,
+      'utf8',
+    );
+    await writeFile(
+      paths.executionChainValidation,
+      `${JSON.stringify(ext.execution_chain_validation ?? {}, null, 2)}\n`,
+      'utf8',
+    );
+    await writeFile(
+      paths.forensicConfidenceStability,
+      `${JSON.stringify(ext.forensic_confidence_stability ?? {}, null, 2)}\n`,
       'utf8',
     );
 

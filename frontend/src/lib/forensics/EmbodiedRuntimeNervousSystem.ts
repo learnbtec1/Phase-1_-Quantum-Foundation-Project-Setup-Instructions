@@ -4,9 +4,12 @@ import type { DiagnosticsWindowSurface } from '@/lib/diagnostics/diagnosticsType
 import type { AutonomousDiagnosticsReport } from '@/lib/diagnostics/diagnosticsTypes';
 import { isDiagnosticsEnabled } from '@/lib/diagnostics/diagnosticsStore';
 import { diagTimelineIntentProbe } from '@/lib/diagnostics/diagnosticsTimelineProbe';
+import { getRecentTimelineSnapshots } from '@/lib/diagnostics/runtimeTimelineRecorder';
 
+import { assembleForensicStabilizationBundle } from './brain/assembleForensicStabilizationBundle';
+import type { ForensicStabilizationBundle } from './brain/assembleForensicStabilizationBundle';
 import { buildEmbodiedCausalGraph } from './EmbodiedCausalGraph';
-import { embodiedRuntimePruneStale, embodiedRuntimeRecordSignature } from './EmbodiedRuntimeMemory';
+import { embodiedRuntimePruneStale } from './EmbodiedRuntimeMemory';
 import { embodimentSignalEmitCycleComplete } from './EmbodimentSignalBus';
 import { computeEmbodiedRuntimeHealth } from './EmbodiedRuntimeHealthEngine';
 import { computeEmbodimentQualityScores } from './EmbodimentQualityScorer';
@@ -31,6 +34,13 @@ import type {
 const CYCLE_MS = 60_000;
 let _timer: number | null = null;
 let _started = false;
+
+/** Latest forensic stabilization bundle — populated each intelligence build. */
+let _lastForensicBundle: ForensicStabilizationBundle | null = null;
+
+export function getLastForensicStabilizationBundle(): ForensicStabilizationBundle | null {
+  return _lastForensicBundle;
+}
 
 function readDiagnosticsShell(): DiagnosticsWindowSurface | null {
   if (typeof window === 'undefined') return null;
@@ -64,14 +74,6 @@ function rankInspectTargets(failures: ActiveFailure[]): { file: string; score: n
   return { file: best || 'unknown', score: bestScore };
 }
 
-function elevateFailures(list: ActiveFailure[]): ActiveFailure[] {
-  for (const f of list) {
-    const ev = embodiedRuntimeRecordSignature(f.id);
-    f.confidence = Math.min(0.98, Math.max(f.confidence, ev));
-  }
-  return list;
-}
-
 function buildSummary(r: EmbodimentIntelligenceReportPayload): string {
   const lines = [
     '[EMBODIMENT_INTELLIGENCE_SUMMARY]',
@@ -85,6 +87,11 @@ function buildSummary(r: EmbodimentIntelligenceReportPayload): string {
     ...r.activeEmbodimentFailures.slice(0, 8).map((f) => `- [${f.severity}] ${f.summary}`),
     '',
     `Recommended fix: ${r.recommendedNextFix}`,
+    '',
+    '[FORENSIC_BRAIN]',
+    r.forensicStabilization
+      ? `Integrity=${r.forensicStabilization.forensicIntegrityScore} trust=${r.forensicStabilization.telemetryTrustworthiness} repair=${r.forensicStabilization.repairRecommended}`
+      : 'n/a',
   ];
   return lines.join('\n');
 }
@@ -156,14 +163,14 @@ export function buildEmbodimentIntelligenceReport(): EmbodimentIntelligenceRepor
     });
   }
 
-  let failures: ActiveFailure[] = elevateFailures([
+  let failures: ActiveFailure[] = [
     ...spatialFails,
     ...facialFails,
     ...speechBody.failures,
     ...semantic.failures,
     ...authorityFails,
     ...schedulerFails,
-  ]);
+  ];
 
   failures.sort((a, b) => b.confidence - a.confidence);
 
@@ -172,6 +179,17 @@ export function buildEmbodimentIntelligenceReport(): EmbodimentIntelligenceRepor
     steps: c.timeline,
     confidence: c.confidence,
   }));
+
+  const forensicBundle = assembleForensicStabilizationBundle({
+    shell,
+    timelineSnapshots: getRecentTimelineSnapshots(36),
+    rawFailures: failures,
+    behavioralChains,
+    autonomous,
+    nowMs: Date.now(),
+  });
+  _lastForensicBundle = forensicBundle;
+  failures = forensicBundle.stabilizedFailures;
 
   const spatialIntegrityProxy =
     shell.vrm.humanoidPresent && shell.vrm.invalidQuatSamplesSinceFlush === 0 ? 0.92 : 0.55;
@@ -216,24 +234,22 @@ export function buildEmbodimentIntelligenceReport(): EmbodimentIntelligenceRepor
 
   const diagFn = autonomous?.mostProblematicFunctions?.[0]?.function ?? 'unknown';
 
-  let dominant = top
-    ? `${top.summary} (${top.subsystem}; conf=${top.confidence.toFixed(2)})`
-    : 'No dominant embodied failure — stack within nominal envelope';
-
-  if (behavioralChains[0] && behavioralChains[0].confidence > (top?.confidence ?? 0)) {
-    dominant = `Temporal chain: ${behavioralChains[0].chainId} (conf=${behavioralChains[0].confidence.toFixed(2)})`;
-  }
+  const dominant = forensicBundle.root_cause_authority_report.dominantTrustedRootCause;
 
   const evolutionNotes = [
     `personalityProfile=${personality.profileSummary}`,
     autonomous?.dominantRootCause
       ? `diagnosticsAnalyzer.hint=${autonomous.dominantRootCause}`
       : 'diagnosticsAnalyzer.hint=n/a',
+    `forensicIntegrity=${forensicBundle.forensic_integrity_report.forensicIntegrityScore}`,
+    `telemetryTrust=${forensicBundle.telemetry_sanity_report.trustworthiness}`,
   ];
 
-  const recommendedNextFix = top
-    ? `Inspect ${hotTarget.file} — ${top.summary}`
-    : 'Maintain observability; no critical embodied regressions this window.';
+  const recommendedNextFix = forensicBundle.governor.repairRecommended
+    ? top
+      ? `Inspect ${hotTarget.file} — ${top.summary}`
+      : `Address dominant trusted cause: ${forensicBundle.root_cause_authority_report.dominantTrustedRootCause}`
+    : 'Forensic governor withheld autonomous repair — require confidence ≥0.55, fresh telemetry, and validated chains.';
 
   const temporalCollapseChains = behavioralChains.filter((c) =>
     /collapse|frozen|idle|starvation/i.test(c.chainId + c.steps.join(' ')),
@@ -267,10 +283,24 @@ export function buildEmbodimentIntelligenceReport(): EmbodimentIntelligenceRepor
       intentProbe: probe,
     },
     confidenceLevel:
-      failures.filter((f) => f.severity === 'critical').length > 0 ? 'high-alert' : 'moderate',
+      failures.filter((f) => f.severity === 'critical').length > 0
+        ? 'high-alert'
+        : forensicBundle.forensic_integrity_report.forensicIntegrityScore >= 72
+          ? 'high-trust'
+          : forensicBundle.forensic_integrity_report.forensicIntegrityScore >= 52
+            ? 'moderate-trust'
+            : 'low-trust',
     recommendedNextFix,
     quality,
     evolutionNotes,
+    forensicStabilization: {
+      forensicIntegrityScore: forensicBundle.forensic_integrity_report.forensicIntegrityScore,
+      dominantTrustedRootCause: forensicBundle.root_cause_authority_report.dominantTrustedRootCause,
+      telemetryTrustworthiness: forensicBundle.forensic_integrity_report.telemetryTrustworthiness,
+      repairRecommended: forensicBundle.governor.repairRecommended,
+      suppressedFalsePositives: forensicBundle.false_positive_analysis.suppressedCount,
+      executionChainReliability: forensicBundle.execution_chain_validation.reliability,
+    },
   };
 }
 
@@ -280,6 +310,12 @@ async function syncEmbodimentReports(payload: {
   temporalChains: Array<{ chainId: string; steps: string[]; confidence: number }>;
   activeFailures: ActiveFailure[];
   summaryText: string;
+  forensic_integrity_report?: Record<string, unknown>;
+  root_cause_authority_report?: Record<string, unknown>;
+  telemetry_sanity_report?: Record<string, unknown>;
+  false_positive_analysis?: Record<string, unknown>;
+  execution_chain_validation?: Record<string, unknown>;
+  forensic_confidence_stability?: Record<string, unknown>;
 }): Promise<void> {
   if (typeof window === 'undefined') return;
   if ((process.env.NEXT_PUBLIC_FORENSICS_REPORT_SYNC ?? '1').trim() === '0') return;
@@ -323,11 +359,15 @@ function runEmbodiedCycle(): void {
 
   const summaryText = buildSummary(intelligenceReport);
 
+  const forensic = _lastForensicBundle;
+
   if (typeof window !== 'undefined') {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (window as any).__EMBODIMENT_INTELLIGENCE_REPORT = intelligenceReport;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (window as any).__ROOT_CAUSE_GRAPH_EMBODIED = causalGraph;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).__FORENSIC_STABILIZATION_BUNDLE = forensic;
   }
 
   void syncEmbodimentReports({
@@ -336,6 +376,12 @@ function runEmbodiedCycle(): void {
     temporalChains,
     activeFailures: intelligenceReport.activeEmbodimentFailures,
     summaryText,
+    forensic_integrity_report: forensic?.forensic_integrity_report ?? {},
+    root_cause_authority_report: forensic?.root_cause_authority_report ?? {},
+    telemetry_sanity_report: forensic?.telemetry_sanity_report ?? {},
+    false_positive_analysis: forensic?.false_positive_analysis ?? {},
+    execution_chain_validation: forensic?.execution_chain_validation ?? {},
+    forensic_confidence_stability: forensic?.forensic_confidence_stability ?? {},
   });
 
   embodimentSignalEmitCycleComplete();

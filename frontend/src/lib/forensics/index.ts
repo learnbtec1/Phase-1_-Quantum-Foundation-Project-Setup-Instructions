@@ -18,7 +18,9 @@ export * from './EmbodiedRuntimeHealthEngine';
 export * from './TemporalEmbodimentRecorder';
 export {
   buildEmbodimentIntelligenceReport,
+  getLastForensicStabilizationBundle,
   startEmbodiedRuntimeNervousSystem,
   stopEmbodiedRuntimeNervousSystem,
   __runEmbodiedForensicsCycleOnceForTests,
 } from './EmbodiedRuntimeNervousSystem';
+export * from './brain';
