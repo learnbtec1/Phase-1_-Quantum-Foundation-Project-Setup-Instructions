@@ -52,8 +52,8 @@ const MIN_SINCE_LAST_ACTION_MS = 1200;
 /** While speaking, allow faster ambient / micro-motion re-queue (avoids “frozen body” under VRMA + TTS). */
 const MIN_SINCE_LAST_ACTION_SPEAKING_MS = 300;
 const MIN_BETWEEN_SCHEDULER_PLAYS_MS = 3400;
-/** Conversational re-queue — was 2200ms (felt like “frozen arms” between beats). */
-const MIN_BETWEEN_SCHEDULER_PLAYS_SPEAKING_MS = 1500;
+/** Conversational re-queue — tightened from 1500ms: diagnostics showed sustained min_between blocks during TTS + IDLE motionSource. */
+const MIN_BETWEEN_SCHEDULER_PLAYS_SPEAKING_MS = 1050;
 
 let started = false;
 let intervalId: number | null = null;

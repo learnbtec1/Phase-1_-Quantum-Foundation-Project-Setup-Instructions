@@ -5895,7 +5895,10 @@ export function VRMSkeletonManager({
         intensityMul: proceduralMul,
         neckSway: personaMotion.neckSway,
       }), undefined);
-      diffAndRegisterAuthority(BoneAuthority.VRMA, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
+      // Overlay is micro sway/breath — not VRMA clip tier. Registering VRMA here forced
+      // priority-4 overrides against PoseComposer INTENT (pri 2) → AUTHORITY_CONFLICT
+      // storms on chest/spine/neck during GESTURE + frozen-VRMA paths (see diagnostics).
+      diffAndRegisterAuthority(BoneAuthority.MICRO, finalPose, TRACKED_POSE_KEYS, _authoritySnap);
     }
 
     if (isAvatarMotionTraceOn() && motionTraceFrameRef.current % 100 === 0) {

@@ -95,7 +95,20 @@ export function ingestDiagnosticsFlushProxy(shell: DiagnosticsWindowSurface): vo
   const deltaMs = Math.max(16, ts - prevFrameTs);
   _prevTs.set('_frame', ts);
 
-  const facing = Math.min(1, Math.max(0, g * 1.15 + env * 0.85 - idle * 0.55 + (shell.speech.speaking ? 0.06 : 0)));
+  const speak = shell.speech.speaking;
+  /** Global idle weight stays ~1 even when speech energy drives motion — subtract less while speaking and lift from audio-derived energy so camera-facing proxy matches embodied speech (avoids flat facing=0 false negatives). */
+  const speechEnergyLift = speak
+    ? Math.min(
+        0.45,
+        (shell.speech.stableMotionEnergy ?? 0) * 0.38 +
+          (shell.speech.motionEnergyUnified ?? 0) * 0.14,
+      )
+    : 0;
+  const idlePenalty = speak ? 0.32 : 0.55;
+  const facing = Math.min(
+    1,
+    Math.max(0, g * 1.15 + env * 0.85 - idle * idlePenalty + (speak ? 0.06 : 0) + speechEnergyLift),
+  );
   const readability = Math.min(
     1,
     facing * 0.62 + env * 0.48 + Math.min(1, Math.abs(armRad) * 1.4) * 0.22,

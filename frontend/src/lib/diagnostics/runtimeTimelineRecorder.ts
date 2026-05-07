@@ -162,7 +162,8 @@ function buildSnapshot(): RuntimeTimelineSnapshot | null {
     sch.blocksSinceFlush > 0 ||
     (typeof sch.lastBlockReasonLabel === 'string' && sch.lastBlockReasonLabel.length > 0);
 
-  const idleDominating = mo.idleLayerW > 0.8 && sp.speaking;
+  /** Align with VRMSkeletonManager diagnosticsFrameEnd: global idleLayerW stays ~1 while per-bone overrides handle gesture — raw idle weight ≠ idle authority collapse. */
+  const idleDominating = sp.speaking && mo.idleDominatesGesture;
 
   const armFrozenCond =
     gestureEnvelope > ARM_FROZEN_MIN_ENVELOPE && finalArmMagnitude < ARM_FROZEN_MAX_RAD;
