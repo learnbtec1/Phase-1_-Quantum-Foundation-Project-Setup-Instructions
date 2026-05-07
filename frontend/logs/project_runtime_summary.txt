@@ -1,0 +1,18 @@
+[SUMMARY]
+Runtime health acceptable.
+
+Primary failure:
+schedulerBlocked
+
+Most affected file:
+biomechanicalCorrectionLayer.ts
+
+Most affected subsystem:
+biomech
+
+Evidence:
+gestureWeight=0.00
+idleWeight=1.00
+
+Recommended fix:
+Tune motionScheduler min_between / coupling while speaking if gestures starve.

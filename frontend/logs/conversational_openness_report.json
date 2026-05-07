@@ -1,9 +1,9 @@
 {
-  "timestamp": "2026-05-07T01:01:33.664Z",
-  "opennessScore": 20,
-  "armOpenness": 16,
+  "timestamp": "2026-05-07T02:15:46.566Z",
+  "opennessScore": 0,
+  "armOpenness": 0,
   "shoulderSpreadProxy": 0,
-  "elbowSeparationReadability": 98,
-  "chestParticipation": 26,
-  "conversationalSpread": 7
+  "elbowSeparationReadability": 100,
+  "chestParticipation": 0,
+  "conversationalSpread": 0
 }

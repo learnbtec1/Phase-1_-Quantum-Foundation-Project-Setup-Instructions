@@ -1,0 +1,8 @@
+{
+  "timestamp": "2026-05-07T02:15:46.564Z",
+  "bones": {},
+  "notes": [
+    "Euler/forward vectors are proxy-derived from diagnostics flush until full FK bridge lands.",
+    "Angular velocity uses yaw delta across flush intervals (~≤280ms)."
+  ]
+}

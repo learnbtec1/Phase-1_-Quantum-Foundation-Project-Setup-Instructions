@@ -1,0 +1,53 @@
+{
+  "timestamp": "2026-05-07T02:15:46.566Z",
+  "embodimentHealthScore": 0,
+  "perceivedHumanRealism": 0,
+  "conversationalPresenceScore": 0,
+  "perceivedWarmth": 0,
+  "perceivedIntelligence": 0,
+  "perceivedAliveness": 0,
+  "cognitiveCoreVersion": 1,
+  "behaviorPlan": {
+    "phases": [
+      {
+        "id": "anticipation",
+        "durationMs": 160,
+        "emphasis": "micro_torso_prime"
+      },
+      {
+        "id": "semantic_projection",
+        "durationMs": 520,
+        "emphasis": ""
+      },
+      {
+        "id": "readability_hold",
+        "durationMs": 380,
+        "emphasis": "camera_facing_envelope"
+      },
+      {
+        "id": "recovery",
+        "durationMs": 260,
+        "emphasis": "soft_idle_return"
+      }
+    ],
+    "anticipatoryPriming": {
+      "torsoPreShift": 0,
+      "shoulderOpenness": 0,
+      "gestureAuthorityBoost": 0,
+      "gazeSoften": 0,
+      "velocityDamp": 0,
+      "narrative": []
+    }
+  },
+  "emotionDynamics": {
+    "hesitation": 0.575,
+    "warmth": 0.7,
+    "attentiveness": 0.48,
+    "confidence": 0.81,
+    "curiosity": 0.5599999999999999,
+    "calmAuthority": 0.71,
+    "engagement": 0.45,
+    "reflection": 0.41
+  },
+  "biomechanicalFindings": []
+}

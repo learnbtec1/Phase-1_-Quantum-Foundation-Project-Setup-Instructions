@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-05-07T02:15:46.566Z",
+  "leftHand": {
+    "curlProxy": 0,
+    "wristFlexProxy": 0,
+    "palmOpennessProxy": 0
+  },
+  "rightHand": {
+    "curlProxy": 0,
+    "wristFlexProxy": 0,
+    "palmOpennessProxy": 0
+  },
+  "verifiedFailures": []
+}

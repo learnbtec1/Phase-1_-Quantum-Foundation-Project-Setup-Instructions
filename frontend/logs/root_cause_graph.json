@@ -1,0 +1,75 @@
+{
+  "timestamp": "2026-05-07T02:15:43.311Z",
+  "nodes": [
+    {
+      "id": "facial",
+      "subsystem": "facial",
+      "weight": 2.9256
+    },
+    {
+      "id": "timeline_transition",
+      "subsystem": "motion_authority",
+      "weight": 0.8
+    }
+  ],
+  "edges": [
+    {
+      "from": "speech",
+      "to": "phoneme_viseme",
+      "weight": 0.25,
+      "label": "embodied_stack_coupling"
+    },
+    {
+      "from": "phoneme_viseme",
+      "to": "facial",
+      "weight": 0.25,
+      "label": "embodied_stack_coupling"
+    },
+    {
+      "from": "facial",
+      "to": "semantic_bridge",
+      "weight": 0.25,
+      "label": "embodied_stack_coupling"
+    },
+    {
+      "from": "semantic_bridge",
+      "to": "scheduler",
+      "weight": 0.25,
+      "label": "embodied_stack_coupling"
+    },
+    {
+      "from": "scheduler",
+      "to": "motion_authority",
+      "weight": 0.25,
+      "label": "embodied_stack_coupling"
+    },
+    {
+      "from": "motion_authority",
+      "to": "vrm_skeleton",
+      "weight": 0.25,
+      "label": "embodied_stack_coupling"
+    },
+    {
+      "from": "vrm_skeleton",
+      "to": "spatial",
+      "weight": 0.25,
+      "label": "embodied_stack_coupling"
+    },
+    {
+      "from": "spatial",
+      "to": "visual_realism",
+      "weight": 0.25,
+      "label": "embodied_stack_coupling"
+    },
+    {
+      "from": "semantic_bridge",
+      "to": "timeline_transition",
+      "weight": 0.6,
+      "label": "GESTURE_ACTIVE→SPEAKING_IDLE"
+    }
+  ],
+  "dominantPath": [
+    "facial",
+    "timeline_transition"
+  ]
+}

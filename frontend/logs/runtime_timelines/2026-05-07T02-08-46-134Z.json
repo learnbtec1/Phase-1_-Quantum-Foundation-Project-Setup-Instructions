@@ -1,0 +1,39 @@
+{
+  "timestamp": "2026-05-07T02:08:46.134Z",
+  "speaking": true,
+  "motionSource": "GESTURE",
+  "gestureState": "think",
+  "gestureEnvelope": 1,
+  "gestureLayerW": 1,
+  "idleLayerW": 1,
+  "finalArmMagnitude": 0.7000314578545639,
+  "torsoContribution": null,
+  "headContribution": null,
+  "schedulerState": {
+    "lastBlockReasonId": 0,
+    "lastBlockReasonLabel": "min_between_scheduler_plays",
+    "blocksSinceFlush": 1
+  },
+  "schedulerBlocked": true,
+  "activeIntent": "neutral",
+  "llmIntent": "",
+  "semanticGesture": "idle",
+  "authorityWinner": "GESTURE",
+  "overwrittenBones": [],
+  "vrmState": {
+    "humanoidPresent": true,
+    "autoUpdateHumanBones": true,
+    "invalidQuatSamplesSinceFlush": 0,
+    "nullBoneSamplesSinceFlush": 0
+  },
+  "embodimentState": {
+    "visuallyAlive": true,
+    "gestureVisible": true,
+    "conversationalEmbodiment": true,
+    "idleDominating": false,
+    "armFrozen": false,
+    "gestureCollapseRisk": false
+  },
+  "transitionEdge": "SPEAKING_IDLE→GESTURE_ACTIVE",
+  "phaseTag": "GESTURE_ACTIVE"
+}

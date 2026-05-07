@@ -1,0 +1,7 @@
+{
+  "timestamp": "2026-05-07T02:15:46.565Z",
+  "pipelineNote": "Final spatial records derive from flush-fed skeletal telemetry proxies (see skeletal_telemetry_report notes); world Euler proxies mirror local until FK/world bridge lands.",
+  "bones": [],
+  "aggregatedReadability": 0,
+  "aggregatedCameraVisibility": 0
+}

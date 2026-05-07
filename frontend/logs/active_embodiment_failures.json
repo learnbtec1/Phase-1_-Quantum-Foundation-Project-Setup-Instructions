@@ -1,0 +1,38 @@
+[
+  {
+    "id": "lipsync_desync_low_mouth",
+    "subsystem": "facial",
+    "severity": "warn",
+    "summary": "Speech active but mouth opening / RMS remain depressed",
+    "evidence": [
+      "mouthOpen≈0.003",
+      "lipRms≈0.0000"
+    ],
+    "inspectTargets": [
+      "frontend/src/app/avatar-agent/LipSyncManager.tsx"
+    ],
+    "confidence": 0.48760000000000003
+  },
+  {
+    "id": "face_body_contradiction",
+    "subsystem": "facial",
+    "severity": "warn",
+    "summary": "Body motion energy present while facial mouth channel reads idle",
+    "evidence": [
+      "motionEnergy=0.76",
+      "mouthOpen=0.003"
+    ],
+    "inspectTargets": [
+      "frontend/src/app/avatar-agent/LipSyncManager.tsx",
+      "frontend/src/app/avatar-agent/VRMSkeletonManager.tsx",
+      "frontend/src/app/avatar-agent/motion/behaviorTimeline.ts",
+      "frontend/src/app/avatar-agent/motion/motionScheduler.ts",
+      "frontend/src/app/avatar-agent/motion/semanticGestureBridge.ts",
+      "frontend/src/app/avatar-agent/motion/PoseComposer.ts",
+      "frontend/src/app/avatar-agent/motion/biomechanicalCorrectionLayer.ts",
+      "frontend/src/lib/avatar/unifiedEnergyModel.ts",
+      "frontend/src/app/avatar-agent/LipSyncManager.tsx"
+    ],
+    "confidence": 0.48760000000000003
+  }
+]

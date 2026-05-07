@@ -1,0 +1,15 @@
+[EMBODIMENT_INTELLIGENCE_SUMMARY]
+Health (embodied fuse): 84
+Dominant cause: schedulerBlocked
+Hot subsystem: facial
+Hot file: LipSyncManager.tsx
+Quality overall: 74
+
+Active failures:
+- [warn] Speech active but mouth opening / RMS remain depressed
+- [warn] Body motion energy present while facial mouth channel reads idle
+
+Recommended fix: Forensic governor withheld autonomous repair — require confidence ≥0.55, fresh telemetry, and validated chains.
+
+[FORENSIC_BRAIN]
+Integrity=87 trust=100 repair=false

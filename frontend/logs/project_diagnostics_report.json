@@ -1,0 +1,60 @@
+{
+  "timestamp": "2026-05-07T02:15:43.308Z",
+  "runtimeHealthScore": 100,
+  "dominantRootCause": "schedulerBlocked",
+  "recurringFailures": [],
+  "criticalConflicts": [],
+  "mostProblematicFiles": [
+    {
+      "file": "biomechanicalCorrectionLayer.ts",
+      "occurrences": 1,
+      "subsystem": "biomech",
+      "severity": 1
+    }
+  ],
+  "mostProblematicFunctions": [
+    {
+      "function": "applyBiomechanicalLayer",
+      "occurrences": 1,
+      "subsystem": "biomech",
+      "severity": 0
+    }
+  ],
+  "motionState": {
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "vrmaLayerW": 0,
+    "generativeLayerW": 0,
+    "idleDominatesGesture": false,
+    "armDeviationLuaRad": 0.7013949854176064,
+    "finalPoseBoneCount": 49
+  },
+  "schedulerState": {
+    "lastBlockReasonId": 0,
+    "lastBlockReasonLabel": "min_between_scheduler_plays",
+    "blocksSinceFlush": 2
+  },
+  "vrmState": {
+    "humanoidPresent": true,
+    "autoUpdateHumanBones": true,
+    "invalidQuatSamplesSinceFlush": 0,
+    "nullBoneSamplesSinceFlush": 0
+  },
+  "speechState": {
+    "speaking": true,
+    "motionEnergyUnified": 0.7578429299623337,
+    "stableMotionEnergy": 0.7883267837707452,
+    "speakingZeroEnergy": false
+  },
+  "authorityConflicts": [],
+  "embodimentFailures": [],
+  "unresolvedCriticals": [],
+  "recommendedNextFixes": [
+    "Tune motionScheduler min_between / coupling while speaking if gestures starve."
+  ],
+  "correlationChains": [],
+  "behavioralForensicsChains": [],
+  "visualEmbodimentPenalty": 0
+}
