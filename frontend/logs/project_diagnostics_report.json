@@ -1,73 +1,35 @@
 {
-  "timestamp": "2026-05-07T10:14:20.829Z",
+  "timestamp": "2026-05-07T11:18:13.476Z",
   "runtimeHealthScore": 100,
-  "dominantRootCause": "gestureEmbodimentCollapse (80% confidence)",
+  "dominantRootCause": "gestureEmbodimentCollapse (22% confidence)",
   "recurringFailures": [
-    "INTENT_EMPTY_INPUT (ema=391.31)",
-    "SEMANTIC_COOLDOWN_STARVE (ema=360.86)",
-    "SCHED_BLOCKED_MIN_BETWEEN (ema=154.04)",
-    "SCHED_DISPATCH_OK (ema=32.04)",
-    "SCHED_BLOCKED_IDLE_RANDOM (ema=3.91)"
+    "SCHED_BLOCKED_MIN_BETWEEN (ema=80.65)",
+    "SCHED_DISPATCH_OK (ema=19.80)",
+    "SCHED_BLOCKED_IDLE_RANDOM (ema=1.85)"
   ],
   "criticalConflicts": [
-    "scheduler_min_between_blocked Δ=314"
+    "scheduler_min_between_blocked Δ=2"
   ],
   "mostProblematicFiles": [
     {
       "file": "motionScheduler.ts",
-      "occurrences": 2,
+      "occurrences": 58,
       "subsystem": "scheduler",
-      "severity": 1
-    },
-    {
-      "file": "biomechanicalCorrectionLayer.ts",
-      "occurrences": 1,
-      "subsystem": "biomech",
       "severity": 1
     }
   ],
   "mostProblematicFunctions": [
     {
       "function": "schedulerTick",
-      "occurrences": 2,
-      "subsystem": "scheduler",
-      "severity": 0
-    },
-    {
-      "function": "applyBiomechanicalLayer",
-      "occurrences": 1,
+      "occurrences": 58,
       "subsystem": "scheduler",
       "severity": 0
     }
   ],
-  "motionState": {
-    "motionSource": "IDLE",
-    "gestureState": "idle",
-    "gestureLayerW": 0,
-    "idleLayerW": 1,
-    "vrmaLayerW": 0,
-    "generativeLayerW": 0,
-    "idleDominatesGesture": false,
-    "armDeviationLuaRad": 0.7000635406758001,
-    "finalPoseBoneCount": 49
-  },
-  "schedulerState": {
-    "lastBlockReasonId": 0,
-    "lastBlockReasonLabel": "min_between_scheduler_plays",
-    "blocksSinceFlush": 2
-  },
-  "vrmState": {
-    "humanoidPresent": true,
-    "autoUpdateHumanBones": true,
-    "invalidQuatSamplesSinceFlush": 0,
-    "nullBoneSamplesSinceFlush": 0
-  },
-  "speechState": {
-    "speaking": true,
-    "motionEnergyUnified": 0.6309955632293706,
-    "stableMotionEnergy": 0.6080456698042931,
-    "speakingZeroEnergy": false
-  },
+  "motionState": {},
+  "schedulerState": {},
+  "vrmState": {},
+  "speechState": {},
   "authorityConflicts": [],
   "embodimentFailures": [],
   "unresolvedCriticals": [],
@@ -85,9 +47,9 @@
         "schedulerCooldown",
         "intentNeutralCollapse"
       ],
-      "confidence": 0.799,
+      "confidence": 0.2222,
       "evidenceMetrics": [
-        "SCHED_BLOCKED_MIN_BETWEEN=314"
+        "SCHED_BLOCKED_MIN_BETWEEN=2"
       ]
     }
   ],

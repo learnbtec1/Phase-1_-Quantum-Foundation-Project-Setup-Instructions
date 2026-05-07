@@ -1,5 +1,51 @@
 {
-  "timestamp": "2026-05-07T10:11:21.086Z",
+  "timestamp": "2026-05-07T11:17:20.475Z",
   "windowMs": 600000,
-  "events": []
+  "events": [
+    {
+      "ts": 1778152085919,
+      "kind": "cycle",
+      "payload": "{\"dominantRisk\":\"No acute predictive stress cluster.\",\"realism\":0,\"recoveries\":[]}"
+    },
+    {
+      "ts": 1778152145932,
+      "kind": "cycle",
+      "payload": "{\"dominantRisk\":\"No acute predictive stress cluster.\",\"realism\":0,\"recoveries\":[]}"
+    },
+    {
+      "ts": 1778152205914,
+      "kind": "cycle",
+      "payload": "{\"dominantRisk\":\"No acute predictive stress cluster.\",\"realism\":0,\"recoveries\":[]}"
+    },
+    {
+      "ts": 1778152265912,
+      "kind": "cycle",
+      "payload": "{\"dominantRisk\":\"No acute predictive stress cluster.\",\"realism\":0,\"recoveries\":[]}"
+    },
+    {
+      "ts": 1778152325906,
+      "kind": "cycle",
+      "payload": "{\"dominantRisk\":\"No acute predictive stress cluster.\",\"realism\":0,\"recoveries\":[]}"
+    },
+    {
+      "ts": 1778152385918,
+      "kind": "cycle",
+      "payload": "{\"dominantRisk\":\"No acute predictive stress cluster.\",\"realism\":0,\"recoveries\":[]}"
+    },
+    {
+      "ts": 1778152461480,
+      "kind": "cycle",
+      "payload": "{\"dominantRisk\":\"No acute predictive stress cluster.\",\"realism\":0,\"recoveries\":[]}"
+    },
+    {
+      "ts": 1778152520478,
+      "kind": "cycle",
+      "payload": "{\"dominantRisk\":\"No acute predictive stress cluster.\",\"realism\":0,\"recoveries\":[]}"
+    },
+    {
+      "ts": 1778152580473,
+      "kind": "cycle",
+      "payload": "{\"dominantRisk\":\"No acute predictive stress cluster.\",\"realism\":0,\"recoveries\":[]}"
+    }
+  ]
 }
