@@ -8,11 +8,11 @@ export function computeConversationalPresence(shell: DiagnosticsWindowSurface): 
   const idle = shell.motion.idleLayerW;
   const sp = shell.speech.speaking ? 1 : 0;
   const raw =
-    en * 28 +
-    g * 34 +
-    (1 - idle) * 18 +
-    shell.speech.motionEnergyUnified * 14 +
-    sp * 8 -
-    (shell.motion.idleDominatesGesture ? 22 : 0);
+    en * 30 +
+    g * 38 +
+    (1 - idle) * 20 +
+    shell.speech.motionEnergyUnified * 16 +
+    sp * 10 -
+    (shell.motion.idleDominatesGesture ? 20 : 0);
   return Math.max(3, Math.min(100, Math.round(raw)));
 }

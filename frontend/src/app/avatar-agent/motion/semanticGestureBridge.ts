@@ -64,6 +64,9 @@ const CD = {
   listen: 6_500,
 } as const;
 
+/** TTS-active floor: full {@link CD.think} can starve the bridge (telemetry: think-cooldown while intent=thinking). */
+const THINK_COOLDOWN_MS_WHILE_SPEAKING = 2_800;
+
 let _lastByGesture: Partial<Record<SemanticGestureDecision['gesture'], number>> = {};
 let _explainQuietUntil = 0;
 
@@ -128,7 +131,8 @@ function resolveSemanticGestureImpl(input: ResolveSemanticGestureInput): Semanti
 
   // ── Thinking / hesitation (suppresses busy explain briefly) ─────────────
   if (intent === 'thinking' && rc >= 0.36) {
-    if (nowBlocked('think', input.nowMs, CD.think)) {
+    // Speaking is guaranteed by the guard above; shorter CD avoids long-TTS think starvation.
+    if (nowBlocked('think', input.nowMs, THINK_COOLDOWN_MS_WHILE_SPEAKING)) {
       return idle('think-cooldown', true);
     }
     _explainQuietUntil = input.nowMs + 2200;
@@ -136,7 +140,7 @@ function resolveSemanticGestureImpl(input: ResolveSemanticGestureInput): Semanti
     return {
       gesture: 'think',
       confidence: rc,
-      duration: 2850,
+      duration: 3120,
       intensity: 0.62 + e * 0.12,
       interruptible: true,
       sourceIntent: 'thinking',
@@ -175,7 +179,7 @@ function resolveSemanticGestureImpl(input: ResolveSemanticGestureInput): Semanti
     return {
       gesture: 'emphasis',
       confidence: rc,
-      duration: 1950,
+      duration: 2180,
       intensity: 0.58 + e * 0.1,
       interruptible: true,
       sourceIntent: 'emphasizing',
@@ -190,7 +194,7 @@ function resolveSemanticGestureImpl(input: ResolveSemanticGestureInput): Semanti
     return {
       gesture: 'point',
       confidence: rc,
-      duration: 2100,
+      duration: 2320,
       intensity: 0.54,
       interruptible: true,
       sourceIntent: 'disagreeing',
@@ -205,7 +209,7 @@ function resolveSemanticGestureImpl(input: ResolveSemanticGestureInput): Semanti
     return {
       gesture: 'explain',
       confidence: rc,
-      duration: 2450,
+      duration: 2680,
       intensity: 0.6 + e * 0.08,
       interruptible: true,
       sourceIntent: 'questioning',
@@ -235,7 +239,7 @@ function resolveSemanticGestureImpl(input: ResolveSemanticGestureInput): Semanti
     return {
       gesture: 'explain',
       confidence: rc * 0.92,
-      duration: 2200,
+      duration: 2440,
       intensity: 0.55 + e * 0.06,
       interruptible: true,
       sourceIntent: intent,

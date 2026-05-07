@@ -30,10 +30,10 @@ export function simulateHumanPerception(params: {
   }
   const sh = params.shell;
   const readability =
-    sh.motion.gestureLayerW * 0.34 +
-    sh.embodiment.timelineEnvelope * 0.38 +
-    Math.min(1, sh.speech.motionEnergyUnified * 1.4) * 0.18 -
-    (sh.motion.idleDominatesGesture ? 0.22 : 0);
+    sh.motion.gestureLayerW * 0.42 +
+    sh.embodiment.timelineEnvelope * 0.42 +
+    Math.min(1, sh.speech.motionEnergyUnified * 1.45) * 0.18 -
+    (sh.motion.idleDominatesGesture ? 0.18 : 0);
 
   const warmth = params.emotion.warmth * 0.42 + readability * 0.38 + params.realismSeed * 0.12;
   const intel =

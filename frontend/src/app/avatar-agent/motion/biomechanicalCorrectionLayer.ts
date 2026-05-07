@@ -1145,10 +1145,10 @@ export function applyIntentMotionState(
 
     // ─── SHOULDERS — axis-map driven (open = clavicle roll, twist = shrug) ─
     if (gShoulders > 0) {
-      mulBoneByMap(pose, 'leftShoulder',  'open',  0.25 * og * gShoulders);
-      mulBoneByMap(pose, 'rightShoulder', 'open',  0.25 * og * gShoulders);
-      mulBoneByMap(pose, 'leftShoulder',  'twist', 0.05 * og * gShoulders);
-      mulBoneByMap(pose, 'rightShoulder', 'twist', 0.05 * og * gShoulders);
+      mulBoneByMap(pose, 'leftShoulder',  'open',  0.34 * og * gShoulders);
+      mulBoneByMap(pose, 'rightShoulder', 'open',  0.34 * og * gShoulders);
+      mulBoneByMap(pose, 'leftShoulder',  'twist', 0.08 * og * gShoulders);
+      mulBoneByMap(pose, 'rightShoulder', 'twist', 0.08 * og * gShoulders);
       clampBoneAxis(pose, 'leftShoulder',  0.30);
       clampBoneAxis(pose, 'rightShoulder', 0.30);
     }
@@ -1156,8 +1156,8 @@ export function applyIntentMotionState(
     // ─── SPINE + CHEST + HIPS — gated + breath coupling ─────────────────
     if (gSpine > 0) {
       const breathSpine = Math.sin(nowMs * 0.0012) * 0.03; // ~0.2 Hz natural breath
-      mulBone(pose, 'spine', 0.15 * og * gSpine + breathSpine, 0, 0);
-      mulBone(pose, 'chest', 0.25 * og * gSpine + breathSpine * 0.5, 0, 0);
+      mulBone(pose, 'spine', 0.20 * og * gSpine + breathSpine, 0, 0);
+      mulBone(pose, 'chest', 0.33 * og * gSpine + breathSpine * 0.55, 0, 0);
       clampBoneAxis(pose, 'spine', 0.25);
       clampBoneAxis(pose, 'chest', 0.25);
     }

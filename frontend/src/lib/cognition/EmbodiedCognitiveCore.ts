@@ -24,6 +24,7 @@ import { sampleEmotionBodyDynamics } from './EmbodiedEmotionDynamics';
 import { exportSkeletalTelemetryReport } from './EmbodiedSkeletalTelemetry';
 import { analyzeSpatialCognition } from './EmbodiedSpatialCognition';
 import { synthesizeHumanRealism } from './EmbodiedHumanRealismModel';
+import { buildConversationalVisibilityAmplificationBundle } from './EmbodiedConversationalVisibilityAmplification';
 import type {
   CognitiveEmbodimentReportPayload,
   EmbodiedCognitionMemoryPayload,
@@ -157,6 +158,13 @@ function runCycle(): void {
 
     const recoveries = proposeRecoveryActions(embodimentIntel);
 
+    const visibilityBundle = buildConversationalVisibilityAmplificationBundle({
+      shell,
+      kin,
+      perception,
+      spatial,
+    });
+
     const cognitiveEmbodiment: CognitiveEmbodimentReportPayload & {
       conversationalPresenceScore: number;
       behaviorPlan: typeof plan;
@@ -265,6 +273,11 @@ function runCycle(): void {
       self_healing_actions: healing,
       embodied_cognition_memory: memoryPayload,
       predictive_surface: surface,
+      conversational_visibility_amplification: visibilityBundle.conversational_visibility_amplification,
+      social_presence_analysis: visibilityBundle.social_presence_analysis,
+      gesture_projection_report: visibilityBundle.gesture_projection_report,
+      conversational_openness_report: visibilityBundle.conversational_openness_report,
+      torso_participation_report: visibilityBundle.torso_participation_report,
     });
   });
 }

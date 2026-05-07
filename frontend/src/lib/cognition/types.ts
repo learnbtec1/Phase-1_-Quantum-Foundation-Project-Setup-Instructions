@@ -78,6 +78,16 @@ export type ConversationalKinematicsReportPayload = {
   chestParticipation: number;
   conversationalReadability: number;
   gestureVisibilityCone: number;
+  /** Expanded conversational visibility telemetry (0–100). */
+  opennessScore: number;
+  gestureProjectionScore: number;
+  conversationalSpread: number;
+  cameraReadability: number;
+  torsoParticipation: number;
+  shoulderVisibility: number;
+  gesturePersistence: number;
+  conversationalEnergy: number;
+  silhouetteClarity: number;
 };
 
 export type SkeletalTelemetryReportPayload = {

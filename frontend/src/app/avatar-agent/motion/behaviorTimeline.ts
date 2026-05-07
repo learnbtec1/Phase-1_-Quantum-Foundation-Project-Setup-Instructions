@@ -147,9 +147,9 @@ export type BehaviorFinalAudit = {
 const _PHASE_RATIO: Record<TimelineGestureId, { ant: number; act: number; rec: number }> = {
   idle:       { ant: 0.00, act: 1.00, rec: 0.00 },
   wave:       { ant: 0.12, act: 0.62, rec: 0.26 },
-  explain:    { ant: 0.10, act: 0.70, rec: 0.20 },
-  point:      { ant: 0.14, act: 0.60, rec: 0.26 },
-  think:      { ant: 0.08, act: 0.74, rec: 0.18 },
+  explain:    { ant: 0.10, act: 0.66, rec: 0.24 },
+  point:      { ant: 0.14, act: 0.58, rec: 0.28 },
+  think:      { ant: 0.08, act: 0.72, rec: 0.20 },
   agree:      { ant: 0.16, act: 0.50, rec: 0.34 },
   clap:       { ant: 0.10, act: 0.60, rec: 0.30 },
   test_elbow: { ant: 0.10, act: 0.60, rec: 0.30 },
@@ -207,10 +207,10 @@ export type PushBehaviorOptions = {
 
 const _DEFAULT_DURATION_MS: Record<TimelineGestureId, number> = {
   idle:       0,
-  wave:       2400,
-  explain:    2800,
-  point:      2400,
-  think:      3000,
+  wave:       2680,
+  explain:    3180,
+  point:      2680,
+  think:      3360,
   agree:      1300,
   clap:       1800,
   test_elbow: 2200,
