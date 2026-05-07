@@ -40,6 +40,10 @@ import {
   stopEmbodiedRuntimeNervousSystem,
 } from '@/lib/forensics/EmbodiedRuntimeNervousSystem';
 import {
+  startAutonomousRuntimeRepairGovernor,
+  stopAutonomousRuntimeRepairGovernor,
+} from '@/lib/repair/AutonomousRuntimeRepairGovernor';
+import {
   startEmbodiedCognitiveCore,
   stopEmbodiedCognitiveCore,
 } from '@/lib/cognition/EmbodiedCognitiveCore';
@@ -522,7 +526,11 @@ export default function AvatarCanvas({
     startRuntimeTimelineRecorder();
     startEmbodiedRuntimeNervousSystem();
     startEmbodiedCognitiveCore();
+    if ((process.env.NEXT_PUBLIC_AUTONOMOUS_REPAIR_GOVERNOR ?? '').trim() === '1') {
+      startAutonomousRuntimeRepairGovernor();
+    }
     return () => {
+      stopAutonomousRuntimeRepairGovernor();
       stopEmbodiedCognitiveCore();
       stopEmbodiedRuntimeNervousSystem();
       stopRuntimeTimelineRecorder();
