@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-05-07T10:13:20.832Z",
+  "timestamp": "2026-05-07T10:14:20.833Z",
   "chains": [
     {
       "chainId": "gestureEmbodimentCollapse",
@@ -11,9 +11,9 @@
         "intentNeutralCollapse"
       ],
       "valid": true,
-      "adjustedConfidence": 0.369216,
+      "adjustedConfidence": 0.57528,
       "invalidationReason": null
     }
   ],
-  "reliability": 37
+  "reliability": 58
 }

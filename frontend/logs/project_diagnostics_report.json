@@ -1,40 +1,40 @@
 {
-  "timestamp": "2026-05-07T10:13:20.830Z",
+  "timestamp": "2026-05-07T10:14:20.829Z",
   "runtimeHealthScore": 100,
-  "dominantRootCause": "gestureEmbodimentCollapse (51% confidence)",
+  "dominantRootCause": "gestureEmbodimentCollapse (80% confidence)",
   "recurringFailures": [
-    "INTENT_EMPTY_INPUT (ema=543.48)",
-    "SEMANTIC_COOLDOWN_STARVE (ema=501.20)",
-    "SCHED_BLOCKED_MIN_BETWEEN (ema=91.84)",
-    "SCHED_DISPATCH_OK (ema=14.56)",
-    "SCHED_BLOCKED_IDLE_RANDOM (ema=5.04)"
+    "INTENT_EMPTY_INPUT (ema=391.31)",
+    "SEMANTIC_COOLDOWN_STARVE (ema=360.86)",
+    "SCHED_BLOCKED_MIN_BETWEEN (ema=154.04)",
+    "SCHED_DISPATCH_OK (ema=32.04)",
+    "SCHED_BLOCKED_IDLE_RANDOM (ema=3.91)"
   ],
   "criticalConflicts": [
-    "scheduler_min_between_blocked Δ=328"
+    "scheduler_min_between_blocked Δ=314"
   ],
   "mostProblematicFiles": [
+    {
+      "file": "motionScheduler.ts",
+      "occurrences": 2,
+      "subsystem": "scheduler",
+      "severity": 1
+    },
     {
       "file": "biomechanicalCorrectionLayer.ts",
       "occurrences": 1,
       "subsystem": "biomech",
       "severity": 1
-    },
-    {
-      "file": "motionScheduler.ts",
-      "occurrences": 1,
-      "subsystem": "scheduler",
-      "severity": 1
     }
   ],
   "mostProblematicFunctions": [
     {
-      "function": "applyBiomechanicalLayer",
-      "occurrences": 1,
+      "function": "schedulerTick",
+      "occurrences": 2,
       "subsystem": "scheduler",
       "severity": 0
     },
     {
-      "function": "schedulerTick",
+      "function": "applyBiomechanicalLayer",
       "occurrences": 1,
       "subsystem": "scheduler",
       "severity": 0
@@ -85,10 +85,9 @@
         "schedulerCooldown",
         "intentNeutralCollapse"
       ],
-      "confidence": 0.5128,
+      "confidence": 0.799,
       "evidenceMetrics": [
-        "SCHED_BLOCKED_MIN_BETWEEN=328",
-        "SEMANTIC_COOLDOWN_STARVE=1790"
+        "SCHED_BLOCKED_MIN_BETWEEN=314"
       ]
     }
   ],

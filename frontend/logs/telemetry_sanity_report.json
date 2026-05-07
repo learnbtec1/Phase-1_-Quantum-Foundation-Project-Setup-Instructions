@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-05-07T10:13:20.832Z",
+  "timestamp": "2026-05-07T10:14:20.833Z",
   "fresh": false,
-  "staleAgeMs": 16106.200000047684,
+  "staleAgeMs": 76107.40000003576,
   "violations": [
     {
       "id": "STALE_DIAGNOSTICS_SHELL",
-      "detail": "updatedAt lag 16106ms > 5000ms",
+      "detail": "updatedAt lag 76107ms > 5000ms",
       "severity": "warn"
     }
   ],

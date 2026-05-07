@@ -2,22 +2,22 @@
 Runtime health acceptable.
 
 Primary failure:
-gestureEmbodimentCollapse (51% confidence)
+gestureEmbodimentCollapse (80% confidence)
 
 Most affected file:
-biomechanicalCorrectionLayer.ts
+motionScheduler.ts
 
 Most affected subsystem:
-biomech
+scheduler
 
 Evidence:
 gestureWeight=0.00
 idleWeight=1.00
-recurring (ema window): INTENT_EMPTY_INPUT (ema=543.48); SEMANTIC_COOLDOWN_STARVE (ema=501.20); SCHED_BLOCKED_MIN_BETWEEN (ema=91.84); SCHED_DISPATCH_OK (ema=14.56)
+recurring (ema window): INTENT_EMPTY_INPUT (ema=391.31); SEMANTIC_COOLDOWN_STARVE (ema=360.86); SCHED_BLOCKED_MIN_BETWEEN (ema=154.04); SCHED_DISPATCH_OK (ema=32.04)
 
 Recommended fix:
 Raise gesture blend authority during active timeline events / speaking (PoseComposer weights).
 
 Dominant correlation chain:
 gestureInvisible → idleOverwrite → weakGestureEnvelope → schedulerCooldown → intentNeutralCollapse
-confidence=51.3%
+confidence=79.9%

@@ -1,10 +1,10 @@
 {
-  "timestamp": "2026-05-07T10:13:20.832Z",
+  "timestamp": "2026-05-07T10:14:20.833Z",
   "embodimentHealthScore": 93,
   "currentDominantRootCause": "No trusted dominant root cause — telemetry nominal after arbitration",
   "mostProblematicSubsystem": "semantic_bridge",
   "mostProblematicFile": "semanticGestureBridge.ts",
-  "mostProblematicFunction": "applyBiomechanicalLayer",
+  "mostProblematicFunction": "schedulerTick",
   "activeEmbodimentFailures": [
     {
       "id": "semantic_bridge_starvation",
@@ -75,7 +75,7 @@
       "semanticSourceIntent": "explain-cooldown"
     }
   },
-  "confidenceLevel": "moderate-trust",
+  "confidenceLevel": "high-trust",
   "recommendedNextFix": "Forensic governor withheld autonomous repair — require confidence ≥0.55, fresh telemetry, and validated chains.",
   "quality": {
     "speechEmbodiment": 89,
@@ -91,16 +91,16 @@
   },
   "evolutionNotes": [
     "personalityProfile=calm_teacher:interactive_assistant; expr=0.57; calm=0.79",
-    "diagnosticsAnalyzer.hint=gestureEmbodimentCollapse (51% confidence)",
-    "forensicIntegrity=71",
+    "diagnosticsAnalyzer.hint=gestureEmbodimentCollapse (80% confidence)",
+    "forensicIntegrity=75",
     "telemetryTrust=70"
   ],
   "forensicStabilization": {
-    "forensicIntegrityScore": 71,
+    "forensicIntegrityScore": 75,
     "dominantTrustedRootCause": "No trusted dominant root cause — telemetry nominal after arbitration",
     "telemetryTrustworthiness": 70,
     "repairRecommended": false,
     "suppressedFalsePositives": 0,
-    "executionChainReliability": 37
+    "executionChainReliability": 58
   }
 }

@@ -11,4 +11,4 @@ Active failures:
 Recommended fix: Forensic governor withheld autonomous repair — require confidence ≥0.55, fresh telemetry, and validated chains.
 
 [FORENSIC_BRAIN]
-Integrity=71 trust=70 repair=false
+Integrity=75 trust=70 repair=false
