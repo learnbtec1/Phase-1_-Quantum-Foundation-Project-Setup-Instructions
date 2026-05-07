@@ -1,9 +1,0 @@
-{
-  "timestamp": "2026-05-07T10:18:20.830Z",
-  "dominantTrustedRootCause": "No trusted dominant root cause — telemetry nominal after arbitration",
-  "confidence": 0.42,
-  "arbitrationTrace": [
-    "sanity_not_fresh:downweight_autonomous_and_chains"
-  ],
-  "autonomousAnalyzerAgreement": false
-}

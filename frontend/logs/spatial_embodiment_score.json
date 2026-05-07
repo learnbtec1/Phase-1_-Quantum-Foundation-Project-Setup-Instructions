@@ -1,9 +1,0 @@
-{
-  "timestamp": "2026-05-07T11:17:20.475Z",
-  "balanceProxy": 88,
-  "groundingProxy": 94,
-  "upperLowerCoherence": 100,
-  "leaningProxy": 0,
-  "spatialEmbodimentScore": 85,
-  "verifiedFailures": []
-}
