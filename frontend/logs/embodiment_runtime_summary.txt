@@ -1,15 +1,14 @@
 [EMBODIMENT_INTELLIGENCE_SUMMARY]
-Health (embodied fuse): 84
-Dominant cause: schedulerBlocked
-Hot subsystem: facial
-Hot file: LipSyncManager.tsx
-Quality overall: 74
+Health (embodied fuse): 93
+Dominant cause: No trusted dominant root cause — telemetry nominal after arbitration
+Hot subsystem: semantic_bridge
+Hot file: semanticGestureBridge.ts
+Quality overall: 81
 
 Active failures:
-- [warn] Speech active but mouth opening / RMS remain depressed
-- [warn] Body motion energy present while facial mouth channel reads idle
+- [warn] Semantic cooldown starvation counts elevated
 
 Recommended fix: Forensic governor withheld autonomous repair — require confidence ≥0.55, fresh telemetry, and validated chains.
 
 [FORENSIC_BRAIN]
-Integrity=87 trust=100 repair=false
+Integrity=71 trust=70 repair=false

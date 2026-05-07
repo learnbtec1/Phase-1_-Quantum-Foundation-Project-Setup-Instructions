@@ -1,16 +1,11 @@
 {
-  "timestamp": "2026-05-07T02:15:43.310Z",
+  "timestamp": "2026-05-07T10:13:20.832Z",
   "perFailureAdjusted": [
     {
-      "id": "lipsync_desync_low_mouth",
-      "before": 0.62,
-      "after": 0.48760000000000003
-    },
-    {
-      "id": "face_body_contradiction",
-      "before": 0.55,
-      "after": 0.48760000000000003
+      "id": "semantic_bridge_starvation",
+      "before": 0.52,
+      "after": 0.436432
     }
   ],
-  "stabilityScore": 79
+  "stabilityScore": 82
 }

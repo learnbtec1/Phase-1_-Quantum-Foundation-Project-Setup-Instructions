@@ -1,14 +1,28 @@
 {
-  "timestamp": "2026-05-07T02:15:43.308Z",
+  "timestamp": "2026-05-07T10:13:20.830Z",
   "runtimeHealthScore": 100,
-  "dominantRootCause": "schedulerBlocked",
-  "recurringFailures": [],
-  "criticalConflicts": [],
+  "dominantRootCause": "gestureEmbodimentCollapse (51% confidence)",
+  "recurringFailures": [
+    "INTENT_EMPTY_INPUT (ema=543.48)",
+    "SEMANTIC_COOLDOWN_STARVE (ema=501.20)",
+    "SCHED_BLOCKED_MIN_BETWEEN (ema=91.84)",
+    "SCHED_DISPATCH_OK (ema=14.56)",
+    "SCHED_BLOCKED_IDLE_RANDOM (ema=5.04)"
+  ],
+  "criticalConflicts": [
+    "scheduler_min_between_blocked Δ=328"
+  ],
   "mostProblematicFiles": [
     {
       "file": "biomechanicalCorrectionLayer.ts",
       "occurrences": 1,
       "subsystem": "biomech",
+      "severity": 1
+    },
+    {
+      "file": "motionScheduler.ts",
+      "occurrences": 1,
+      "subsystem": "scheduler",
       "severity": 1
     }
   ],
@@ -16,7 +30,13 @@
     {
       "function": "applyBiomechanicalLayer",
       "occurrences": 1,
-      "subsystem": "biomech",
+      "subsystem": "scheduler",
+      "severity": 0
+    },
+    {
+      "function": "schedulerTick",
+      "occurrences": 1,
+      "subsystem": "scheduler",
       "severity": 0
     }
   ],
@@ -28,7 +48,7 @@
     "vrmaLayerW": 0,
     "generativeLayerW": 0,
     "idleDominatesGesture": false,
-    "armDeviationLuaRad": 0.7013949854176064,
+    "armDeviationLuaRad": 0.7000635406758001,
     "finalPoseBoneCount": 49
   },
   "schedulerState": {
@@ -44,17 +64,34 @@
   },
   "speechState": {
     "speaking": true,
-    "motionEnergyUnified": 0.7578429299623337,
-    "stableMotionEnergy": 0.7883267837707452,
+    "motionEnergyUnified": 0.6309955632293706,
+    "stableMotionEnergy": 0.6080456698042931,
     "speakingZeroEnergy": false
   },
   "authorityConflicts": [],
   "embodimentFailures": [],
   "unresolvedCriticals": [],
   "recommendedNextFixes": [
-    "Tune motionScheduler min_between / coupling while speaking if gestures starve."
+    "Raise gesture blend authority during active timeline events / speaking (PoseComposer weights).",
+    "Review idleLayerW vs gestureLayerW contract in VRMSkeletonManager when motionSource=GESTURE."
   ],
-  "correlationChains": [],
+  "correlationChains": [
+    {
+      "chainId": "gestureEmbodimentCollapse",
+      "steps": [
+        "gestureInvisible",
+        "idleOverwrite",
+        "weakGestureEnvelope",
+        "schedulerCooldown",
+        "intentNeutralCollapse"
+      ],
+      "confidence": 0.5128,
+      "evidenceMetrics": [
+        "SCHED_BLOCKED_MIN_BETWEEN=328",
+        "SEMANTIC_COOLDOWN_STARVE=1790"
+      ]
+    }
+  ],
   "behavioralForensicsChains": [],
   "visualEmbodimentPenalty": 0
 }

@@ -1,10 +1,10 @@
 {
-  "timestamp": "2026-05-07T02:15:43.311Z",
+  "timestamp": "2026-05-07T10:13:20.833Z",
   "nodes": [
     {
-      "id": "facial",
-      "subsystem": "facial",
-      "weight": 2.9256
+      "id": "semantic_bridge",
+      "subsystem": "semantic_bridge",
+      "weight": 1.309296
     },
     {
       "id": "timeline_transition",
@@ -69,7 +69,7 @@
     }
   ],
   "dominantPath": [
-    "facial",
+    "semantic_bridge",
     "timeline_transition"
   ]
 }

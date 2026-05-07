@@ -1,5 +1,19 @@
 {
-  "timestamp": "2026-05-07T02:15:43.310Z",
-  "chains": [],
-  "reliability": 72
+  "timestamp": "2026-05-07T10:13:20.832Z",
+  "chains": [
+    {
+      "chainId": "gestureEmbodimentCollapse",
+      "steps": [
+        "gestureInvisible",
+        "idleOverwrite",
+        "weakGestureEnvelope",
+        "schedulerCooldown",
+        "intentNeutralCollapse"
+      ],
+      "valid": true,
+      "adjustedConfidence": 0.369216,
+      "invalidationReason": null
+    }
+  ],
+  "reliability": 37
 }

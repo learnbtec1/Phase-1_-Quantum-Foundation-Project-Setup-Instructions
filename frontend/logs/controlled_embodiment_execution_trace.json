@@ -1,0 +1,2882 @@
+[
+  {
+    "iso": "2026-05-07T10:11:26.236Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:26.659Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:27.082Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:27.509Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:27.931Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:28.356Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:28.780Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:29.205Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:29.630Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:30.055Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:30.476Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:30.903Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:31.325Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:31.750Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:32.174Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:32.597Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:33.022Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:33.447Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:33.870Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:34.295Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:34.719Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:35.144Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:35.568Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:35.994Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 0.8413266523257056,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:36.419Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:36.840Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:37.261Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:37.684Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:38.108Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:38.531Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:38.956Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:39.380Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:39.804Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:40.229Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:40.653Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:41.077Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:41.501Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:41.926Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:42.350Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:42.775Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:43.199Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:43.623Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:44.047Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:44.472Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:44.899Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:45.321Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:45.742Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:46.163Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:46.584Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:47.005Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:47.426Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:47.850Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:48.273Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:48.698Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:49.120Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:49.544Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:49.969Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:50.394Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:50.817Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:51.242Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:51.666Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:52.090Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:52.515Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:52.939Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:53.363Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:53.787Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:54.211Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:54.636Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:55.056Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:55.479Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:55.902Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:56.328Z",
+    "motionSource": "GESTURE",
+    "gestureState": "explain",
+    "gestureLayerW": 1,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:56.753Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:57.176Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:57.599Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:58.025Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:58.449Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:58.873Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:59.297Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:11:59.721Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:00.146Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:00.570Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:00.995Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:01.418Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:01.842Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:02.266Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:02.691Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:03.115Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:03.539Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:03.961Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:04.383Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:04.806Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:05.227Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:05.649Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:06.074Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:06.498Z",
+    "motionSource": "GESTURE",
+    "gestureState": "think",
+    "gestureLayerW": 0.745677079678834,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:06.924Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:07.347Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:07.768Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:08.189Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:08.613Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:09.037Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:09.461Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:09.886Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:10.310Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:10.734Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:11.166Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:11.589Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:12.013Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:12.437Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:12.861Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:13.286Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:13.710Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:14.134Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:14.559Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:14.983Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:15.407Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:15.832Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:16.256Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:16.680Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:17.104Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:17.528Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:17.953Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:18.377Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:18.801Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:19.226Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:19.650Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:20.074Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:20.498Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:20.923Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:21.347Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:21.772Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:22.197Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:22.621Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:23.043Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:23.464Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:23.892Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:24.324Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:24.748Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:25.173Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:25.596Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:26.021Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:26.445Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  },
+  {
+    "iso": "2026-05-07T10:12:26.870Z",
+    "motionSource": "IDLE",
+    "gestureState": "idle",
+    "gestureLayerW": 0,
+    "idleLayerW": 1,
+    "idleDominatesGesture": false,
+    "stages": {
+      "motion": true,
+      "applyFinalPose": true,
+      "humanoidUpdate1": true,
+      "biomechanical": true,
+      "humanoidUpdate2": true
+    },
+    "orderCorrect": true,
+    "invalidQuatSinceFlush": 0,
+    "nullBoneSinceFlush": 0,
+    "schedulerBlocks": 2,
+    "speaking": true
+  }
+]

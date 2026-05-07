@@ -1,0 +1,12 @@
+[
+  {
+    "checkpoint": "CHECKPOINT_N_FINAL_RENDERED_POSE",
+    "phase": "phase4",
+    "passed": false,
+    "confidence": 0.57,
+    "expectedBehavior": "final proxies align with conversational posture / authority",
+    "actualBehavior": "biomech_bad_frac=0.00 meanGestureW=0.000",
+    "affectedBone": "rightUpperArm",
+    "humanReadable": false
+  }
+]

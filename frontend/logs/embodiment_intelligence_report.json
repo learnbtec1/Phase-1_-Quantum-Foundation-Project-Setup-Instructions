@@ -1,91 +1,45 @@
 {
-  "timestamp": "2026-05-07T02:15:43.311Z",
-  "embodimentHealthScore": 84,
-  "currentDominantRootCause": "schedulerBlocked",
-  "mostProblematicSubsystem": "facial",
-  "mostProblematicFile": "LipSyncManager.tsx",
+  "timestamp": "2026-05-07T10:13:20.832Z",
+  "embodimentHealthScore": 93,
+  "currentDominantRootCause": "No trusted dominant root cause — telemetry nominal after arbitration",
+  "mostProblematicSubsystem": "semantic_bridge",
+  "mostProblematicFile": "semanticGestureBridge.ts",
   "mostProblematicFunction": "applyBiomechanicalLayer",
   "activeEmbodimentFailures": [
     {
-      "id": "lipsync_desync_low_mouth",
-      "subsystem": "facial",
+      "id": "semantic_bridge_starvation",
+      "subsystem": "semantic_bridge",
       "severity": "warn",
-      "summary": "Speech active but mouth opening / RMS remain depressed",
+      "summary": "Semantic cooldown starvation counts elevated",
       "evidence": [
-        "mouthOpen≈0.003",
-        "lipRms≈0.0000"
+        "SEMANTIC_COOLDOWN_STARVE Δ=22"
       ],
       "inspectTargets": [
-        "frontend/src/app/avatar-agent/LipSyncManager.tsx"
+        "frontend/src/app/avatar-agent/motion/semanticGestureBridge.ts"
       ],
-      "confidence": 0.48760000000000003
-    },
-    {
-      "id": "face_body_contradiction",
-      "subsystem": "facial",
-      "severity": "warn",
-      "summary": "Body motion energy present while facial mouth channel reads idle",
-      "evidence": [
-        "motionEnergy=0.76",
-        "mouthOpen=0.003"
-      ],
-      "inspectTargets": [
-        "frontend/src/app/avatar-agent/LipSyncManager.tsx",
-        "frontend/src/app/avatar-agent/VRMSkeletonManager.tsx",
-        "frontend/src/app/avatar-agent/motion/behaviorTimeline.ts",
-        "frontend/src/app/avatar-agent/motion/motionScheduler.ts",
-        "frontend/src/app/avatar-agent/motion/semanticGestureBridge.ts",
-        "frontend/src/app/avatar-agent/motion/PoseComposer.ts",
-        "frontend/src/app/avatar-agent/motion/biomechanicalCorrectionLayer.ts",
-        "frontend/src/lib/avatar/unifiedEnergyModel.ts",
-        "frontend/src/app/avatar-agent/LipSyncManager.tsx"
-      ],
-      "confidence": 0.48760000000000003
+      "confidence": 0.436432
     }
   ],
   "activeBehavioralContradictions": [],
-  "activeLipsyncFailures": [
-    {
-      "id": "lipsync_desync_low_mouth",
-      "subsystem": "facial",
-      "severity": "warn",
-      "summary": "Speech active but mouth opening / RMS remain depressed",
-      "evidence": [
-        "mouthOpen≈0.003",
-        "lipRms≈0.0000"
-      ],
-      "inspectTargets": [
-        "frontend/src/app/avatar-agent/LipSyncManager.tsx"
-      ],
-      "confidence": 0.48760000000000003
-    },
-    {
-      "id": "face_body_contradiction",
-      "subsystem": "facial",
-      "severity": "warn",
-      "summary": "Body motion energy present while facial mouth channel reads idle",
-      "evidence": [
-        "motionEnergy=0.76",
-        "mouthOpen=0.003"
-      ],
-      "inspectTargets": [
-        "frontend/src/app/avatar-agent/LipSyncManager.tsx",
-        "frontend/src/app/avatar-agent/VRMSkeletonManager.tsx",
-        "frontend/src/app/avatar-agent/motion/behaviorTimeline.ts",
-        "frontend/src/app/avatar-agent/motion/motionScheduler.ts",
-        "frontend/src/app/avatar-agent/motion/semanticGestureBridge.ts",
-        "frontend/src/app/avatar-agent/motion/PoseComposer.ts",
-        "frontend/src/app/avatar-agent/motion/biomechanicalCorrectionLayer.ts",
-        "frontend/src/lib/avatar/unifiedEnergyModel.ts",
-        "frontend/src/app/avatar-agent/LipSyncManager.tsx"
-      ],
-      "confidence": 0.48760000000000003
-    }
-  ],
+  "activeLipsyncFailures": [],
   "activeAuthorityFailures": [],
   "activeSpatialFailures": [],
   "activeSchedulerFailures": [],
-  "activeSemanticFailures": [],
+  "activeSemanticFailures": [
+    {
+      "id": "semantic_bridge_starvation",
+      "subsystem": "semantic_bridge",
+      "severity": "warn",
+      "summary": "Semantic cooldown starvation counts elevated",
+      "evidence": [
+        "SEMANTIC_COOLDOWN_STARVE Δ=22"
+      ],
+      "inspectTargets": [
+        "frontend/src/app/avatar-agent/motion/semanticGestureBridge.ts"
+      ],
+      "confidence": 0.436432
+    }
+  ],
   "activePersonalityContradictions": [
     {
       "id": "personality_dissonance_calm_hyperfluid",
@@ -104,49 +58,49 @@
     "idleLayerW": 1,
     "timelinePhaseTag": "SPEAKING_IDLE",
     "facialProbe": {
-      "mouthOpenApprox": 0.003174793880247999,
-      "lipRms": 0,
+      "mouthOpenApprox": 0.3227839659230161,
+      "lipRms": 0.14764463191791616,
       "speaking": true,
-      "visemeQueueLen": 0,
-      "playheadSec": 0,
-      "lastCueTSec": 0,
-      "driftMs": 0,
-      "jawVarianceEma": 0.000360876751726176
+      "visemeQueueLen": 82,
+      "playheadSec": 5.890666666666675,
+      "lastCueTSec": 5.88,
+      "driftMs": 10.666666666675262,
+      "jawVarianceEma": 0.006565855128994936
     },
     "intentProbe": {
       "activeIntent": "neutral",
       "llmIntent": "",
       "intentReason": "empty-input",
       "semanticGesture": "idle",
-      "semanticSourceIntent": "neutral:neutral"
+      "semanticSourceIntent": "explain-cooldown"
     }
   },
-  "confidenceLevel": "high-trust",
+  "confidenceLevel": "moderate-trust",
   "recommendedNextFix": "Forensic governor withheld autonomous repair — require confidence ≥0.55, fresh telemetry, and validated chains.",
   "quality": {
     "speechEmbodiment": 89,
-    "gestureVisibility": 5,
-    "lipSyncAccuracy": 82,
+    "gestureVisibility": 8,
+    "lipSyncAccuracy": 99,
     "personalityConsistency": 88,
     "behavioralCoherence": 82,
     "motionFluidity": 100,
     "cameraPresence": 100,
     "spatialEmbodiment": 92,
-    "facialEmbodiment": 53,
-    "overallEmbodiment": 74
+    "facialEmbodiment": 100,
+    "overallEmbodiment": 81
   },
   "evolutionNotes": [
     "personalityProfile=calm_teacher:interactive_assistant; expr=0.57; calm=0.79",
-    "diagnosticsAnalyzer.hint=schedulerBlocked",
-    "forensicIntegrity=87",
-    "telemetryTrust=100"
+    "diagnosticsAnalyzer.hint=gestureEmbodimentCollapse (51% confidence)",
+    "forensicIntegrity=71",
+    "telemetryTrust=70"
   ],
   "forensicStabilization": {
-    "forensicIntegrityScore": 87,
-    "dominantTrustedRootCause": "schedulerBlocked",
-    "telemetryTrustworthiness": 100,
+    "forensicIntegrityScore": 71,
+    "dominantTrustedRootCause": "No trusted dominant root cause — telemetry nominal after arbitration",
+    "telemetryTrustworthiness": 70,
     "repairRecommended": false,
     "suppressedFalsePositives": 0,
-    "executionChainReliability": 72
+    "executionChainReliability": 37
   }
 }

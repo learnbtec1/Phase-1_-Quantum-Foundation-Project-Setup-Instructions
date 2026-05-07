@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-05-07T02:15:43.310Z",
-  "forensicIntegrityScore": 87,
-  "telemetryTrustworthiness": 100,
-  "analyzerAgreementProxy": 66,
-  "rootCauseConsistency": 100,
-  "confidenceStability": 79,
-  "executionChainReliability": 72,
+  "timestamp": "2026-05-07T10:13:20.832Z",
+  "forensicIntegrityScore": 71,
+  "telemetryTrustworthiness": 70,
+  "analyzerAgreementProxy": 63,
+  "rootCauseConsistency": 86,
+  "confidenceStability": 82,
+  "executionChainReliability": 37,
   "estimatedFalsePositiveRate": 0,
-  "dominantTrustedRootCause": "schedulerBlocked"
+  "dominantTrustedRootCause": "No trusted dominant root cause — telemetry nominal after arbitration"
 }

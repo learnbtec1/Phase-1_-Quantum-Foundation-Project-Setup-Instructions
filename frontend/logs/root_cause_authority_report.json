@@ -1,10 +1,9 @@
 {
-  "timestamp": "2026-05-07T02:15:43.310Z",
-  "dominantTrustedRootCause": "schedulerBlocked",
-  "confidence": 0.55,
+  "timestamp": "2026-05-07T10:13:20.832Z",
+  "dominantTrustedRootCause": "No trusted dominant root cause — telemetry nominal after arbitration",
+  "confidence": 0.42,
   "arbitrationTrace": [
-    "failure_primary:lipsync_desync_low_mouth",
-    "autonomous_fallback_mid_confidence"
+    "sanity_not_fresh:downweight_autonomous_and_chains"
   ],
   "autonomousAnalyzerAgreement": false
 }
