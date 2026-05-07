@@ -8,7 +8,7 @@
 import type { DiagnosticsWindowSurface } from '@/lib/diagnostics/diagnosticsTypes';
 import type { EmbodimentIntelligenceReportPayload } from '@/lib/forensics/types';
 import { getRecentTimelineSnapshots } from '@/lib/diagnostics/runtimeTimelineRecorder';
-import { diagTimelineIntentProbe } from '@/lib/diagnostics/diagnosticsTimelineProbe';
+import { diagTimelineConflictBonesSnapshot, diagTimelineIntentProbe } from '@/lib/diagnostics/diagnosticsTimelineProbe';
 import { isDiagnosticsEnabled } from '@/lib/diagnostics/diagnosticsStore';
 
 import { analyzeConversationalBiomechanics } from './ConversationalBiomechanicsAnalyzer';
@@ -25,6 +25,7 @@ import { exportSkeletalTelemetryReport } from './EmbodiedSkeletalTelemetry';
 import { analyzeSpatialCognition } from './EmbodiedSpatialCognition';
 import { synthesizeHumanRealism } from './EmbodiedHumanRealismModel';
 import { buildConversationalVisibilityAmplificationBundle } from './EmbodiedConversationalVisibilityAmplification';
+import { assembleFinalSpatialBoneReports } from '@/lib/forensics/spatialFinal/assembleFinalSpatialBoneReports';
 import type {
   CognitiveEmbodimentReportPayload,
   EmbodiedCognitionMemoryPayload,
@@ -147,6 +148,13 @@ function runCycle(): void {
       shell,
       armSamples: skeletal.bones.rightUpperArm ?? [],
       chestSamples: skeletal.bones.chest ?? [],
+    });
+
+    const spatialFinal = assembleFinalSpatialBoneReports({
+      shell,
+      skeletal,
+      kinematics: kin,
+      conflictBones: diagTimelineConflictBonesSnapshot(),
     });
 
     const realism = synthesizeHumanRealism({
@@ -278,6 +286,16 @@ function runCycle(): void {
       gesture_projection_report: visibilityBundle.gesture_projection_report,
       conversational_openness_report: visibilityBundle.conversational_openness_report,
       torso_participation_report: visibilityBundle.torso_participation_report,
+      final_spatial_bone_forensics: spatialFinal.final_spatial_bone_forensics,
+      bone_direction_validation: spatialFinal.bone_direction_validation,
+      camera_space_projection: spatialFinal.camera_space_projection,
+      humanoid_propagation_forensics: spatialFinal.humanoid_propagation_forensics,
+      quaternion_integrity_report: spatialFinal.quaternion_integrity_report,
+      gesture_visibility_projection: spatialFinal.gesture_visibility_projection,
+      finger_biomechanics_report: spatialFinal.finger_biomechanics_report,
+      spatial_embodiment_score: spatialFinal.spatial_embodiment_score,
+      bone_authority_timeline: spatialFinal.bone_authority_timeline,
+      FINAL_SPATIAL_BONE_EXECUTION_FORENSICS_REPORT: spatialFinal.FINAL_SPATIAL_BONE_EXECUTION_FORENSICS_REPORT,
     });
   });
 }

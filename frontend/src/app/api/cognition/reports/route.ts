@@ -37,6 +37,20 @@ export async function POST(req: Request): Promise<NextResponse> {
     await write('conversational_openness_report.json', body.conversational_openness_report ?? {});
     await write('torso_participation_report.json', body.torso_participation_report ?? {});
 
+    await write('final_spatial_bone_forensics.json', body.final_spatial_bone_forensics ?? {});
+    await write('bone_direction_validation.json', body.bone_direction_validation ?? {});
+    await write('camera_space_projection.json', body.camera_space_projection ?? {});
+    await write('humanoid_propagation_forensics.json', body.humanoid_propagation_forensics ?? {});
+    await write('quaternion_integrity_report.json', body.quaternion_integrity_report ?? {});
+    await write('gesture_visibility_projection.json', body.gesture_visibility_projection ?? {});
+    await write('finger_biomechanics_report.json', body.finger_biomechanics_report ?? {});
+    await write('spatial_embodiment_score.json', body.spatial_embodiment_score ?? {});
+    await write('bone_authority_timeline.json', body.bone_authority_timeline ?? {});
+    await write(
+      'FINAL_SPATIAL_BONE_EXECUTION_FORENSICS_REPORT.json',
+      body.FINAL_SPATIAL_BONE_EXECUTION_FORENSICS_REPORT ?? {},
+    );
+
     return NextResponse.json({ ok: true });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'write_failed';

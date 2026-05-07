@@ -11,23 +11,34 @@ export type LogFileSnapshot = {
   json: unknown | null;
 };
 
+/** Priority 1 — execution / embodiment truth sources (disk mtime windowed). */
 const FIRST_PRIORITY = [
   'forensic_integrity_report.json',
-  'embodiment_intelligence_report.json',
   'project_diagnostics_report.json',
+  'embodiment_intelligence_report.json',
   'active_embodiment_failures.json',
   'root_cause_graph.json',
   'temporal_behavior_chains.json',
 ] as const;
 
+/** Spatial final + authority + chain validation — still disk-backed primary-adjacent. */
+const PRIMARY_ADJACENT = [
+  'FINAL_SPATIAL_BONE_EXECUTION_FORENSICS_REPORT.json',
+  'execution_chain_validation.json',
+  'bone_authority_timeline.json',
+] as const;
+
+/** Priority 2 — predictive / kinematic corroboration (exact mission ordering). */
 const SECOND_PRIORITY = [
   'predictive_failure_analysis.json',
+  'cognitive_embodiment_report.json',
   'conversational_kinematics_report.json',
   'spatial_cognition_report.json',
-  'skeletal_telemetry_report.json',
-  'human_perception_analysis.json',
-  'cognitive_embodiment_report.json',
+  'facial_embodiment_report.json',
 ] as const;
+
+/** Priority 3 — text summaries (always re-read from disk; truncated non-JSON). */
+const THIRD_PRIORITY_TEXT = ['project_runtime_summary.txt', 'embodiment_runtime_summary.txt'] as const;
 
 async function resolveLogsDir(): Promise<string> {
   const candidates = [path.join(process.cwd(), 'logs'), path.join(process.cwd(), 'frontend', 'logs')];
@@ -95,7 +106,8 @@ async function readLogSnapshot(
 }
 
 /**
- * GET ?windowMinutes=5|4 — disk-backed forensic snapshots with mtime windowing.
+ * GET ?windowMinutes=5|4 — full disk-backed forensic snapshots with mtime windowing.
+ * Every governor loop must call this fresh (client: cache: no-store).
  */
 export async function GET(req: Request): Promise<NextResponse> {
   try {
@@ -106,11 +118,14 @@ export async function GET(req: Request): Promise<NextResponse> {
     const logsDir = await resolveLogsDir();
 
     const files: Record<string, LogFileSnapshot> = {};
-    for (const name of [...FIRST_PRIORITY, ...SECOND_PRIORITY]) {
+    const allNames = [...FIRST_PRIORITY, ...PRIMARY_ADJACENT, ...SECOND_PRIORITY];
+    for (const name of allNames) {
       files[name] = await readLogSnapshot(logsDir, name, serverNowMs, windowMs);
     }
 
     let latestTimeline: LogFileSnapshot | null = null;
+    let runtimeTimelineFilesChecked = 0;
+    let runtimeTimelineFilesInWindow = 0;
     try {
       const tlDir = path.join(logsDir, 'runtime_timelines');
       const ents = await readdir(tlDir);
@@ -119,6 +134,9 @@ export async function GET(req: Request): Promise<NextResponse> {
       for (const n of ents) {
         if (!n.endsWith('.json')) continue;
         const st = await stat(path.join(tlDir, n));
+        runtimeTimelineFilesChecked += 1;
+        const ageMs = Math.max(0, serverNowMs - st.mtimeMs);
+        if (ageMs <= windowMs) runtimeTimelineFilesInWindow += 1;
         if (st.mtimeMs >= bestM) {
           bestM = st.mtimeMs;
           best = n;
@@ -132,7 +150,7 @@ export async function GET(req: Request): Promise<NextResponse> {
     }
 
     const summaries: Record<string, LogFileSnapshot> = {};
-    for (const n of ['embodiment_runtime_summary.txt', 'project_runtime_summary.txt']) {
+    for (const n of THIRD_PRIORITY_TEXT) {
       summaries[n] = await readLogSnapshot(logsDir, n, serverNowMs, windowMs);
     }
 
@@ -145,6 +163,8 @@ export async function GET(req: Request): Promise<NextResponse> {
       files,
       latestTimeline,
       summaries,
+      runtimeTimelineFilesChecked,
+      runtimeTimelineFilesInWindow,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'inspect_failed';
