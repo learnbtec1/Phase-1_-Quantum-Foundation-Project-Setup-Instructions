@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-05-07T01:01:30.859Z",
-  "forensicIntegrityScore": 71,
+  "timestamp": "2026-05-07T01:02:30.863Z",
+  "forensicIntegrityScore": 63,
   "telemetryTrustworthiness": 70,
-  "analyzerAgreementProxy": 63,
+  "analyzerAgreementProxy": 61,
   "rootCauseConsistency": 86,
-  "confidenceStability": 67,
-  "executionChainReliability": 48,
+  "confidenceStability": 0,
+  "executionChainReliability": 65,
   "estimatedFalsePositiveRate": 0,
-  "dominantTrustedRootCause": "No trusted dominant root cause — telemetry nominal after arbitration"
+  "dominantTrustedRootCause": "Insufficient fresh telemetry — defer dominant root cause"
 }
