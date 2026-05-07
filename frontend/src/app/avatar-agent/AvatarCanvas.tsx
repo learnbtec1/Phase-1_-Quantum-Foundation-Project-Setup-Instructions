@@ -47,6 +47,10 @@ import {
   startEmbodiedCognitiveCore,
   stopEmbodiedCognitiveCore,
 } from '@/lib/cognition/EmbodiedCognitiveCore';
+import {
+  startControlledEmbodimentVerificationSequence,
+  cancelControlledEmbodimentVerificationSequence,
+} from '@/lib/diagnostics/ControlledEmbodimentVerificationSequence';
 import { useBrainStore } from '@/store/useBrainStore';
 import { initBrainPersistence, flushBrainPersistence } from '@/lib/brainPersistence';
 import { recordPersonalitySessionVisit } from '@/ai/avatar/personalityMemory';
@@ -535,6 +539,17 @@ export default function AvatarCanvas({
       stopEmbodiedRuntimeNervousSystem();
       stopRuntimeTimelineRecorder();
       stopDiagnosticsAnalyzer();
+    };
+  }, []);
+
+  useEffect(() => {
+    if ((process.env.NEXT_PUBLIC_CONTROLLED_EMBODIMENT_VERIFICATION ?? '').trim() !== '1') return undefined;
+    const id = window.setTimeout(() => {
+      startControlledEmbodimentVerificationSequence();
+    }, 4500);
+    return () => {
+      window.clearTimeout(id);
+      cancelControlledEmbodimentVerificationSequence();
     };
   }, []);
 

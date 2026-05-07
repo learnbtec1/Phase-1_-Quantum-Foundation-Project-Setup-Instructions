@@ -969,14 +969,14 @@ function _rollRegionMask(intent: string): RegionMask {
     fingers:   Math.random() < (isExplain ? 0.65 : isThink ? 0.75 : isConfirm ? 0.30 : 0.55),
     spine:     Math.random() < (isExplain ? 0.55 : isThink ? 0.40 : isConfirm ? 0.30 : 0.35),
     hips:      Math.random() < (isExplain ? 0.35 : isThink ? 0.25 : isConfirm ? 0.15 : 0.25),
-    shoulders: Math.random() < (isExplain ? 0.85 : isThink ? 0.35 : isConfirm ? 0.40 : 0.55),
+    shoulders: Math.random() < (isExplain ? 0.94 : isThink ? 0.35 : isConfirm ? 0.40 : 0.55),
   };
 }
 
 /** Dominant channel multipliers: main region 1.0, secondary × 0.3. */
 function _dominanceMul(intent: string): Record<keyof RegionMask, number> {
   if (intent === 'explaining' || intent === 'emphasizing') {
-    return { arms: 1.0, elbows: 1.0, shoulders: 0.9, hands: 0.3, fingers: 0.3, spine: 0.3, hips: 0.3 };
+    return { arms: 1.0, elbows: 1.0, shoulders: 1.0, hands: 0.35, fingers: 0.32, spine: 0.38, hips: 0.32 };
   }
   if (intent === 'thinking') {
     return { arms: 0.3, elbows: 0.3, shoulders: 0.3, hands: 0.8, fingers: 1.0, spine: 0.3, hips: 0.3 };
@@ -1145,10 +1145,12 @@ export function applyIntentMotionState(
 
     // ─── SHOULDERS — axis-map driven (open = clavicle roll, twist = shrug) ─
     if (gShoulders > 0) {
-      mulBoneByMap(pose, 'leftShoulder',  'open',  0.34 * og * gShoulders);
-      mulBoneByMap(pose, 'rightShoulder', 'open',  0.34 * og * gShoulders);
-      mulBoneByMap(pose, 'leftShoulder',  'twist', 0.08 * og * gShoulders);
-      mulBoneByMap(pose, 'rightShoulder', 'twist', 0.08 * og * gShoulders);
+      const shoulderOpenMul =
+        intentKey === 'explaining' || intentKey === 'emphasizing' ? 0.51 : 0.34;
+      mulBoneByMap(pose, 'leftShoulder',  'open',  shoulderOpenMul * og * gShoulders);
+      mulBoneByMap(pose, 'rightShoulder', 'open',  shoulderOpenMul * og * gShoulders);
+      mulBoneByMap(pose, 'leftShoulder',  'twist', 0.1 * og * gShoulders);
+      mulBoneByMap(pose, 'rightShoulder', 'twist', 0.1 * og * gShoulders);
       clampBoneAxis(pose, 'leftShoulder',  0.30);
       clampBoneAxis(pose, 'rightShoulder', 0.30);
     }
@@ -1197,9 +1199,9 @@ export function applyIntentMotionState(
     }
   }
 
-  // Camera-facing emphasis — explaining draws attention on Y.
+  // Camera-facing emphasis — explaining draws attention on Y + slight yaw for readability.
   if (intent === 'explaining' || intent === 'emphasizing') {
-    mulBone(pose, 'head', 0, 0.05 * w, 0);
+    mulBone(pose, 'head', 0.035 * w, 0.058 * w, 0.022 * w);
     clampBoneAxis(pose, 'head', CLAMP_HEAD);
   }
 
@@ -1279,7 +1281,7 @@ function _upperArmLimits(gesture: string | undefined): BoneLimits {
     return { xMin: -1.35, xMax: 1.20, yMin: -0.50, yMax: 0.50, zMin: -1.55, zMax: 1.55 };
   }
   if (gesture && _SEMANTIC_OPEN_GESTURES.has(gesture)) {
-    return { xMin: -1.34, xMax: 0.95, yMin: -0.58, yMax: 0.58, zMin: -1.72, zMax: 1.72 };
+    return { xMin: -1.36, xMax: 1.06, yMin: -0.62, yMax: 0.62, zMin: -1.78, zMax: 1.78 };
   }
   return _BASE_UPPER_ARM;
 }
@@ -1291,7 +1293,7 @@ function _lowerArmLimits(gesture: string | undefined): BoneLimits {
     return { xMin: -0.05, xMax: 1.60, yMin: -0.30, yMax: 0.30, zMin: -2.30, zMax: 2.30 };
   }
   if (gesture && _SEMANTIC_OPEN_GESTURES.has(gesture)) {
-    return { xMin: -0.05, xMax: 1.68, yMin: -0.42, yMax: 0.42, zMin: -0.72, zMax: 0.72 };
+    return { xMin: -0.05, xMax: 1.72, yMin: -0.46, yMax: 0.46, zMin: -0.78, zMax: 0.78 };
   }
   return _BASE_LOWER_ARM;
 }

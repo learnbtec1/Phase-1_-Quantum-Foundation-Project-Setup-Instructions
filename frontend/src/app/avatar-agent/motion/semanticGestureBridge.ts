@@ -64,8 +64,11 @@ const CD = {
   listen: 6_500,
 } as const;
 
+/** Shorter explain rhythm during speech — reduces SEMANTIC_COOLDOWN_STARVE without touching idle/off-speech pacing. */
+const EXPLAIN_COOLDOWN_MS_WHILE_SPEAKING = 2_850;
+
 /** TTS-active floor: full {@link CD.think} can starve the bridge (telemetry: think-cooldown while intent=thinking). */
-const THINK_COOLDOWN_MS_WHILE_SPEAKING = 2_800;
+const THINK_COOLDOWN_MS_WHILE_SPEAKING = 2_300;
 
 let _lastByGesture: Partial<Record<SemanticGestureDecision['gesture'], number>> = {};
 let _explainQuietUntil = 0;
@@ -80,6 +83,14 @@ function touch(g: SemanticGestureDecision['gesture'], t: number): void {
 
 function clamp01(x: number): number {
   return Math.min(1, Math.max(0, x));
+}
+
+function explainCooldownMs(speaking: boolean): number {
+  return speaking ? EXPLAIN_COOLDOWN_MS_WHILE_SPEAKING : CD.explain;
+}
+
+function emphasisCooldownMs(speaking: boolean): number {
+  return speaking ? Math.min(CD.emphasis + 400, 2_400) : CD.emphasis;
 }
 
 export function resetSemanticGestureBridgeState(): void {
@@ -135,7 +146,7 @@ function resolveSemanticGestureImpl(input: ResolveSemanticGestureInput): Semanti
     if (nowBlocked('think', input.nowMs, THINK_COOLDOWN_MS_WHILE_SPEAKING)) {
       return idle('think-cooldown', true);
     }
-    _explainQuietUntil = input.nowMs + 2200;
+    _explainQuietUntil = input.nowMs + 1_380;
     touch('think', input.nowMs);
     return {
       gesture: 'think',
@@ -171,7 +182,7 @@ function resolveSemanticGestureImpl(input: ResolveSemanticGestureInput): Semanti
   }
 
   if (intent === 'emphasizing' && rc >= 0.42) {
-    if (nowBlocked('emphasis', input.nowMs, CD.emphasis)) {
+    if (nowBlocked('emphasis', input.nowMs, emphasisCooldownMs(input.speaking))) {
       return idle('emphasis-cooldown', true);
     }
     touch('emphasis', input.nowMs);
@@ -202,7 +213,7 @@ function resolveSemanticGestureImpl(input: ResolveSemanticGestureInput): Semanti
   }
 
   if (intent === 'questioning' && rc >= 0.4) {
-    if (nowBlocked('explain', input.nowMs, CD.explain)) {
+    if (nowBlocked('explain', input.nowMs, explainCooldownMs(input.speaking))) {
       return idle('explain-cooldown', true);
     }
     touch('explain', input.nowMs);
@@ -232,7 +243,7 @@ function resolveSemanticGestureImpl(input: ResolveSemanticGestureInput): Semanti
   }
 
   if ((intent === 'agreeing' || intent === 'confirming') && rc >= 0.38) {
-    if (nowBlocked('explain', input.nowMs, CD.explain)) {
+    if (nowBlocked('explain', input.nowMs, explainCooldownMs(input.speaking))) {
       return idle('explain-cooldown', true);
     }
     touch('explain', input.nowMs);
@@ -244,6 +255,22 @@ function resolveSemanticGestureImpl(input: ResolveSemanticGestureInput): Semanti
       interruptible: true,
       sourceIntent: intent,
     };
+  }
+
+  // Neutral while speaking: gentle explain hold so gestureLayerW does not collapse for whole utterances.
+  if (input.speaking && intent === 'neutral') {
+    const explainCd = explainCooldownMs(true);
+    if (!nowBlocked('explain', input.nowMs, explainCd)) {
+      touch('explain', input.nowMs);
+      return {
+        gesture: 'explain',
+        confidence: Math.max(0.44, rc || 0.44),
+        duration: 2_580,
+        intensity: 0.54 + e * 0.09,
+        interruptible: true,
+        sourceIntent: 'neutral-speaking-hold',
+      };
+    }
   }
 
   return idle(`neutral:${intent}`);

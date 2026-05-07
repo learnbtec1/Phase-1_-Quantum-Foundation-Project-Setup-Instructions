@@ -98,18 +98,19 @@ export function evaluateMotionAuthorityLock(
   const baseGestureDrive = Math.max(
     input.gestureLayerW,
     conversationalGesture ? envelope01 * 0.84 : envelope01 * 0.35,
-    input.speaking && conversationalGesture ? 0.34 : conversationalGesture ? 0.24 : 0.18,
+    input.speaking && conversationalGesture ? 0.4 : conversationalGesture ? 0.24 : 0.18,
   );
 
   let gestureStrengthFloor = clamp01(baseGestureDrive * 1.065);
-  if (gestureStrengthFloor < 0.46) gestureStrengthFloor = 0.46;
+  const floorMin = input.speaking && conversationalGesture ? 0.49 : 0.46;
+  if (gestureStrengthFloor < floorMin) gestureStrengthFloor = floorMin;
 
   let idleSupportCap = clamp01(1 - gestureStrengthFloor * 0.52);
   idleSupportCap = Math.min(0.88, Math.max(0.14, idleSupportCap));
 
   if (input.speaking && conversationalGesture) {
-    const cap2 = 0.62 - gestureStrengthFloor * 0.29;
-    idleSupportCap = Math.min(idleSupportCap, Math.min(0.69, Math.max(0.11, cap2)));
+    const cap2 = 0.56 - gestureStrengthFloor * 0.29;
+    idleSupportCap = Math.min(idleSupportCap, Math.min(0.65, Math.max(0.11, cap2)));
   }
 
   if (input.authorityRecoveryActive) {

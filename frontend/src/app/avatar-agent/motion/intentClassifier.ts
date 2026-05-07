@@ -35,6 +35,34 @@ export type IntentResult = {
   normalizedText: string;
 };
 
+/** Fallback intent when TTS is active but transcript text is not mirrored yet — avoids neutral starvation in semantics bridge. */
+export function detectIntentForSemanticsFallback(opts: {
+  brainThinking: boolean;
+  avatarPose: string | null;
+  llmIntent?: string | null;
+}): IntentResult {
+  const poseThink =
+    typeof opts.avatarPose === 'string' && /think/i.test(opts.avatarPose);
+  if (opts.brainThinking || poseThink) {
+    const out: IntentResult = {
+      intent: 'thinking',
+      confidence: 0.44,
+      reason: 'semantic-fallback:tts-no-text',
+      normalizedText: '',
+    };
+    diagTimelineTouchIntent(out.intent, opts.llmIntent ?? null, out.reason);
+    return out;
+  }
+  const out: IntentResult = {
+    intent: 'explaining',
+    confidence: 0.43,
+    reason: 'semantic-fallback:tts-no-text',
+    normalizedText: '',
+  };
+  diagTimelineTouchIntent(out.intent, opts.llmIntent ?? null, out.reason);
+  return out;
+}
+
 // ─── English (unchanged baseline, applied on trimmed raw for Latin cues) ─────
 const QUESTION_EN = /\b(what|why|how|when|where|who|which|is it|are you|do you|can you|could you)\b|\?/i;
 const CONFIRM_EN = /\b(yes|yeah|yep|correct|right|sure|absolutely|exactly|ok|okay)\b/i;

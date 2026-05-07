@@ -50,10 +50,10 @@ function loadGestureEngine(): Promise<UnifiedMod> {
 const TICK_MS = 150;
 const MIN_SINCE_LAST_ACTION_MS = 1200;
 /** While speaking, allow faster ambient / micro-motion re-queue (avoids “frozen body” under VRMA + TTS). */
-const MIN_SINCE_LAST_ACTION_SPEAKING_MS = 300;
+const MIN_SINCE_LAST_ACTION_SPEAKING_MS = 260;
 const MIN_BETWEEN_SCHEDULER_PLAYS_MS = 3400;
-/** Conversational re-queue — tightened from 1500ms: diagnostics showed sustained min_between blocks during TTS + IDLE motionSource. */
-const MIN_BETWEEN_SCHEDULER_PLAYS_SPEAKING_MS = 1050;
+/** Conversational re-queue while speaking — reduced starvation vs procedural ambient ticks during embodied speech. */
+const MIN_BETWEEN_SCHEDULER_PLAYS_SPEAKING_MS = 680;
 
 let started = false;
 let intervalId: number | null = null;
@@ -107,13 +107,22 @@ async function schedulerTick(): Promise<void> {
   const mc = getMotionControllerState();
   const baselineActive = isVrmaBaselineLayerActive();
   const b = getBehaviorMotionState();
+  const mode = b.mode;
   const orch = getAvatarOrchestratorState();
   const speaking = orch.speaking || useBrainStore.getState().talking;
   const semanticIntent = speaking ? getUtteranceSemanticIntent() : null;
+  /** Narrow scheduler gates during embodied speech (semantic cues + RESPONDING + coupling bypass cases). */
+  const conversationalSpeakingWindow =
+    speaking &&
+    (semanticIntent !== null ||
+      mode === 'RESPONDING' ||
+      getCouplingMode(speaking) === 'SPEAKING');
   const minBetween = speaking
     ? semanticIntent
-      ? 850 + Math.floor(Math.random() * 350)
-      : MIN_BETWEEN_SCHEDULER_PLAYS_SPEAKING_MS
+      ? 460 + Math.floor(Math.random() * 260)
+      : conversationalSpeakingWindow
+        ? MIN_BETWEEN_SCHEDULER_PLAYS_SPEAKING_MS
+        : MIN_BETWEEN_SCHEDULER_PLAYS_SPEAKING_MS + 280
     : MIN_BETWEEN_SCHEDULER_PLAYS_MS;
   lastSchedulerMinBetweenMs = minBetween;
   const minSinceAction = speaking ? MIN_SINCE_LAST_ACTION_SPEAKING_MS : MIN_SINCE_LAST_ACTION_MS;
@@ -190,7 +199,6 @@ async function schedulerTick(): Promise<void> {
 
   void getEmbodimentState();
 
-  const mode = b.mode;
   const { unifiedGestureEngine } = await loadGestureEngine();
 
   /** Emit [MOTION_ALLOW] at most once per 1500ms so it's visible without flooding. */

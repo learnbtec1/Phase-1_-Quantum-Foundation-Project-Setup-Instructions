@@ -72,7 +72,11 @@ import { applyFingerMicroLayer } from './motion/fingerMicroLayer';
 import { applyHumanMicroBehavior } from './motion/humanMicroBehavior';
 import { applyGazeIntentLayer } from './motion/gazeIntentLayer';
 import { tickGestureTiming, getGestureTimingSnapshot } from './motion/gestureTiming';
-import { detectIntent, detectIntentDetailed } from './motion/intentClassifier';
+import {
+  detectIntent,
+  detectIntentDetailed,
+  detectIntentForSemanticsFallback,
+} from './motion/intentClassifier';
 import {
   pushBehavior as pushBehaviorEvent,
   pushBehaviorFromSemanticDecision,
@@ -330,6 +334,9 @@ const _ARM_FORENSICS_FWD = new THREE.Vector3();
 const _MOTION_AUTH_TELEM_E = new THREE.Euler(0, 0, 0, 'YXZ');
 const GEN_E = new THREE.Euler();
 const GEN_Q = new THREE.Quaternion();
+/** Conversational camera-reach bias (multiply onto smoothed gesture quaternions). */
+const _CONV_REACH_E = new THREE.Euler(0, 0, 0, 'YXZ');
+const _CONV_REACH_Q = new THREE.Quaternion();
 const SK_AXIS_X = new THREE.Vector3(1, 0, 0);
 /** Scratch: eye-contact head bias from camera direction (XZ plane). */
 const _EC_HIP = new THREE.Vector3();
@@ -2893,26 +2900,35 @@ export function VRMSkeletonManager({
       // فيبقى الذراع IDLE طوال الجملة الطويلة رغم [PROCEDURAL EXECUTED] (رأس فقط).
       if (_autoCanFire) {
         const _utterText = getEmbodimentUtteranceTextForSemantics() ?? '';
-        if (_utterText.length > 0) {
-          const _utterHash = `${_utterText.length}:${_utterText.slice(0, 32)}`;
-          const _hashChanged = _utterHash !== lastSemanticUtteranceHashRef.current;
-          const _scheduleDue = nowMs >= talkGestureNextAtMsRef.current;
-          if (_hashChanged || _scheduleDue) {
-            if (_hashChanged) {
-              lastSemanticUtteranceHashRef.current = _utterHash;
-            }
-            const _det = detectIntentDetailed(_utterText, ab.intent);
-            const decision = resolveSemanticGesture({
-              detectedIntent: _det.intent,
-              ruleConfidence: _det.confidence,
-              llmIntent: ab.intent,
-              utteranceText: _utterText,
-              utteranceHash: _utterHash,
-              speaking,
-              listening: false,
-              nowMs,
-              stableMotionEnergy,
-            });
+        const _utterHash =
+          _utterText.length > 0
+            ? `${_utterText.length}:${_utterText.slice(0, 32)}`
+            : 'tts:no-transcript-mirror';
+        const _hashChanged = _utterHash !== lastSemanticUtteranceHashRef.current;
+        const _scheduleDue = nowMs >= talkGestureNextAtMsRef.current;
+        if (_hashChanged || _scheduleDue) {
+          if (_hashChanged) {
+            lastSemanticUtteranceHashRef.current = _utterHash;
+          }
+          const _det =
+            _utterText.length > 0
+              ? detectIntentDetailed(_utterText, ab.intent)
+              : detectIntentForSemanticsFallback({
+                  brainThinking: useBrainStore.getState().thinking,
+                  avatarPose: ab.pose,
+                  llmIntent: ab.intent,
+                });
+          const decision = resolveSemanticGesture({
+            detectedIntent: _det.intent,
+            ruleConfidence: _det.confidence,
+            llmIntent: ab.intent,
+            utteranceText: _utterText.length > 0 ? _utterText : '[tts]',
+            utteranceHash: _utterHash,
+            speaking,
+            listening: false,
+            nowMs,
+            stableMotionEnergy,
+          });
             const ev =
               decision.gesture !== 'idle' && decision.confidence >= 0.38
                 ? pushBehaviorFromSemanticDecision(decision, nowMs)
@@ -2951,7 +2967,8 @@ export function VRMSkeletonManager({
             if (ev) {
               talkGestureActiveRef.current = true;
               lastSemanticIntentFiredRef.current = _det.intent;
-              talkGestureNextAtMsRef.current = ev.startTime + ev.duration + 420 + Math.random() * 180;
+              talkGestureNextAtMsRef.current =
+                ev.startTime + ev.duration + 240 + Math.random() * 120;
               if (typeof window !== 'undefined') {
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 (window as any).__behaviorEngine = {
@@ -2978,7 +2995,6 @@ export function VRMSkeletonManager({
                 });
               }
             }
-          }
         }
       } else if (talkGestureActiveRef.current && (gestureStateRef.current === 'idle' || !speaking)) {
         talkGestureActiveRef.current = false;
@@ -4624,8 +4640,11 @@ export function VRMSkeletonManager({
     } else {
       gestureLayerW = isProceduralGestureFrame
         ? THREE.MathUtils.clamp(
-            intentArm * 0.92 + gBlend * 0.14 + gestureAmplitudeMulRef.current * 0.18,
-            rawG !== 'idle' ? 0.44 : 0,
+            intentArm * 0.92 +
+              gBlend * 0.14 +
+              gestureAmplitudeMulRef.current * 0.18 +
+              (speaking && rawG !== 'idle' ? 0.075 : 0),
+            rawG !== 'idle' ? 0.5 : 0,
             1,
           )
         : 0;
@@ -4787,6 +4806,32 @@ export function VRMSkeletonManager({
       _smoothArmBone('rua', tauArm);
       _smoothArmBone('leftShoulder', tauShoulder);
       _smoothArmBone('rightShoulder', tauShoulder);
+
+      // Mild outward / forward bias so conversational gestures read in camera space (anti torso-occlusion).
+      if (speaking && conversationalReachBiasApplied) {
+        const explainish =
+          rawG === 'explain' ||
+          rawG === 'wave' ||
+          rawG === 'point' ||
+          rawG === 'think' ||
+          rawG === 'agree';
+        const reachMul = explainish ? 1 : 0.62;
+        const applyCamReach = (key: 'rua' | 'lua', yawSign: number) => {
+          const q = gesturePose.get(key);
+          if (!q) return;
+          _CONV_REACH_E.set(
+            explainish ? 0.024 : 0.014,
+            yawSign * (explainish ? 0.058 : 0.036) * reachMul,
+            explainish ? -0.055 : -0.038,
+            'YXZ',
+          );
+          _CONV_REACH_Q.setFromEuler(_CONV_REACH_E);
+          q.multiply(_CONV_REACH_Q);
+          gesturePose.set(key, q);
+        };
+        applyCamReach('rua', 1);
+        applyCamReach('lua', -1);
+      }
     } else if (!isProceduralGestureFrame) {
       smoothedGestureArmRef.current.clear();
     }
