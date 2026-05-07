@@ -180,13 +180,14 @@ export function buildEmbodimentIntelligenceReport(): EmbodimentIntelligenceRepor
     confidence: c.confidence,
   }));
 
+  // shell.updatedAt is written with performance.now() — must compare on the same clock.
   const forensicBundle = assembleForensicStabilizationBundle({
     shell,
     timelineSnapshots: getRecentTimelineSnapshots(36),
     rawFailures: failures,
     behavioralChains,
     autonomous,
-    nowMs: Date.now(),
+    nowMs: typeof performance !== 'undefined' ? performance.now() : Date.now(),
   });
   _lastForensicBundle = forensicBundle;
   failures = forensicBundle.stabilizedFailures;
